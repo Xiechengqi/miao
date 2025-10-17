@@ -42,7 +42,7 @@ export function App() {
       {error && <div style={{ color: "crimson" }}>错误：{error}</div>}
       {!error && <div>{goRes}</div>}
 
-      <Config />
+      <Config key={goRes} />
     </>
   );
 }
