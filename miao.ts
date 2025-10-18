@@ -9,7 +9,7 @@ import db from "./db";
 const config = yaml.parse(await Bun.file("./miao.yaml").text());
 const port = config.port as number;
 const sing_box_home = config.sing_box_home as string;
-const loc = config.loc[0] as string;
+const loc = sing_box_home+"/config.json";
 const subs = config.subs as string[]
 const nodes = (config.nodes || []) as string[];
 

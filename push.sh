@@ -1,3 +1,1 @@
-rsync ./miao.ts root@192.168.64.1:/mnt/usb/miao
-rsync -r ./panel root@192.168.64.1:/mnt/usb/miao/
-rsync ./config.ts root@192.168.64.1:/mnt/usb/miao
+rsync --exclude=node_modules --exclude=sing-box --exclude=.env -r ./* root@192.168.64.1:/mnt/usb/miao

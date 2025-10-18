@@ -2,23 +2,14 @@ subs:
   - https://nacho-dy1.moelink.top/Nachoneko?k=9f4e5905974018b3af2c800f0e612a42
 
 sing_box_home:
-  /root/sing
+  /home/alice/pros/miao/sing-box
 
 port:
   6161
 
-wants:
-  - JP
-  - TW
-  - SG
-  - HK
-
-not_want:
-  - US
-  - UK
-
-loc:
-  - ./config.json
+rules:
+  direct_sites_link:
+    https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/direct-list.txt
 
 nodes:
   - '{"type":"anytls","tag":"nihong","server":"144.48.4.14","server_port":443,"password":"Dingzhenruike5.","tls":{"enabled":true,"insecure":true,"server_name":""}}'

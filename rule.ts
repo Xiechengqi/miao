@@ -1,39 +1,13 @@
-try {
-  await Bun.write(
-    "./files/direct.txt",
-    await fetch(
-      "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt",
-    ),
-  );
-  await Bun.write(
-    "./files/cnip.txt",
-    await fetch(
-      "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt",
-    ),
-  );
-} catch (e) {
-  console.error("ERROR on fetching rules.");
-}
+import yaml from "yaml";
+const config = yaml.parse(await Bun.file("./miao.yaml").text());
+const sing_box_home = config.sing_box_home as string;
+const direct_sites_link = config.rules.direct_sites_link as string;
 
-Promise.all([gen_direct(), gen_cnip()]);
+console.log(direct_sites_link);
 
-async function gen_cnip() {
-  const cnip_text = await Bun.file("./files/cnip.txt").text();
-  let arr = cnip_text.split("\n");
-  console.log(arr[0]);
-  arr.pop();
-  arr.shift();
-  arr = arr.map((x) => x.substring(x.indexOf("'") + 1, x.lastIndexOf("'")));
-  const rule_set = {
-    version: 3,
-    rules: [{ ip_cidr: [] }],
-  } as any;
-  for (const x of arr) {
-    rule_set.rules[0].ip_cidr.push(x);
-  }
-  await Bun.write("./files/cnip.json", JSON.stringify(rule_set));
-  await Bun.$`./sing-box/sing-box rule-set compile --output ./sing-box/chinaip.srs ./files/cnip.json`;
-}
+await Bun.write("/tmp/direct.txt", await fetch(direct_sites_link));
+gen_direct();
+
 
 type DomainSet = {
   rules: [
@@ -45,9 +19,8 @@ type DomainSet = {
   ];
   version: number;
 };
-
 async function gen_direct() {
-  const direct_text = await Bun.file("./files/direct.txt").text();
+  const direct_text = await Bun.file("/tmp/direct.txt").text();
   const direct_items = direct_text.split("\n");
 
   const direct_set: DomainSet = {
@@ -71,6 +44,18 @@ async function gen_direct() {
     }
   }
 
-  await Bun.write("./files/direct.json", JSON.stringify(direct_set));
-  await Bun.$`./sing-box/sing-box rule-set compile --output ./sing-box/chinasite.srs ./files/direct.json`;
+  await Bun.write("/tmp/direct.json", JSON.stringify(direct_set));
+  Bun.spawn({
+    cwd: sing_box_home,
+    cmd: ["sing-box", "rule-set", "compile", "--output", sing_box_home + "/chinasite.srs", "/tmp/direct.json"],
+    env: {
+      ...Bun.env,
+      PATH: `${Bun.env.PATH}:${sing_box_home}`
+    },
+    stdout: "inherit",
+    stderr: "inherit"
+  })
 }
+
+
+
