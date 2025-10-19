@@ -52,7 +52,7 @@ function get_config() {
     ],
     outbounds: [
       {
-        type: "selector",
+        type: "urltest",
         tag: "proxy",
         outbounds: [],
       },

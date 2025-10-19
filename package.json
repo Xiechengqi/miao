@@ -19,6 +19,7 @@
     "antd": "^5.27.5",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-syntax-highlighter": "^15.5.0",
     "yaml": "^2.8.1"
   }
 }

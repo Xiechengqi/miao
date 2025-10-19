@@ -114,11 +114,19 @@ Bun.serve({
         (await Bun.$`tail -n 50 ${sing_box_home}/box.log`).text(),
       );
     },
+    "/api/sing/status": async (req: Request) => {
+      const check = checkMethod(req, ["GET"]);
+      if (check) return check;
+      const running = !!(sing_process && !sing_process.killed);
+      return new Response(JSON.stringify({ running }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
     "/api/sing/action-records": async (req: Request) => {
       const check = checkMethod(req, ["GET"]);
       if (check) return check;
       const action_records = db
-        .query("select * from sing_record order by id desc;")
+        .query("select * from sing_record order by id desc limit 10;")
         .all();
       return new Response(JSON.stringify(action_records, null, 2), {
         headers: {
@@ -158,6 +166,24 @@ Bun.serve({
       if (check) return check;
       stop_sing();
       return new Response("stopped");
+    },
+    "/api/net-checks/manual": async (req: Request) => {
+      const check = checkMethod(req, ["POST"]);
+      if (check) return check;
+      try {
+        await check_connection();
+        const checks = db
+          .query("select * from checks order by id desc limit 10;")
+          .all();
+        return new Response(JSON.stringify(checks, null, 2), {
+          headers: {
+            "Content-Type": "application/json",
+          },
+        });
+      } catch (error) {
+        console.log(error);
+        return new Response("500", { status: 500 });
+      }
     },
   },
   development: true,
