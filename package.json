@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run miao.ts",
+    "dev": "bun run index.ts",
     "rule": "bun run rule.ts"
   },
   "devDependencies": {

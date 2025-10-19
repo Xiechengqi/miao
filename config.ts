@@ -1,7 +1,12 @@
 import type { SingBoxConfig } from "./types";
 function get_config() {
   const sing_box_config: SingBoxConfig = {
-    log: { disabled: true, level: "info" },
+    log: {
+      disabled: false,
+      output: "./box.log",
+      timestamp: true,
+      level: "info",
+    },
     experimental: {
       clash_api: {
         external_controller: "0.0.0.0:9090",
@@ -62,11 +67,6 @@ function get_config() {
         { protocol: "dns", action: "hijack-dns" },
         { ip_is_private: true, action: "route", outbound: "direct" },
         {
-          rule_set: ["chinaip"],
-          action: "route",
-          outbound: "direct",
-        },
-        {
           rule_set: ["chinasite"],
           action: "route",
           outbound: "direct",
@@ -79,18 +79,10 @@ function get_config() {
           format: "binary",
           path: "chinasite.srs",
         },
-        {
-          type: "local",
-          tag: "chinaip",
-          format: "binary",
-          path: "chinaip.srs",
-        },
       ],
     },
   };
   return sing_box_config;
-
 }
-
 
 export default get_config;
