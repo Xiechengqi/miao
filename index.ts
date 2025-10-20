@@ -4,6 +4,7 @@ import get_config from "./config";
 import fs from "fs/promises";
 import db from "./db";
 import panel from "./panel/index.html";
+import { gen_direct } from "./rule";
 
 // 从配置文件获取基础配置
 const config = yaml.parse(await Bun.file("./miao.yaml").text());
@@ -65,6 +66,17 @@ Bun.serve({
           "Content-Type": "application/json",
         },
       });
+    },
+    "/api/rule/generate": async () => {
+      try {
+        await gen_direct();
+        return new Response(
+          JSON.stringify(await fs.stat(sing_box_home + "/chinasite.srs")),
+        );
+      } catch (error) {
+        console.log(error);
+        return new Response("rule generation failed", { status: 500 });
+      }
     },
     "/api/config": async (req: Request) => {
       try {
@@ -161,7 +173,7 @@ Bun.serve({
       }
     },
   },
-  development: true,
+  development: false,
 });
 
 function record_sing(action: number) {

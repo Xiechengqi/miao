@@ -1,8 +1,19 @@
+export type DomainSet = {
+  rules: [
+    {
+      domain: string[];
+      domain_suffix: string[];
+      domain_regex: string[];
+    },
+  ];
+  version: number;
+};
+
 export type ClashProxy = {
   type: string;
   name: string;
   [k: string]: any;
-}
+};
 
 export type Outbound = {
   type: string;
