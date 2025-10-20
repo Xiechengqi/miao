@@ -10,3 +10,9 @@ export type Config = {
   config_stat: FileStat;
   config_content: string;
 };
+
+export type Node = {
+  tag: string;
+  type: string;
+  [k: string]: any;
+};

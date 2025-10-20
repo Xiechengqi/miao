@@ -161,7 +161,7 @@ Bun.serve({
       }
     },
   },
-  development: false,
+  development: true,
 });
 
 function record_sing(action: number) {

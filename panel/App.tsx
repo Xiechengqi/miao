@@ -3,7 +3,7 @@ import Control from "./Control";
 
 export default function () {
   return (
-    <div className="h-full w-full flex flex-col p-20">
+    <div className="h-full w-full flex flex-col gap-4 p-20">
       <Control />
       <Config />
     </div>
