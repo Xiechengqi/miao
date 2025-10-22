@@ -347,6 +347,15 @@ async fn start_sing_internal(state: &AppState) -> Result<()> {
 }
 
 async fn reload_nftables(config_path: &str) -> Result<()> {
+    // Check if nft command is available
+    let check_nft = tokio::process::Command::new("sh")
+        .args(&["-c", "command -v nft >/dev/null 2>&1"])
+        .status()
+        .await?;
+    if !check_nft.success() {
+        return Err("nft command not found, please install nftables package".into());
+    }
+
     // Flush ruleset
     let flush_status = tokio::process::Command::new("nft")
         .args(&["flush", "ruleset"])
