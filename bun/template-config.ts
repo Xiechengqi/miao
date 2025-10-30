@@ -78,10 +78,10 @@ function get_config() {
       ],
       rule_set: [
         {
-          type: "local",
+          type: "remote",
           tag: "chinasite",
           format: "binary",
-          path: "chinasite.srs",
+          url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs",
         },
         {
           type: "remote",

@@ -2,7 +2,6 @@ import type { Outbound, Anytls, Hysteria2, ClashProxy } from "./types";
 import yaml from "yaml";
 import get_config from "./template-config";
 import fs from "fs/promises";
-import { gen_direct } from "./rule";
 
 // 从配置文件获取基础配置
 const config = yaml.parse(await Bun.file("./miao.yaml").text());
@@ -18,17 +17,6 @@ await start_sing();
 Bun.serve({
   port,
   routes: {
-    "/api/rule/generate": async () => {
-      try {
-        await gen_direct();
-        return new Response(
-          JSON.stringify(await fs.stat(sing_box_home + "/chinasite.srs")),
-        );
-      } catch (error) {
-        console.log(error);
-        return new Response("rule generation failed", { status: 500 });
-      }
-    },
     "/api/config": async () => {
       try {
         const config_stat = await fs.stat(config_output_loc);

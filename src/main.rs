@@ -20,26 +20,6 @@ struct Config {
     sing_box_home: String,
     subs: Vec<String>,
     nodes: Vec<String>,
-    rules: Rules,
-}
-
-#[derive(Clone, Deserialize)]
-struct Rules {
-    direct_txt: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DomainSet {
-    rules: Vec<Rule>,
-    version: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Rule {
-    domain: Vec<String>,
-    domain_suffix: Vec<String>,
-    domain_regex: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,7 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app_state = Arc::new(config);
     let app = Router::new()
         .route("/", get(serve_index))
-        .route("/api/rule/generate", get(generate_rule))
         .route("/api/config", get(get_config_handler))
         .route("/api/config/generate", get(generate_config_handler))
         .route("/api/sing/restart", post(restart_sing))
@@ -104,85 +83,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn generate_rule(
-    State(config): State<Arc<Config>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match gen_direct(&*config).await {
-        Ok(stat) => Ok(Json(stat)),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Rule generation failed: {}", e),
-        )),
-    }
-}
-
-async fn gen_direct(
-    config: &Config,
-) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let sing_box_home = &config.sing_box_home;
-    let direct_txt_url = &config.rules.direct_txt;
-    let res = reqwest::get(direct_txt_url).await?;
-    let text = res.text().await?;
-    tokio::fs::write(format!("{}/direct.txt", sing_box_home), &text).await?;
-    let direct_items: Vec<String> = text.lines().map(|s| s.to_string()).collect();
-    let mut domain_set = DomainSet {
-        rules: vec![Rule {
-            domain: vec![],
-            domain_suffix: vec![],
-            domain_regex: vec![],
-        }],
-        version: 3,
-    };
-    for item in direct_items {
-        if item.starts_with("full:") {
-            domain_set.rules[0].domain.push(item[5..].to_string());
-        } else if item.starts_with("regexp:") {
-            domain_set.rules[0].domain_regex.push(item[7..].to_string());
-        } else if !item.is_empty() {
-            domain_set.rules[0].domain_suffix.push(item);
-        }
-    }
-    let json = serde_json::to_string(&domain_set)?;
-    tokio::fs::write(format!("{}/direct.json", sing_box_home), json).await?;
-    let chinasite = format!("{}/chinasite.srs", sing_box_home);
-    if tokio::fs::try_exists(&chinasite).await? {
-        tokio::fs::copy(&chinasite, format!("{}/chinasite.srs.bak", sing_box_home)).await?;
-    }
-    let mut cmd = tokio::process::Command::new("sing-box")
-        .current_dir(sing_box_home)
-        .arg("rule-set")
-        .arg("compile")
-        .arg("--output")
-        .arg(&chinasite)
-        .arg(format!("{}/direct.json", sing_box_home))
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                std::env::var("PATH").unwrap_or_default(),
-                sing_box_home
-            ),
-        )
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-    let status = cmd.wait().await?;
-    if !status.success() {
-        if tokio::fs::try_exists(&format!("{}/chinasite.srs.bak", sing_box_home)).await? {
-            tokio::fs::copy(format!("{}/chinasite.srs.bak", sing_box_home), &chinasite).await?;
-        } else {
-            tokio::fs::remove_file(&chinasite).await.ok();
-        }
-        return Err("Failed to compile rule set".into());
-    }
-    let stat = tokio::fs::metadata(&chinasite).await?;
-    Ok(serde_json::json!({
-        "size": stat.len(),
-        "modified": stat.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        "created": stat.created().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-    }))
 }
 
 async fn get_config_handler(
@@ -299,7 +199,7 @@ fn get_config_template() -> serde_json::Value {
                 {"rule_set": ["chinaip"], "action": "route", "outbound": "direct"}
             ],
             "rule_set": [
-                {"type": "local", "tag": "chinasite", "format": "binary", "path": "chinasite.srs"},
+                {"type": "remote", "tag": "chinasite", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"},
                 {"type": "remote", "tag": "chinaip", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
             ]
         }
