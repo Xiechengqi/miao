@@ -32,7 +32,6 @@ struct DomainSet {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Rule {
     domain: Vec<String>,
     domain_suffix: Vec<String>,
