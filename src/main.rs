@@ -1,7 +1,7 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::Json,
+    response::{Html, Json},
     routing::{get, post},
     Router,
 };
@@ -9,6 +9,10 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+async fn serve_index() -> Html<&'static str> {
+    Html(include_str!("../public/index.html"))
+}
 
 #[derive(Clone, Deserialize)]
 struct Config {
@@ -88,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app_state = Arc::new(config);
     let app = Router::new()
+        .route("/", get(serve_index))
         .route("/api/rule/generate", get(generate_rule))
         .route("/api/config", get(get_config_handler))
         .route("/api/config/generate", get(generate_config_handler))
