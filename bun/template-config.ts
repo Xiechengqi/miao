@@ -2,8 +2,7 @@ import type { SingBoxConfig } from "./types";
 function get_config() {
   const sing_box_config: SingBoxConfig = {
     log: {
-      disabled: true,
-      output: "./box.log",
+      disabled: false,
       timestamp: true,
       level: "info",
     },
@@ -67,12 +66,12 @@ function get_config() {
         { protocol: "dns", action: "hijack-dns" },
         { ip_is_private: true, action: "route", outbound: "direct" },
         {
-          process_path: ["/usr/bin/qbittorrent", "/usr/bin/NetworkManager"],
+          rule_set: ["chinasite"],
           action: "route",
           outbound: "direct",
         },
         {
-          rule_set: ["chinasite"],
+          rule_set: ["chinaip"],
           action: "route",
           outbound: "direct",
         },
@@ -83,6 +82,12 @@ function get_config() {
           tag: "chinasite",
           format: "binary",
           path: "chinasite.srs",
+        },
+        {
+          type: "remote",
+          tag: "chinaip",
+          format: "binary",
+          url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
         },
       ],
     },

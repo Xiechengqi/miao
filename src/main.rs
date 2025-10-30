@@ -1,37 +1,22 @@
-use axum::extract::State;
 use axum::{
+    extract::State,
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::Json,
     routing::{get, post},
     Router,
 };
-use clap::Parser;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::process::Child;
-use tokio::sync::RwLock;
-
-#[derive(Parser)]
-struct Args {
-    /// Path to the config file (default: miao.yaml)
-    #[arg(short, long, default_value = "miao.yaml")]
-    config: String,
-    /// Port to listen on (default: 6161)
-    #[arg(short, long, default_value = "6161")]
-    port: u16,
-}
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+use tokio::sync::Mutex;
 
 #[derive(Clone, Deserialize)]
 struct Config {
+    port: u16,
+    sing_box_home: String,
     subs: Vec<String>,
-    sing_box_home: Option<String>,
-    nodes: Option<Vec<String>>,
-    rules: Option<Rules>,
-    port: Option<u16>,
+    nodes: Vec<String>,
+    rules: Rules,
 }
 
 #[derive(Clone, Deserialize)]
@@ -39,462 +24,107 @@ struct Rules {
     direct_txt: String,
 }
 
-#[derive(Clone)]
-struct AppState {
-    config: Config,
-    sing_box_process: Arc<RwLock<Option<Child>>>,
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DomainSet {
+    rules: Vec<Rule>,
+    version: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Rule {
+    domain: Vec<String>,
+    domain_suffix: Vec<String>,
+    domain_regex: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Anytls {
+    #[serde(rename = "type")]
+    outbound_type: String,
+    tag: String,
+    server: String,
+    server_port: u16,
+    password: String,
+    tls: Tls,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Hysteria2 {
+    #[serde(rename = "type")]
+    outbound_type: String,
+    tag: String,
+    server: String,
+    server_port: u16,
+    password: String,
+    up_mbps: u32,
+    down_mbps: u32,
+    tls: Tls,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Tls {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_name: Option<String>,
+    insecure: bool,
+}
+
+
+
+lazy_static! {
+    static ref SING_PROCESS: Mutex<Option<tokio::process::Child>> = Mutex::new(None);
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
-    let content = tokio::fs::read_to_string(&args.config).await?;
-    let mut config: Config = serde_yaml::from_str(&content)?;
-    let port = config.port.unwrap_or(args.port);
-    config.port = Some(port);
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config: Config =
+        serde_yaml::from_str(&tokio::fs::read_to_string("miao.yaml").await?)?;
+    let port = config.port;
+    let sing_box_home = config.sing_box_home.clone();
 
-    let state = AppState {
-        config: config.clone(),
-        sing_box_process: Arc::new(RwLock::new(None)),
-    };
+    // Generate initial config
+    gen_config(&config).await?;
 
-    // Reload nftables rules from default paths
-    let nft_paths = ["/etc/nftables.d", "/etc/nftables.conf"];
-    let mut nft_loaded = false;
-    for &path in &nft_paths {
-        if tokio::fs::metadata(path).await.is_ok() {
-            println!("Flushing and reloading nftables rules from {}", path);
-            if let Err(e) = reload_nftables(path).await {
-                eprintln!("Failed to reload nftables: {}", e);
-                std::process::exit(1);
-            }
-            nft_loaded = true;
-            break;
-        }
-    }
-    if !nft_loaded {
-        eprintln!("No nftables config found at /etc/nftables.d or /etc/nftables.conf, exiting");
-        std::process::exit(1);
-    }
-
-    // Generate config and start sing-box at startup
-    println!("Generating config...");
-    if let Err(e) = gen_config(&config).await {
-        eprintln!("Failed to generate config: {}", e);
-        std::process::exit(1);
-    }
-    println!("Starting sing-box...");
-    if let Err(e) = start_sing_internal(&state).await {
+    // Start sing if possible
+    if let Err(e) = start_sing(&sing_box_home).await {
         eprintln!("Failed to start sing-box: {}", e);
-        std::process::exit(1);
     }
-    println!("Sing-box started successfully.");
 
-    let state_arc = Arc::new(state);
+    let app_state = Arc::new(config);
     let app = Router::new()
-        .route("/api/rule/generate", post(rule_generate))
-        .route("/api/config", get(get_config))
-        .route("/api/config/generate", post(generate_config))
+        .route("/api/rule/generate", get(generate_rule))
+        .route("/api/config", get(get_config_handler))
+        .route("/api/config/generate", get(generate_config_handler))
         .route("/api/sing/log-live", get(log_live))
-        .route("/api/sing/restart", post(sing_restart))
-        .route("/api/sing/start", post(sing_start))
-        .route("/api/sing/stop", post(sing_stop))
-        .route("/api/net-checks/manual", get(net_check_manual))
-        .with_state(state_arc.clone());
+        .route("/api/sing/restart", post(restart_sing))
+        .route("/api/sing/start", post(start_sing_handler))
+        .route("/api/sing/stop", post(stop_sing_handler))
+        .route("/api/net-checks/manual", get(net_check))
+        .with_state(app_state);
 
-    // Background task every 12 hours: regenerate config, regenerate rules, then restart sing-box
-    {
-        let state_clone = state_arc.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(12 * 3600));
-            interval.tick().await; // First tick is immediate, skip it
-            loop {
-                interval.tick().await;
-                let is_running = state_clone.sing_box_process.read().await.is_some();
-                if is_running {
-                    // Regenerate config
-                    if let Err(e) = gen_config(&state_clone.config).await {
-                        eprintln!("Failed to regenerate config: {}", e);
-                        continue;
-                    }
-                    println!("Config regenerated successfully");
-
-                    // Regenerate rules
-                    if let Err(e) = gen_rule(&state_clone.config).await {
-                        eprintln!("Failed to regenerate rules: {}", e);
-                        continue;
-                    }
-                    println!("Rules regenerated successfully");
-
-                    // Restart sing-box
-                    stop_sing_internal(&state_clone).await;
-                    if let Err(e) = start_sing_internal(&state_clone).await {
-                        eprintln!("Failed to restart sing-box: {}", e);
-                    } else {
-                        println!("Sing-box restarted successfully");
-                    }
-                }
-            }
-        });
-    }
-
-    let addr = format!("0.0.0.0:{}", port);
-    println!("Starting server on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn rule_generate(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match gen_rule(&state.config).await {
-        Ok(stat) => (StatusCode::OK, Json(stat)),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
+async fn generate_rule(State(config): State<Arc<Config>>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match gen_direct(&*config).await {
+        Ok(stat) => Ok(Json(stat)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Rule generation failed: {}", e))),
     }
 }
 
-async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let home = state
-        .config
-        .sing_box_home
-        .as_ref()
-        .map_or(".", |s| s.as_str());
-    let loc = format!("{}/config.json", home);
-    match tokio::fs::metadata(&loc).await {
-        Ok(stat) => match tokio::fs::read_to_string(&loc).await {
-            Ok(content) => {
-                let stat_json = json!({
-                    "size": stat.len(),
-                    "modified": stat.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_secs()
-                });
-                let content_value: serde_json::Value =
-                    serde_json::from_str(&content).unwrap_or(json!({}));
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "config_stat": stat_json,
-                        "config_content": content_value
-                    })),
-                )
-            }
-            Err(_) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "config file not found" })),
-            ),
-        },
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "config file not found" })),
-        ),
-    }
-}
-
-async fn generate_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match gen_config(&state.config).await {
-        Ok(_) => {
-            let home = state
-                .config
-                .sing_box_home
-                .as_ref()
-                .map_or(".", |s| s.as_str());
-            let loc = format!("{}/config.json", home);
-            match tokio::fs::read_to_string(&loc).await {
-                Ok(content) => (StatusCode::OK, Json(json!({ "config": content }))),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                ),
-            }
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-async fn log_live(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let home = state
-        .config
-        .sing_box_home
-        .as_ref()
-        .map_or(".", |s| s.as_str());
-    let log_path = format!("{}/box.log", home);
-    match tokio::process::Command::new("tail")
-        .args(&["-n", "50", &log_path])
-        .output()
-        .await
-    {
-        Ok(output) => (
-            StatusCode::OK,
-            Json(json!(String::from_utf8_lossy(&output.stdout))),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-async fn sing_restart(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    stop_sing_internal(&state).await;
-    match start_sing_internal(&state).await {
-        Ok(_) => (StatusCode::OK, Json(json!("ok"))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-async fn sing_start(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let running = state.sing_box_process.read().await.is_some();
-    if running {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "sing box is already running" })),
-        );
-    }
-    match start_sing_internal(&state).await {
-        Ok(_) => (StatusCode::OK, Json(json!("ok"))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-async fn sing_stop(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    stop_sing_internal(&state).await;
-    (StatusCode::OK, Json(json!("stopped")))
-}
-
-async fn net_check_manual(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    match check_connection().await {
-        Ok(_) => (StatusCode::OK, Json(json!("ok"))),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!("not ok"))),
-    }
-}
-
-async fn stop_sing_internal(state: &AppState) {
-    let mut proc = state.sing_box_process.write().await;
-    if let Some(ref mut child) = *proc {
-        if let Some(pid) = child.id() {
-            // Send SIGTERM
-            let _ = tokio::process::Command::new("kill")
-                .args(&["-TERM", &pid.to_string()])
-                .status()
-                .await;
-            // Wait up to 10 seconds for graceful shutdown
-            let timeout_result =
-                tokio::time::timeout(tokio::time::Duration::from_secs(10), child.wait()).await;
-            match timeout_result {
-                Ok(Ok(_)) => {} // Process exited gracefully
-                _ => {
-                    // Force kill with SIGKILL
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
-        } else {
-            // Fallback if PID not available
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
-        *proc = None;
-    }
-}
-
-async fn start_sing_internal(state: &AppState) -> Result<()> {
-    let mut proc = state.sing_box_process.write().await;
-    if proc.is_some() {
-        return Err("already running".into());
-    }
-
-    let home = state
-        .config
-        .sing_box_home
-        .as_ref()
-        .map_or(".", |s| s.as_str());
-    let path = format!("{}/sing-box", home);
-    let mut child = tokio::process::Command::new(&path)
-        .args(&["run", "-c", "config.json"])
-        .current_dir(home)
-        .env(
-            "PATH",
-            format!("{}:{}", home, std::env::var("PATH").unwrap_or_default()),
-        )
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
-    match child.try_wait() {
-        Ok(Some(_)) => return Err("sing box failed to start".into()),
-        Ok(None) => {
-            *proc = Some(child);
-            if check_connection().await.is_ok() {
-                Ok(())
-            } else {
-                stop_sing_internal(state).await;
-                Err("sing box started but failed to connect to internet".into())
-            }
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-async fn reload_nftables(config_path: &str) -> Result<()> {
-    // Check if nft command is available
-    let check_nft = tokio::process::Command::new("sh")
-        .args(&["-c", "command -v nft >/dev/null 2>&1"])
-        .status()
-        .await?;
-    if !check_nft.success() {
-        return Err("nft command not found, please install nftables package".into());
-    }
-
-    // Flush ruleset
-    let flush_status = tokio::process::Command::new("nft")
-        .args(&["flush", "ruleset"])
-        .status()
-        .await?;
-    if !flush_status.success() {
-        return Err("Failed to flush nftables ruleset".into());
-    }
-
-    // Check if config_path is a directory
-    let metadata = tokio::fs::metadata(config_path).await?;
-    if metadata.is_dir() {
-        // Load all .nft files in the directory, sorted by name
-        let mut dir_entries = tokio::fs::read_dir(config_path).await?;
-        let mut nft_files = Vec::new();
-        while let Some(entry) = dir_entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension() == Some(std::ffi::OsStr::new("nft")) && path.file_name().is_some() {
-                nft_files.push(path);
-            }
-        }
-        // Sort by filename for consistent loading order
-        nft_files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-
-        for file_path in nft_files {
-            let reload_status = tokio::process::Command::new("nft")
-                .args(&["-f", &file_path.to_string_lossy()])
-                .status()
-                .await?;
-            if !reload_status.success() {
-                return Err(
-                    format!("Failed to reload nftables from {}", file_path.display()).into(),
-                );
-            }
-        }
-    } else {
-        // Treat as single config file
-        let reload_status = tokio::process::Command::new("nft")
-            .args(&["-f", config_path])
-            .status()
-            .await?;
-        if !reload_status.success() {
-            return Err(format!("Failed to reload nftables from {}", config_path).into());
-        }
-    }
-
-    Ok(())
-}
-
-async fn check_connection() -> Result<()> {
-    let client = reqwest::Client::new();
-    let res = client
-        .get("https://gstatic.com/generate_204")
-        .send()
-        .await?;
-    if res.status().as_u16() == 204 {
-        Ok(())
-    } else {
-        Err("Connection check failed".into())
-    }
-}
-
-async fn gen_config(config: &Config) -> Result<()> {
-    let mut my_outbounds: Vec<serde_json::Value> = vec![];
-    if let Some(nodes) = &config.nodes {
-        for node in nodes {
-            let outbound: serde_json::Value = serde_json::from_str(node)?;
-            my_outbounds.push(outbound);
-        }
-    }
-    println!("Custom outbounds parsed: {}", my_outbounds.len());
-
-    let mut final_outbounds: Vec<serde_json::Value> = vec![];
-    let mut final_node_names: Vec<String> = vec![];
-    for sub in &config.subs {
-        let (node_names, outbounds) = fetch_sub(sub).await?;
-        final_node_names.extend(node_names);
-        final_outbounds.extend(outbounds);
-    }
-    println!("Fetched {} nodes from subscriptions", final_outbounds.len());
-
-    let mut sing_box_config = get_sing_box_config();
-    if let Some(proxy_outbound) = sing_box_config.outbounds.get_mut(0) {
-        if let Some(outbounds_array) = proxy_outbound
-            .get_mut("outbounds")
-            .and_then(|v| v.as_array_mut())
-        {
-            let my_names: Vec<serde_json::Value> = my_outbounds
-                .iter()
-                .filter_map(|v| get_outbound_tag(v))
-                .map(|tag| json!(tag))
-                .collect();
-            outbounds_array.extend(my_names);
-            let final_names: Vec<serde_json::Value> =
-                final_node_names.iter().map(|name| json!(name)).collect();
-            outbounds_array.extend(final_names);
-        }
-    }
-
-    sing_box_config.outbounds.extend(my_outbounds);
-    sing_box_config.outbounds.extend(final_outbounds);
-
-    let home = config.sing_box_home.as_ref().map_or(".", |s| s.as_str());
-    let loc = format!("{}/config.json", home);
-    tokio::fs::create_dir_all(
-        std::path::Path::new(&loc)
-            .parent()
-            .unwrap_or(std::path::Path::new(".")),
-    )
-    .await?;
-    let content = serde_json::to_string_pretty(&sing_box_config)?;
-    tokio::fs::write(&loc, content).await?;
-    println!("Config file written to {}", loc);
-    Ok(())
-}
-
-async fn gen_rule(config: &Config) -> Result<serde_json::Value> {
-    let rules = config.rules.as_ref().ok_or("rules not configured")?;
-    let client = reqwest::Client::new();
-    let res = client.get(&rules.direct_txt).send().await?;
+async fn gen_direct(config: &Config) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let sing_box_home = &config.sing_box_home;
+    let direct_txt_url = &config.rules.direct_txt;
+    let res = reqwest::get(direct_txt_url).await?;
     let text = res.text().await?;
-    tokio::fs::write("direct.txt", &text).await?;
-    let direct_items: Vec<&str> = text.lines().collect();
-
-    #[derive(Serialize)]
-    struct DomainSet {
-        rules: Vec<DomainRules>,
-        version: u32,
-    }
-
-    #[derive(Serialize)]
-    struct DomainRules {
-        domain: Vec<String>,
-        domain_suffix: Vec<String>,
-        domain_regex: Vec<String>,
-    }
-
+    tokio::fs::write(format!("{}/direct.txt", sing_box_home), &text).await?;
+    let direct_items: Vec<String> = text.lines().map(|s| s.to_string()).collect();
     let mut domain_set = DomainSet {
-        rules: vec![DomainRules {
+        rules: vec![Rule {
             domain: vec![],
             domain_suffix: vec![],
             domain_regex: vec![],
@@ -503,346 +133,285 @@ async fn gen_rule(config: &Config) -> Result<serde_json::Value> {
     };
     for item in direct_items {
         if item.starts_with("full:") {
-            domain_set.rules[0].domain.push(item.replace("full:", ""));
+            domain_set.rules[0].domain.push(item[5..].to_string());
         } else if item.starts_with("regexp:") {
-            domain_set.rules[0]
-                .domain_regex
-                .push(item.replace("regexp:", ""));
+            domain_set.rules[0].domain_regex.push(item[7..].to_string());
         } else if !item.is_empty() {
-            domain_set.rules[0].domain_suffix.push(item.to_string());
+            domain_set.rules[0].domain_suffix.push(item);
         }
     }
-    let json_content = serde_json::to_string(&domain_set)?;
-    tokio::fs::write("direct.json", json_content).await?;
-    let home = config.sing_box_home.as_ref().map_or(".", |s| s.as_str());
-    if std::fs::metadata(format!("{}/chinasite.srs", home)).is_ok() {
-        tokio::fs::copy(
-            format!("{}/chinasite.srs", home),
-            format!("{}/chinasite.srs.bak", home),
-        )
-        .await?;
+    let json = serde_json::to_string(&domain_set)?;
+    tokio::fs::write(format!("{}/direct.json", sing_box_home), json).await?;
+    let chinasite = format!("{}/chinasite.srs", sing_box_home);
+    if tokio::fs::try_exists(&chinasite).await? {
+        tokio::fs::copy(&chinasite, format!("{}/chinasite.srs.bak", sing_box_home)).await?;
     }
-    let mut cmd = tokio::process::Command::new(format!("{}/sing-box", home))
-        .args(&[
-            "rule-set",
-            "compile",
-            "--output",
-            &format!("{}/chinasite.srs", home),
-            "direct.json",
-        ])
-        .current_dir(home)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+    let mut cmd = tokio::process::Command::new("sing-box")
+        .current_dir(sing_box_home)
+        .arg("rule-set")
+        .arg("compile")
+        .arg("--output")
+        .arg(&chinasite)
+        .arg(format!("{}/direct.json", sing_box_home))
+        .env("PATH", format!("{}:{}", std::env::var("PATH").unwrap_or_default(), sing_box_home))
         .spawn()?;
     let status = cmd.wait().await?;
-    if status.success() {
-        let metadata = tokio::fs::metadata(format!("{}/chinasite.srs", home)).await?;
-        Ok(json!({
-            "size": metadata.len(),
-            "modified": metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_secs()
-        }))
-    } else {
-        if std::fs::metadata(format!("{}/chinasite.srs.bak", home)).is_ok() {
-            tokio::fs::copy(
-                format!("{}/chinasite.srs.bak", home),
-                format!("{}/chinasite.srs", home),
-            )
-            .await?;
+    if !status.success() {
+        if tokio::fs::try_exists(&format!("{}/chinasite.srs.bak", sing_box_home)).await? {
+            tokio::fs::copy(format!("{}/chinasite.srs.bak", sing_box_home), &chinasite).await?;
+        } else {
+            tokio::fs::remove_file(&chinasite).await.ok();
         }
-        Err("Failed to compile rule set".into())
+        return Err("Failed to compile rule set".into());
+    }
+    let stat = tokio::fs::metadata(&chinasite).await?;
+    Ok(serde_json::json!({
+        "size": stat.len(),
+        "modified": stat.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        "created": stat.created().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+    }))
+}
+
+async fn get_config_handler(State(config): State<Arc<Config>>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config_output_loc = format!("{}/config.json", config.sing_box_home);
+    let stat = tokio::fs::metadata(&config_output_loc).await.map_err(|_| (StatusCode::NOT_FOUND, "config file not found".to_string()))?;
+    let config_content = tokio::fs::read_to_string(&config_output_loc).await.map_err(|_| (StatusCode::NOT_FOUND, "config file not found".to_string()))?;
+    let config_json: serde_json::Value = serde_json::from_str(&config_content).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "config_stat": serde_json::json!({
+            "size": stat.len(),
+            "modified": stat.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            "created": stat.created().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        }),
+        "config_content": serde_json::to_string_pretty(&config_json).unwrap()
+    })))
+}
+
+async fn generate_config_handler(State(config): State<Arc<Config>>) -> Result<axum::response::Response, (StatusCode, String)> {
+    match gen_config(&*config).await {
+        Ok(_) => {
+            let config_output_loc = format!("{}/config.json", config.sing_box_home);
+            let file = tokio::fs::read(&config_output_loc).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(axum::response::Response::new(axum::body::Body::from(file)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
 
-async fn fetch_sub(link: &str) -> Result<(Vec<String>, Vec<serde_json::Value>)> {
-    let client = reqwest::Client::new();
-    let res = client
-        .get(link)
-        .header("User-Agent", "clash-meta")
-        .send()
-        .await?;
-    let text = res.text().await?;
-    let clash: ClashConfig = serde_yaml::from_str(&text)?;
-    println!("Fetched {} proxies from {}", clash.proxies.len(), link);
-    let nodes: Vec<ClashProxy> = clash
-        .proxies
-        .into_iter()
-        .filter(|p| p.name.contains("JP") || p.name.contains("TW") || p.name.contains("SG"))
+async fn gen_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let my_outbounds: Vec<serde_json::Value> = config.nodes.iter()
+        .filter_map(|s| serde_json::from_str(s).ok())
         .collect();
-    println!("Filtered {} nodes (JP/TW/SG)", nodes.len());
+    let my_names: Vec<String> = my_outbounds.iter()
+        .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    let mut final_outbounds: Vec<serde_json::Value> = vec![];
+    let mut final_node_names: Vec<String> = vec![];
+    for sub in &config.subs {
+        let (node_names, outbounds) = fetch_sub(sub).await?;
+        final_node_names.extend(node_names);
+        final_outbounds.extend(outbounds);
+    }
+    let mut sing_box_config = get_config_template();
+    if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
+        if let Some(arr) = outbounds.as_array_mut() {
+            arr.extend(my_names.into_iter().chain(final_node_names.into_iter()).map(|s| serde_json::Value::String(s)));
+        }
+    }
+    if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
+        arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
+    }
+    let config_output_loc = format!("{}/config.json", config.sing_box_home);
+    tokio::fs::write(&config_output_loc, serde_json::to_string_pretty(&sing_box_config)?).await?;
+    println!("Generated config: {}", serde_json::to_string_pretty(&sing_box_config).unwrap());
+    Ok(())
+}
 
+fn get_config_template() -> serde_json::Value {
+    serde_json::json!({
+        "log": {"disabled": false, "timestamp": true, "level": "info"},
+        "experimental": {"clash_api": {"external_controller": "0.0.0.0:9090", "external_ui": "dashboard"}},
+        "dns": {
+            "final": "googledns",
+            "strategy": "prefer_ipv4",
+            "independent_cache": true,
+            "servers": [
+                {"type": "udp", "tag": "googledns", "server": "8.8.8.8", "detour": "proxy"},
+                {"tag": "local", "type": "udp", "server": "223.5.5.5"}
+            ],
+            "rules": [{"rule_set": ["chinasite"], "action": "route", "server": "local"}]
+        },
+        "inbounds": [
+            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true}
+        ],
+        "outbounds": [
+            {"type": "urltest", "tag": "proxy", "outbounds": []},
+            {"type": "direct", "tag": "direct"}
+        ],
+        "route": {
+            "final": "proxy",
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local",
+            "rules": [
+                {"action": "sniff"},
+                {"protocol": "dns", "action": "hijack-dns"},
+                {"ip_is_private": true, "action": "route", "outbound": "direct"},
+                {"rule_set": ["chinasite"], "action": "route", "outbound": "direct"},
+                {"rule_set": ["chinaip"], "action": "route", "outbound": "direct"}
+            ],
+            "rule_set": [
+                {"type": "local", "tag": "chinasite", "format": "binary", "path": "chinasite.srs"},
+                {"type": "remote", "tag": "chinaip", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
+            ]
+        }
+    })
+}
+
+async fn fetch_sub(link: &str) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::new();
+    let res = client.get(link).header("User-Agent", "clash-meta").send().await?;
+    let text = res.text().await?;
+    let clash_obj: serde_yaml::Value = serde_yaml::from_str(&text)?;
+    let proxies = clash_obj.get("proxies").and_then(|p| p.as_sequence()).unwrap_or(&vec![]).clone();
+    let nodes: Vec<serde_yaml::Value> = proxies.into_iter()
+        .filter(|p| p.get("name").and_then(|n| n.as_str()).map(|n| n.contains("JP") || n.contains("日本")).unwrap_or(false))
+        .collect();
     let mut node_names = vec![];
-    let mut outbounds: Vec<serde_json::Value> = vec![];
+    let mut outbounds = vec![];
     for node in nodes {
-        match node.proxy_type.as_str() {
+        let typ = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let name = node.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        match typ {
             "anytls" => {
-                println!("Converting anytls node: {}", node.name);
-                let outbound = json!({
-                    "type": "anytls",
-                    "tag": node.name,
-                    "server": node.server,
-                    "server_port": node.server_port,
-                    "password": node.password,
-                    "tls": {
-                        "enabled": true,
-                        "server_name": node.sni,
-                        "insecure": node.skip_cert_verify.unwrap_or(true)
-                    }
-                });
-                node_names.push(node.name);
-                outbounds.push(outbound);
+                let anytls = Anytls {
+                    outbound_type: "anytls".to_string(),
+                    tag: name.to_string(),
+                    server: node.get("server").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
+                    password: node.get("password").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                    tls: Tls {
+                        enabled: true,
+                        server_name: node.get("sni").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                        insecure: node.get("skip-cert-verify").and_then(|s| s.as_bool()).unwrap_or(false),
+                    },
+                };
+                node_names.push(name.to_string());
+                outbounds.push(serde_json::to_value(anytls)?);
             }
             "hysteria2" => {
-                println!("Converting hysteria2 node: {}", node.name);
-                let outbound = json!({
-                    "type": "hysteria2",
-                    "tag": node.name,
-                    "server": node.server,
-                    "server_port": node.server_port,
-                    "password": node.password,
-                    "up_mbps": 40,
-                    "down_mbps": 350,
-                    "tls": {
-                        "enabled": true,
-                        "server_name": node.sni,
-                        "insecure": true
-                    }
-                });
-                node_names.push(node.name);
-                outbounds.push(outbound);
+                let hysteria2 = Hysteria2 {
+                    outbound_type: "hysteria2".to_string(),
+                    tag: name.to_string(),
+                    server: node.get("server").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
+                    password: node.get("password").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                    up_mbps: 40,
+                    down_mbps: 350,
+                    tls: Tls {
+                        enabled: true,
+                        server_name: node.get("sni").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                        insecure: true,
+                    },
+                };
+                node_names.push(name.to_string());
+                outbounds.push(serde_json::to_value(hysteria2)?);
             }
-            _ => {
-                println!("Skipping node: {} ({})", node.name, node.proxy_type);
-            }
+            _ => {}
         }
     }
     Ok((node_names, outbounds))
 }
 
-fn get_sing_box_config() -> SingBoxConfig {
-    SingBoxConfig {
-        log: Log {
-            disabled: true,
-            output: "./box.log".to_string(),
-            timestamp: true,
-            level: "info".to_string(),
-        },
-        experimental: Experimental {
-            clash_api: ClashApi {
-                external_controller: "0.0.0.0:9090".to_string(),
-                external_ui: "dashboard".to_string(),
-            },
-        },
-        dns: Dns {
-            r#final: "googledns".to_string(),
-            strategy: "prefer_ipv4".to_string(),
-            independent_cache: true,
-            servers: vec![
-                DnsServer {
-                    _type: "udp".to_string(),
-                    tag: "googledns".to_string(),
-                    server: "8.8.8.8".to_string(),
-                    detour: Some("proxy".to_string()),
-                },
-                DnsServer {
-                    _type: "udp".to_string(),
-                    tag: "local".to_string(),
-                    server: "223.5.5.5".to_string(),
-                    detour: None,
-                },
-            ],
-            rules: vec![DnsRule {
-                rule_set: vec!["chinasite".to_string()],
-                action: "route".to_string(),
-                server: Some("local".to_string()),
-            }],
-        },
-        inbounds: vec![Inbound {
-            _type: "tun".to_string(),
-            tag: "tun-in".to_string(),
-            interface_name: "sing-tun".to_string(),
-            address: vec!["172.18.0.1/30".to_string()],
-            mtu: 9000,
-            auto_route: true,
-            strict_route: true,
-            auto_redirect: true,
-        }],
-        outbounds: vec![
-            serde_json::json!({
-                "type": "urltest",
-                "tag": "proxy",
-                "outbounds": []
-            }),
-            serde_json::json!({
-                "type": "direct",
-                "tag": "direct"
-            }),
-        ],
-        route: Route {
-            r#final: "proxy".to_string(),
-            auto_detect_interface: true,
-            default_domain_resolver: "local".to_string(),
-            rules: vec![
-                RouteRule {
-                    action: "sniff".to_string(),
-                    ..Default::default()
-                },
-                RouteRule {
-                    protocol: Some("dns".to_string()),
-                    action: "hijack-dns".to_string(),
-                    ..Default::default()
-                },
-                RouteRule {
-                    ip_is_private: Some(true),
-                    action: "route".to_string(),
-                    outbound: Some("direct".to_string()),
-                    ..Default::default()
-                },
-                RouteRule {
-                    process_path: Some(vec![
-                        "/usr/bin/qbittorrent".to_string(),
-                        "/usr/bin/NetworkManager".to_string(),
-                    ]),
-                    action: "route".to_string(),
-                    outbound: Some("direct".to_string()),
-                    ..Default::default()
-                },
-                RouteRule {
-                    rule_set: Some(vec!["chinasite".to_string()]),
-                    action: "route".to_string(),
-                    outbound: Some("direct".to_string()),
-                    ..Default::default()
-                },
-            ],
-            rule_set: vec![RuleSet {
-                _type: "local".to_string(),
-                tag: "chinasite".to_string(),
-                format: "binary".to_string(),
-                path: "chinasite.srs".to_string(),
-            }],
-        },
+async fn log_live(State(config): State<Arc<Config>>) -> Result<String, (StatusCode, String)> {
+    let mut lock = SING_PROCESS.lock().await;
+    if lock.is_none() || lock.as_mut().unwrap().try_wait().unwrap().is_some() {
+        return Err((StatusCode::NOT_FOUND, "not running".to_string()));
+    }
+    let output = tokio::process::Command::new("tail")
+        .arg("-n")
+        .arg("50")
+        .arg(format!("{}/box.log", config.sing_box_home))
+        .output().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn restart_sing(State(config): State<Arc<Config>>) -> Result<String, (StatusCode, String)> {
+    stop_sing_internal().await;
+    match start_sing(&config.sing_box_home).await {
+        Ok(_) => Ok("ok".to_string()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
 
-fn get_outbound_tag(outbound: &serde_json::Value) -> Option<&str> {
-    outbound.get("tag").and_then(|v| v.as_str())
+async fn start_sing_handler(State(config): State<Arc<Config>>) -> Result<String, (StatusCode, String)> {
+    let mut lock = SING_PROCESS.lock().await;
+    if lock.is_some() && lock.as_mut().unwrap().try_wait().unwrap().is_none() {
+        return Err((StatusCode::BAD_REQUEST, "sing box is already running".to_string()));
+    }
+    drop(lock);
+    match start_sing(&config.sing_box_home).await {
+        Ok(_) => Ok("ok".to_string()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }
 
-#[derive(Serialize)]
-struct SingBoxConfig {
-    log: Log,
-    experimental: Experimental,
-    dns: Dns,
-    inbounds: Vec<Inbound>,
-    outbounds: Vec<serde_json::Value>,
-    route: Route,
+async fn stop_sing_handler(State(_config): State<Arc<Config>>) -> Result<String, (StatusCode, String)> {
+    stop_sing_internal().await;
+    Ok("stopped".to_string())
 }
 
-#[derive(Serialize)]
-struct Log {
-    disabled: bool,
-    output: String,
-    timestamp: bool,
-    level: String,
+async fn start_sing(sing_box_home: &str) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lock = SING_PROCESS.lock().await;
+    if lock.is_some() && lock.as_mut().unwrap().try_wait()?.is_none() {
+        return Err("already running!".into());
+    }
+    *lock = Some(tokio::process::Command::new("sing-box")
+        .current_dir(sing_box_home)
+        .arg("run")
+        .arg("-c")
+        .arg("config.json")
+        .env("PATH", format!("{}:{}", std::env::var("PATH")?, sing_box_home))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?);
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    if let Some(ref mut p) = *lock {
+        if p.try_wait()?.is_some() {
+            *lock = None;
+            return Err("sing box exited!".into());
+        }
+        if check_connection().await? {
+            tokio::fs::write(format!("{}/pid", sing_box_home), p.id().unwrap().to_string()).await?;
+            return Ok(p.id().unwrap());
+        } else {
+            p.kill().await?;
+            *lock = None;
+            return Err("sing box started but failed to connect to internet".into());
+        }
+    }
+    unreachable!()
 }
 
-#[derive(Serialize)]
-struct Experimental {
-    clash_api: ClashApi,
+async fn stop_sing_internal() {
+    let mut lock = SING_PROCESS.lock().await;
+    if let Some(ref mut p) = *lock {
+        if p.try_wait().ok().flatten().is_none() {
+            p.start_kill().ok();
+        }
+    }
+    *lock = None;
 }
 
-#[derive(Serialize)]
-struct ClashApi {
-    external_controller: String,
-    external_ui: String,
+async fn net_check() -> Result<String, (StatusCode, String)> {
+    match check_connection().await {
+        Ok(true) => Ok("ok".to_string()),
+        Ok(false) => Err((StatusCode::BAD_REQUEST, "not ok".to_string())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }
 
-#[derive(Serialize)]
-struct Dns {
-    r#final: String,
-    strategy: String,
-    independent_cache: bool,
-    servers: Vec<DnsServer>,
-    rules: Vec<DnsRule>,
-}
-
-#[derive(Serialize)]
-struct DnsServer {
-    #[serde(rename = "type")]
-    _type: String,
-    tag: String,
-    server: String,
-    detour: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DnsRule {
-    rule_set: Vec<String>,
-    action: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    server: Option<String>,
-}
-
-#[derive(Serialize)]
-struct Inbound {
-    #[serde(rename = "type")]
-    _type: String,
-    tag: String,
-    interface_name: String,
-    address: Vec<String>,
-    mtu: u32,
-    auto_route: bool,
-    strict_route: bool,
-    auto_redirect: bool,
-}
-
-#[derive(Serialize)]
-struct Route {
-    r#final: String,
-    auto_detect_interface: bool,
-    default_domain_resolver: String,
-    rules: Vec<RouteRule>,
-    rule_set: Vec<RuleSet>,
-}
-
-#[derive(Serialize, Default)]
-struct RouteRule {
-    action: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    protocol: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ip_is_private: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    process_path: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rule_set: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    outbound: Option<String>,
-}
-
-#[derive(Serialize)]
-struct RuleSet {
-    #[serde(rename = "type")]
-    _type: String,
-    tag: String,
-    format: String,
-    path: String,
-}
-
-#[derive(Deserialize)]
-struct ClashConfig {
-    proxies: Vec<ClashProxy>,
-}
-
-#[derive(Deserialize)]
-struct ClashProxy {
-    #[serde(rename = "type")]
-    proxy_type: String,
-    name: String,
-    server: Option<String>,
-    #[serde(alias = "port")]
-    server_port: Option<u16>,
-    password: Option<String>,
-    sni: Option<String>,
-    #[serde(rename = "skip-cert-verify")]
-    skip_cert_verify: Option<bool>,
+async fn check_connection() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let res = reqwest::get("https://gstatic.com/generate_204").await?;
+    let text = res.text().await?;
+    Ok(text.contains("HTTP/2 204"))
 }

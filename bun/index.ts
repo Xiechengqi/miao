@@ -9,12 +9,12 @@ const config = yaml.parse(await Bun.file("./miao.yaml").text());
 const port = config.port as number;
 const sing_box_home = config.sing_box_home as string;
 const config_output_loc = sing_box_home + "/config.json";
-const subs = config.subs as string[];
+const subs = (config.subs || []) as string[];
 const nodes = (config.nodes || []) as string[];
 
 await gen_config();
 let sing_process: Bun.Subprocess | null;
-// await start_sing();
+await start_sing();
 Bun.serve({
   port,
   routes: {
@@ -111,7 +111,7 @@ async function start_sing() {
   await Bun.sleep(3000);
   if (sing_process.exitCode !== null) {
     sing_process = null;
-    throw Error("sing box failed to start");
+    throw Error("sing box exited!");
   }
   if (await check_connection()) {
     await Bun.write(sing_box_home + "/pid", String(sing_process.pid));
@@ -157,10 +157,12 @@ async function fetch_sub(link: string) {
     await fetch(link, { headers: { "User-Agent": "clash-meta" } })
   ).text();
   clash_obj = yaml.parse(res_body_text);
+  if (!clash_obj.proxies || !Array.isArray(clash_obj.proxies)) {
+    return { node_names: [], outbounds: [] };
+  }
 
   const nodes = clash_obj.proxies.filter(
-    (x: any) =>
-      x.name.includes("JP") || x.name.includes("TW") || x.name.includes("SG"),
+    (x: any) => x.name.includes("JP") || x.name.includes("日本"),
   ) as ClashProxy[];
   const node_names = [];
 
@@ -210,7 +212,7 @@ async function fetch_sub(link: string) {
 
 async function check_connection(): Promise<boolean> {
   try {
-    const res = Bun.$`curl -I https://gstatic.com/generate_204`;
+    const res = await fetch("https://gstatic.com/generate_204");
     const res_text = await res.text();
     if (res_text.includes("HTTP/2 204")) {
       return true;
