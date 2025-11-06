@@ -9,6 +9,7 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 async fn serve_index() -> Html<&'static str> {
     Html(include_str!("../public/index.html"))
@@ -53,8 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let port = config.port;
     let sing_box_home = config.sing_box_home.clone();
 
-    // Generate initial config
-    gen_config(&config).await?;
+    // Generate initial config, retrying until success
+    loop {
+        match gen_config(&config).await {
+            Ok(_) => break,
+            Err(e) => {
+                eprintln!(
+                    "Failed to generate config: {}. Retrying in 300 seconds...",
+                    e
+                );
+                sleep(Duration::from_secs(300)).await;
+            }
+        }
+    }
 
     // Start sing if possible
     let _ = start_sing(&sing_box_home).await;
