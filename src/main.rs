@@ -136,9 +136,15 @@ async fn gen_config(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     let mut final_outbounds: Vec<serde_json::Value> = vec![];
     let mut final_node_names: Vec<String> = vec![];
     for sub in &config.subs {
-        let (node_names, outbounds) = fetch_sub(sub).await?;
-        final_node_names.extend(node_names);
-        final_outbounds.extend(outbounds);
+        match fetch_sub(sub).await {
+            Ok((node_names, outbounds)) => {
+                final_node_names.extend(node_names);
+                final_outbounds.extend(outbounds);
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch subscription from {}: {}", sub, e);
+            }
+        }
     }
     let mut sing_box_config = get_config_template();
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
