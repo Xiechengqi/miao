@@ -17,6 +17,11 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
       - name: Install Zig for cross-compilation
         run: |
           sudo snap install zig --classic --edge
@@ -29,28 +34,43 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
 
-      - name: Download sing-box binary
+      - name: Build sing-box binary
         run: |
           mkdir -p embedded
+
+          # Clone sing-box repository
+          git clone --depth=1 https://github.com/SagerNet/sing-box.git sing-box-src
+          cd sing-box-src
+
+          SING_BOX_VERSION=$(git describe --tags --always)
+          echo "Building sing-box version: ${SING_BOX_VERSION}"
+
+          # Set Go version
+          go version
+
+          # Build for target architecture
           if [ "${{ matrix.target }}" = "arm64" ]; then
-            ARCH="arm64"
+            GOARCH=arm64 GOOS=linux CGO_ENABLED=0 go build \
+              -v \
+              -trimpath \
+              -ldflags "-s -w -buildid=" \
+              -tags "with_quic,with_clash_api" \
+              ./cmd/sing-box
+            mv sing-box ../embedded/sing-box-arm64
           else
-            ARCH="amd64"
+            GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
+              -v \
+              -trimpath \
+              -ldflags "-s -w -buildid=" \
+              -tags "with_quic,with_clash_api" \
+              ./cmd/sing-box
+            mv sing-box ../embedded/sing-box-amd64
           fi
 
-          # Get the latest pre-release (alpha) version from GitHub API
-          echo "Fetching latest pre-release version..."
-          LATEST_RELEASE=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases | jq -r '[.[] | select(.prerelease == true)][0]')
-          SING_BOX_VERSION=$(echo "$LATEST_RELEASE" | jq -r '.tag_name' | sed 's/^v//')
-          echo "Latest alpha version: v${SING_BOX_VERSION}"
+          cd ..
+          rm -rf sing-box-src
 
-          # Download and extract
-          wget -O sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${ARCH}.tar.gz"
-          tar -xzf sing-box.tar.gz
-          mv sing-box-${SING_BOX_VERSION}-linux-${ARCH}/sing-box embedded/sing-box-${ARCH}
-          rm -rf sing-box.tar.gz sing-box-${SING_BOX_VERSION}-linux-${ARCH}
-
-          echo "Downloaded sing-box v${SING_BOX_VERSION}"
+          echo "Built sing-box ${SING_BOX_VERSION}"
           ls -lh embedded/
 
       - name: Build release for ${{ matrix.target }}
