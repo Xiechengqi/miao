@@ -31,17 +31,26 @@ jobs:
 
       - name: Download sing-box binary
         run: |
-          SING_BOX_VERSION="1.12.14"
           mkdir -p embedded
           if [ "${{ matrix.target }}" = "arm64" ]; then
             ARCH="arm64"
           else
             ARCH="amd64"
           fi
+
+          # Get the latest pre-release (alpha) version from GitHub API
+          echo "Fetching latest pre-release version..."
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases | jq -r '[.[] | select(.prerelease == true)][0]')
+          SING_BOX_VERSION=$(echo "$LATEST_RELEASE" | jq -r '.tag_name' | sed 's/^v//')
+          echo "Latest alpha version: v${SING_BOX_VERSION}"
+
+          # Download and extract
           wget -O sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${ARCH}.tar.gz"
           tar -xzf sing-box.tar.gz
           mv sing-box-${SING_BOX_VERSION}-linux-${ARCH}/sing-box embedded/sing-box-${ARCH}
           rm -rf sing-box.tar.gz sing-box-${SING_BOX_VERSION}-linux-${ARCH}
+
+          echo "Downloaded sing-box v${SING_BOX_VERSION}"
           ls -lh embedded/
 
       - name: Build release for ${{ matrix.target }}
