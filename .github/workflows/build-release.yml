@@ -48,22 +48,12 @@ jobs:
           # Set Go version
           go version
 
-          # Build for target architecture
+          # Build for target architecture (following user's build script)
           if [ "${{ matrix.target }}" = "arm64" ]; then
-            GOARCH=arm64 GOOS=linux CGO_ENABLED=0 go build \
-              -v \
-              -trimpath \
-              -ldflags "-s -w -buildid=" \
-              -tags "with_quic,with_clash_api" \
-              ./cmd/sing-box
+            GOARCH=arm64 GOOS=linux TAGS="with_quic,with_clash_api" make
             mv sing-box ../embedded/sing-box-arm64
           else
-            GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
-              -v \
-              -trimpath \
-              -ldflags "-s -w -buildid=" \
-              -tags "with_quic,with_clash_api" \
-              ./cmd/sing-box
+            GOARCH=amd64 GOOS=linux TAGS="with_quic,with_clash_api" make
             mv sing-box ../embedded/sing-box-amd64
           fi
 
