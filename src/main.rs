@@ -225,22 +225,6 @@ async fn stop_service() -> Json<ApiResponse<()>> {
     Json(ApiResponse::success_no_data("sing-box stopped"))
 }
 
-/// POST /api/service/restart - Restart sing-box
-async fn restart_service(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    stop_sing_internal().await;
-    sleep(Duration::from_millis(500)).await;
-
-    match start_sing_internal(&state.sing_box_home).await {
-        Ok(_) => Ok(Json(ApiResponse::success_no_data("sing-box restarted successfully"))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
-        )),
-    }
-}
-
 
 
 // ============================================================================
@@ -914,7 +898,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
-        .route("/api/service/restart", post(restart_service))
 
         // Subscription management
         .route("/api/subs", get(get_subs))
