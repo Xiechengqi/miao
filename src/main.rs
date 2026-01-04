@@ -110,12 +110,7 @@ struct StatusData {
     uptime_secs: Option<u64>,
 }
 
-#[derive(Serialize)]
-struct ConfigData {
-    content: String,
-    modified: u64,
-    size: u64,
-}
+
 
 // Request types for subscription and node management
 #[derive(Deserialize)]
@@ -246,67 +241,7 @@ async fn restart_service(
     }
 }
 
-/// GET /api/config - Get current sing-box configuration
-async fn get_config(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<ConfigData>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config_path = format!("{}/config.json", state.sing_box_home);
 
-    let metadata = match tokio::fs::metadata(&config_path).await {
-        Ok(m) => m,
-        Err(_) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("Config file not found")),
-            ))
-        }
-    };
-
-    let content = match tokio::fs::read_to_string(&config_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to read config: {}", e))),
-            ))
-        }
-    };
-
-    let pretty_content = match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or(content),
-        Err(_) => content,
-    };
-
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    Ok(Json(ApiResponse::success(
-        "Config loaded",
-        ConfigData {
-            content: pretty_content,
-            modified,
-            size: metadata.len(),
-        },
-    )))
-}
-
-/// POST /api/config/generate - Regenerate sing-box configuration
-async fn generate_config(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config = state.config.lock().await;
-    match gen_config(&config, &state.sing_box_home).await {
-        Ok(_) => Ok(Json(ApiResponse::success_no_data("Config generated successfully"))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to generate config: {}", e))),
-        )),
-    }
-}
 
 // ============================================================================
 // Subscription Management APIs
@@ -808,7 +743,7 @@ async fn gen_config(
 fn get_config_template() -> serde_json::Value {
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
-        "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "external_ui": "dashboard", "access_control_allow_origin": ["*"]}},
+        "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "access_control_allow_origin": ["*"]}},
         "dns": {
             "final": "googledns",
             "strategy": "prefer_ipv4",
@@ -964,9 +899,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
         .route("/api/service/restart", post(restart_service))
-        // Config management
-        .route("/api/config", get(get_config))
-        .route("/api/config/generate", post(generate_config))
+
         // Subscription management
         .route("/api/subs", get(get_subs))
         .route("/api/subs", post(add_sub))

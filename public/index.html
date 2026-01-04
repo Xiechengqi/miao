@@ -577,11 +577,6 @@
             <div class="header">
                 <h1><i class="bi bi-box-seam"></i> Miao</h1>
                 <p>sing-box 控制面板</p>
-                <a :href="clashApiUrl" target="_blank" class="btn-custom btn-secondary-custom"
-                    style="margin-top: 1rem; display: inline-flex;">
-                    <i class="bi bi-speedometer2"></i>
-                    Clash 面板 (选择节点/流量统计)
-                </a>
             </div>
 
             <!-- 状态卡片 -->
@@ -777,32 +772,7 @@
                 </div>
             </div>
 
-            <!-- 配置管理 -->
-            <div class="glass-card">
-                <div class="card-header-custom">
-                    <i class="bi bi-gear"></i>
-                    <span>配置管理</span>
-                </div>
-                <div class="btn-group-custom">
-                    <button class="btn-custom btn-secondary-custom" @click="generateConfig" :disabled="loading">
-                        <span v-if="loading && loadingAction === 'generate'" class="spinner"></span>
-                        <i v-else class="bi bi-arrow-repeat"></i>
-                        重新生成
-                    </button>
-                    <button class="btn-custom btn-secondary-custom" @click="toggleConfig" :disabled="loading">
-                        <i :class="showConfig ? 'bi bi-eye-slash' : 'bi bi-eye'"></i>
-                        {{ showConfig ? '隐藏配置' : '查看配置' }}
-                    </button>
-                </div>
 
-                <div v-if="showConfig && config.content">
-                    <div class="config-meta">
-                        <span><i class="bi bi-file-earmark-code"></i> {{ formatBytes(config.size) }}</span>
-                        <span><i class="bi bi-clock"></i> 修改于 {{ formatTime(config.modified) }}</span>
-                    </div>
-                    <pre class="config-display"><code>{{ config.content }}</code></pre>
-                </div>
-            </div>
         </div>
 
         <!-- Toast 容器 -->
@@ -824,10 +794,8 @@
             setup() {
                 // 状态
                 const status = ref({ running: false, pid: null, uptime_secs: null });
-                const config = ref({ content: '', modified: 0, size: 0 });
                 const subs = ref([]);
                 const nodes = ref([]);
-                const showConfig = ref(false);
                 const loading = ref(false);
                 const loadingAction = ref('');
                 const toasts = ref([]);
@@ -1073,26 +1041,8 @@
                     } catch (e) { }
                 };
 
-                // 配置管理
-                const fetchConfig = async () => {
-                    try {
-                        const data = await apiCall('config', 'GET', null, 'config');
-                        if (data.data) config.value = data.data;
-                    } catch (e) { }
-                };
 
-                const generateConfig = async () => {
-                    try {
-                        await apiCall('config/generate', 'POST', null, 'generate');
-                        showToast('配置已重新生成', 'success');
-                        if (showConfig.value) await fetchConfig();
-                    } catch (e) { }
-                };
 
-                const toggleConfig = async () => {
-                    if (!showConfig.value) await fetchConfig();
-                    showConfig.value = !showConfig.value;
-                };
 
                 // 格式化函数
                 const formatUptime = (seconds) => {
@@ -1105,18 +1055,7 @@
                     return `${secs}秒`;
                 };
 
-                const formatBytes = (bytes) => {
-                    if (!bytes) return '0 B';
-                    const k = 1024;
-                    const sizes = ['B', 'KB', 'MB'];
-                    const i = Math.floor(Math.log(bytes) / Math.log(k));
-                    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-                };
 
-                const formatTime = (timestamp) => {
-                    if (!timestamp) return '-';
-                    return new Date(timestamp * 1000).toLocaleString('zh-CN');
-                };
 
                 // 生命周期
                 onMounted(() => {
@@ -1137,15 +1076,14 @@
                 });
 
                 return {
-                    status, config, subs, nodes, showConfig, loading, loadingAction, toasts,
+                    status, subs, nodes, loading, loadingAction, toasts,
                     newSubUrl, newNode, canAddNode, clashApiUrl,
                     proxies, delays, traffic, testingGroup, selectorGroups,
                     showToast, getToastIcon,
                     startService, stopService, restartService,
                     addSub, deleteSub, addNode, deleteNode,
-                    generateConfig, toggleConfig,
                     switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
-                    formatUptime, formatBytes, formatTime
+                    formatUptime
                 };
             }
         }).mount('#app');
