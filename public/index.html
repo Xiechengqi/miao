@@ -990,6 +990,11 @@
             flex-wrap: wrap;
             align-items: center;
         }
+
+        /* 防止 Vue 加载前闪烁 */
+        [v-cloak] {
+            display: none !important;
+        }
     </style>
 </head>
 
@@ -1366,7 +1371,7 @@
         </div>
 
         <!-- 确认对话框 -->
-        <div class="modal-overlay" v-if="confirmModal.show" @click.self="cancelConfirm">
+        <div class="modal-overlay" v-if="confirmModal.show" v-cloak @click.self="cancelConfirm">
             <div class="modal-content">
                 <div class="modal-title">
                     <i class="bi bi-exclamation-triangle"></i>
@@ -1381,7 +1386,7 @@
         </div>
     </div>
 
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://registry.npmmirror.com/vue/3/files/dist/vue.global.prod.js"></script>
     <script>
         const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
 
