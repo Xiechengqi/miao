@@ -1,9 +1,10 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Miao Control Panel</title>
+    <title>Miao 控制面板</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <style>
@@ -17,29 +18,30 @@
             --accent-red: #ff4757;
             --accent-blue: #5f9ea0;
             --accent-orange: #ffa502;
+            --accent-purple: #a55eea;
         }
-        
+
         * {
             box-sizing: border-box;
         }
-        
+
         body {
             min-height: 100vh;
             background: linear-gradient(135deg, var(--bg-gradient-start), var(--bg-gradient-mid), var(--bg-gradient-end));
             color: #e0e0e0;
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }
-        
+
         .container {
             max-width: 900px;
             padding: 2rem 1rem;
         }
-        
+
         .header {
             text-align: center;
             margin-bottom: 2.5rem;
         }
-        
+
         .header h1 {
             font-size: 2.5rem;
             font-weight: 700;
@@ -49,12 +51,12 @@
             background-clip: text;
             margin-bottom: 0.5rem;
         }
-        
+
         .header p {
             color: rgba(255, 255, 255, 0.6);
             font-size: 0.95rem;
         }
-        
+
         .glass-card {
             background: var(--card-bg);
             backdrop-filter: blur(20px);
@@ -65,12 +67,12 @@
             margin-bottom: 1.5rem;
             transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
-        
+
         .glass-card:hover {
             transform: translateY(-2px);
             box-shadow: 0 8px 32px rgba(0, 217, 165, 0.1);
         }
-        
+
         .card-header-custom {
             display: flex;
             align-items: center;
@@ -80,12 +82,12 @@
             font-weight: 600;
             color: #fff;
         }
-        
+
         .card-header-custom i {
             font-size: 1.25rem;
             color: var(--accent-green);
         }
-        
+
         .status-indicator {
             display: inline-flex;
             align-items: center;
@@ -95,67 +97,74 @@
             font-weight: 500;
             font-size: 0.9rem;
         }
-        
+
         .status-running {
             background: rgba(0, 217, 165, 0.15);
             color: var(--accent-green);
             border: 1px solid rgba(0, 217, 165, 0.3);
         }
-        
+
         .status-stopped {
             background: rgba(255, 71, 87, 0.15);
             color: var(--accent-red);
             border: 1px solid rgba(255, 71, 87, 0.3);
         }
-        
+
         .status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             animation: pulse 2s infinite;
         }
-        
+
         .status-running .status-dot {
             background: var(--accent-green);
             box-shadow: 0 0 10px var(--accent-green);
         }
-        
+
         .status-stopped .status-dot {
             background: var(--accent-red);
             animation: none;
         }
-        
+
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
         }
-        
+
         .status-details {
             display: flex;
             gap: 2rem;
             margin-top: 1rem;
             flex-wrap: wrap;
         }
-        
+
         .status-item {
             display: flex;
             flex-direction: column;
             gap: 0.25rem;
         }
-        
+
         .status-label {
             font-size: 0.75rem;
             color: rgba(255, 255, 255, 0.5);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
-        
+
         .status-value {
             font-size: 1.1rem;
             font-weight: 600;
             color: #fff;
         }
-        
+
         .btn-custom {
             display: inline-flex;
             align-items: center;
@@ -168,61 +177,86 @@
             border: none;
             cursor: pointer;
             transition: all 0.2s ease;
-            min-width: 120px;
+            min-width: 100px;
         }
-        
+
         .btn-custom:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
-        
+
         .btn-start {
             background: linear-gradient(135deg, #00d9a5, #00b894);
             color: #fff;
         }
-        
+
         .btn-start:hover:not(:disabled) {
             background: linear-gradient(135deg, #00f7bc, #00d9a5);
             box-shadow: 0 4px 20px rgba(0, 217, 165, 0.4);
         }
-        
+
         .btn-stop {
             background: linear-gradient(135deg, #ff4757, #ff6b7a);
             color: #fff;
         }
-        
+
         .btn-stop:hover:not(:disabled) {
             background: linear-gradient(135deg, #ff6b7a, #ff4757);
             box-shadow: 0 4px 20px rgba(255, 71, 87, 0.4);
         }
-        
+
         .btn-restart {
             background: linear-gradient(135deg, #ffa502, #ff7f00);
             color: #fff;
         }
-        
+
         .btn-restart:hover:not(:disabled) {
             background: linear-gradient(135deg, #ffb732, #ffa502);
             box-shadow: 0 4px 20px rgba(255, 165, 2, 0.4);
         }
-        
+
         .btn-secondary-custom {
             background: rgba(255, 255, 255, 0.1);
             color: #fff;
             border: 1px solid rgba(255, 255, 255, 0.2);
         }
-        
+
         .btn-secondary-custom:hover:not(:disabled) {
             background: rgba(255, 255, 255, 0.15);
             border-color: rgba(255, 255, 255, 0.3);
         }
-        
+
+        .btn-sm-custom {
+            padding: 0.4rem 0.8rem;
+            font-size: 0.85rem;
+            min-width: auto;
+        }
+
+        .btn-add {
+            background: linear-gradient(135deg, var(--accent-purple), #8854d0);
+            color: #fff;
+        }
+
+        .btn-add:hover:not(:disabled) {
+            box-shadow: 0 4px 20px rgba(165, 94, 234, 0.4);
+        }
+
+        .btn-delete {
+            background: rgba(255, 71, 87, 0.2);
+            color: var(--accent-red);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+        }
+
+        .btn-delete:hover:not(:disabled) {
+            background: rgba(255, 71, 87, 0.3);
+        }
+
         .btn-group-custom {
             display: flex;
             gap: 1rem;
             flex-wrap: wrap;
         }
-        
+
         .config-display {
             background: rgba(0, 0, 0, 0.3);
             border-radius: 12px;
@@ -234,21 +268,21 @@
             line-height: 1.6;
             margin-top: 1rem;
         }
-        
+
         .config-display::-webkit-scrollbar {
             width: 8px;
         }
-        
+
         .config-display::-webkit-scrollbar-track {
             background: rgba(255, 255, 255, 0.05);
             border-radius: 4px;
         }
-        
+
         .config-display::-webkit-scrollbar-thumb {
             background: rgba(255, 255, 255, 0.2);
             border-radius: 4px;
         }
-        
+
         .config-meta {
             display: flex;
             gap: 1.5rem;
@@ -256,14 +290,91 @@
             font-size: 0.8rem;
             color: rgba(255, 255, 255, 0.5);
         }
-        
+
+        .list-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 1rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            margin-bottom: 0.5rem;
+        }
+
+        .list-item-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-right: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .form-input {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 10px;
+            padding: 0.75rem 1rem;
+            color: #fff;
+            font-size: 0.95rem;
+            width: 100%;
+            transition: border-color 0.2s ease;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--accent-green);
+        }
+
+        .form-input::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        .form-row {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .form-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .form-label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .add-form {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.9rem;
+        }
+
+        .node-info {
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.5);
+            margin-top: 0.25rem;
+        }
+
         .toast-container {
             position: fixed;
             top: 1.5rem;
             right: 1.5rem;
             z-index: 1050;
         }
-        
+
         .toast-custom {
             background: rgba(30, 30, 40, 0.95);
             backdrop-filter: blur(10px);
@@ -277,30 +388,31 @@
             max-width: 350px;
             animation: slideIn 0.3s ease;
         }
-        
+
         @keyframes slideIn {
             from {
                 transform: translateX(100%);
                 opacity: 0;
             }
+
             to {
                 transform: translateX(0);
                 opacity: 1;
             }
         }
-        
+
         .toast-success {
             border-left: 3px solid var(--accent-green);
         }
-        
+
         .toast-error {
             border-left: 3px solid var(--accent-red);
         }
-        
+
         .toast-info {
             border-left: 3px solid var(--accent-blue);
         }
-        
+
         .spinner {
             width: 16px;
             height: 16px;
@@ -309,30 +421,41 @@
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }
-        
+
         @keyframes spin {
-            to { transform: rotate(360deg); }
+            to {
+                transform: rotate(360deg);
+            }
         }
-        
-        .fade-enter-active, .fade-leave-active {
+
+        .fade-enter-active,
+        .fade-leave-active {
             transition: opacity 0.3s ease;
         }
-        
-        .fade-enter-from, .fade-leave-to {
+
+        .fade-enter-from,
+        .fade-leave-to {
             opacity: 0;
+        }
+
+        .section-divider {
+            height: 1px;
+            background: rgba(255, 255, 255, 0.1);
+            margin: 1.5rem 0;
         }
     </style>
 </head>
+
 <body>
     <div id="app">
         <div class="container">
-            <!-- Header -->
+            <!-- 头部 -->
             <div class="header">
                 <h1><i class="bi bi-box-seam"></i> Miao</h1>
                 <p>sing-box 控制面板</p>
             </div>
-            
-            <!-- Status Card -->
+
+            <!-- 状态卡片 -->
             <div class="glass-card">
                 <div class="card-header-custom">
                     <i class="bi bi-activity"></i>
@@ -346,7 +469,7 @@
                         </div>
                         <div class="status-details" v-if="status.running">
                             <div class="status-item">
-                                <span class="status-label">PID</span>
+                                <span class="status-label">进程 ID</span>
                                 <span class="status-value">{{ status.pid || '-' }}</span>
                             </div>
                             <div class="status-item">
@@ -356,26 +479,18 @@
                         </div>
                     </div>
                     <div class="btn-group-custom">
-                        <button 
-                            class="btn-custom btn-start" 
-                            @click="startService" 
+                        <button class="btn-custom btn-start" @click="startService"
                             :disabled="loading || status.running">
                             <span v-if="loading && loadingAction === 'start'" class="spinner"></span>
                             <i v-else class="bi bi-play-fill"></i>
                             启动
                         </button>
-                        <button 
-                            class="btn-custom btn-stop" 
-                            @click="stopService" 
-                            :disabled="loading || !status.running">
+                        <button class="btn-custom btn-stop" @click="stopService" :disabled="loading || !status.running">
                             <span v-if="loading && loadingAction === 'stop'" class="spinner"></span>
                             <i v-else class="bi bi-stop-fill"></i>
                             停止
                         </button>
-                        <button 
-                            class="btn-custom btn-restart" 
-                            @click="restartService" 
-                            :disabled="loading">
+                        <button class="btn-custom btn-restart" @click="restartService" :disabled="loading">
                             <span v-if="loading && loadingAction === 'restart'" class="spinner"></span>
                             <i v-else class="bi bi-arrow-clockwise"></i>
                             重启
@@ -383,31 +498,122 @@
                     </div>
                 </div>
             </div>
-            
-            <!-- Config Card -->
+
+            <!-- 订阅管理 -->
+            <div class="glass-card">
+                <div class="card-header-custom">
+                    <i class="bi bi-rss"></i>
+                    <span>订阅管理</span>
+                </div>
+
+                <div v-if="subs.length === 0" class="empty-state">
+                    <i class="bi bi-inbox" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                    暂无订阅
+                </div>
+
+                <div v-for="sub in subs" :key="sub" class="list-item">
+                    <span class="list-item-text">{{ sub }}</span>
+                    <button class="btn-custom btn-delete btn-sm-custom" @click="deleteSub(sub)" :disabled="loading">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+
+                <div class="add-form">
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 3;">
+                            <input type="text" class="form-input" v-model="newSubUrl" placeholder="输入订阅链接 URL"
+                                @keyup.enter="addSub">
+                        </div>
+                        <div class="form-group" style="flex: 0;">
+                            <button class="btn-custom btn-add" @click="addSub" :disabled="loading || !newSubUrl">
+                                <i class="bi bi-plus-lg"></i>
+                                添加
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 节点管理 -->
+            <div class="glass-card">
+                <div class="card-header-custom">
+                    <i class="bi bi-diagram-3"></i>
+                    <span>手动节点</span>
+                </div>
+
+                <div v-if="nodes.length === 0" class="empty-state">
+                    <i class="bi bi-node-plus" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                    暂无手动节点
+                </div>
+
+                <div v-for="node in nodes" :key="node.tag" class="list-item">
+                    <div style="flex: 1;">
+                        <div class="list-item-text" style="white-space: normal;">
+                            <strong>{{ node.tag }}</strong>
+                        </div>
+                        <div class="node-info">
+                            {{ node.server }}:{{ node.server_port }}
+                            <span v-if="node.sni"> (SNI: {{ node.sni }})</span>
+                        </div>
+                    </div>
+                    <button class="btn-custom btn-delete btn-sm-custom" @click="deleteNode(node.tag)"
+                        :disabled="loading">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+
+                <div class="add-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">节点名称</label>
+                            <input type="text" class="form-input" v-model="newNode.tag" placeholder="例如: 我的节点">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">服务器地址</label>
+                            <input type="text" class="form-input" v-model="newNode.server"
+                                placeholder="例如: example.com">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">端口</label>
+                            <input type="number" class="form-input" v-model.number="newNode.server_port"
+                                placeholder="443">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">密码</label>
+                            <input type="password" class="form-input" v-model="newNode.password" placeholder="密码">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SNI (可选)</label>
+                            <input type="text" class="form-input" v-model="newNode.sni" placeholder="留空使用服务器地址">
+                        </div>
+                    </div>
+                    <button class="btn-custom btn-add" @click="addNode" :disabled="loading || !canAddNode">
+                        <i class="bi bi-plus-lg"></i>
+                        添加 Hysteria2 节点
+                    </button>
+                </div>
+            </div>
+
+            <!-- 配置管理 -->
             <div class="glass-card">
                 <div class="card-header-custom">
                     <i class="bi bi-gear"></i>
                     <span>配置管理</span>
                 </div>
                 <div class="btn-group-custom">
-                    <button 
-                        class="btn-custom btn-secondary-custom" 
-                        @click="generateConfig" 
-                        :disabled="loading">
+                    <button class="btn-custom btn-secondary-custom" @click="generateConfig" :disabled="loading">
                         <span v-if="loading && loadingAction === 'generate'" class="spinner"></span>
                         <i v-else class="bi bi-arrow-repeat"></i>
                         重新生成
                     </button>
-                    <button 
-                        class="btn-custom btn-secondary-custom" 
-                        @click="toggleConfig" 
-                        :disabled="loading">
+                    <button class="btn-custom btn-secondary-custom" @click="toggleConfig" :disabled="loading">
                         <i :class="showConfig ? 'bi bi-eye-slash' : 'bi bi-eye'"></i>
                         {{ showConfig ? '隐藏配置' : '查看配置' }}
                     </button>
                 </div>
-                
+
                 <div v-if="showConfig && config.content">
                     <div class="config-meta">
                         <span><i class="bi bi-file-earmark-code"></i> {{ formatBytes(config.size) }}</span>
@@ -417,38 +623,45 @@
                 </div>
             </div>
         </div>
-        
-        <!-- Toast Container -->
+
+        <!-- Toast 容器 -->
         <div class="toast-container">
             <transition-group name="fade">
-                <div 
-                    v-for="toast in toasts" 
-                    :key="toast.id" 
-                    :class="['toast-custom', `toast-${toast.type}`]">
+                <div v-for="toast in toasts" :key="toast.id" :class="['toast-custom', `toast-${toast.type}`]">
                     <i :class="getToastIcon(toast.type)"></i>
                     <span>{{ toast.message }}</span>
                 </div>
             </transition-group>
         </div>
     </div>
-    
+
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script>
-        const { createApp, ref, onMounted, onUnmounted } = Vue;
-        
+        const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+
         createApp({
             setup() {
-                // State
+                // 状态
                 const status = ref({ running: false, pid: null, uptime_secs: null });
                 const config = ref({ content: '', modified: 0, size: 0 });
+                const subs = ref([]);
+                const nodes = ref([]);
                 const showConfig = ref(false);
                 const loading = ref(false);
                 const loadingAction = ref('');
                 const toasts = ref([]);
+                const newSubUrl = ref('');
+                const newNode = ref({ tag: '', server: '', server_port: 443, password: '', sni: '' });
+
                 let statusInterval = null;
                 let toastId = 0;
-                
-                // Toast notifications
+
+                // 计算属性
+                const canAddNode = computed(() => {
+                    return newNode.value.tag && newNode.value.server && newNode.value.server_port && newNode.value.password;
+                });
+
+                // Toast 通知
                 const showToast = (message, type = 'info') => {
                     const id = ++toastId;
                     toasts.value.push({ id, message, type });
@@ -456,26 +669,22 @@
                         toasts.value = toasts.value.filter(t => t.id !== id);
                     }, 4000);
                 };
-                
+
                 const getToastIcon = (type) => {
-                    const icons = {
-                        success: 'bi bi-check-circle-fill',
-                        error: 'bi bi-x-circle-fill',
-                        info: 'bi bi-info-circle-fill'
-                    };
+                    const icons = { success: 'bi bi-check-circle-fill', error: 'bi bi-x-circle-fill', info: 'bi bi-info-circle-fill' };
                     return icons[type] || icons.info;
                 };
-                
-                // API calls
-                const apiCall = async (endpoint, method = 'GET', action = '') => {
+
+                // API 调用
+                const apiCall = async (endpoint, method = 'GET', body = null, action = '') => {
                     loading.value = true;
                     loadingAction.value = action;
                     try {
-                        const response = await fetch(`/api/${endpoint}`, { method });
+                        const options = { method, headers: { 'Content-Type': 'application/json' } };
+                        if (body) options.body = JSON.stringify(body);
+                        const response = await fetch(`/api/${endpoint}`, options);
                         const data = await response.json();
-                        if (!response.ok || !data.success) {
-                            throw new Error(data.message || 'Request failed');
-                        }
+                        if (!response.ok || !data.success) throw new Error(data.message || '请求失败');
                         return data;
                     } catch (error) {
                         showToast(error.message, 'error');
@@ -485,83 +694,131 @@
                         loadingAction.value = '';
                     }
                 };
-                
-                // Fetch status
+
+                // 获取状态
                 const fetchStatus = async () => {
                     try {
                         const response = await fetch('/api/status');
                         const data = await response.json();
-                        if (data.success && data.data) {
-                            status.value = data.data;
-                        }
-                    } catch (e) {
-                        console.error('Failed to fetch status:', e);
-                    }
+                        if (data.success && data.data) status.value = data.data;
+                    } catch (e) { console.error('获取状态失败:', e); }
                 };
-                
-                // Service controls
+
+                // 获取订阅列表
+                const fetchSubs = async () => {
+                    try {
+                        const response = await fetch('/api/subs');
+                        const data = await response.json();
+                        if (data.success && data.data) subs.value = data.data;
+                    } catch (e) { console.error('获取订阅失败:', e); }
+                };
+
+                // 获取节点列表
+                const fetchNodes = async () => {
+                    try {
+                        const response = await fetch('/api/nodes');
+                        const data = await response.json();
+                        if (data.success && data.data) nodes.value = data.data;
+                    } catch (e) { console.error('获取节点失败:', e); }
+                };
+
+                // 服务控制
                 const startService = async () => {
                     try {
-                        await apiCall('service/start', 'POST', 'start');
+                        await apiCall('service/start', 'POST', null, 'start');
                         showToast('服务已启动', 'success');
                         await fetchStatus();
-                    } catch (e) {}
+                    } catch (e) { }
                 };
-                
+
                 const stopService = async () => {
                     try {
-                        await apiCall('service/stop', 'POST', 'stop');
+                        await apiCall('service/stop', 'POST', null, 'stop');
                         showToast('服务已停止', 'success');
                         await fetchStatus();
-                    } catch (e) {}
+                    } catch (e) { }
                 };
-                
+
                 const restartService = async () => {
                     try {
-                        await apiCall('service/restart', 'POST', 'restart');
+                        await apiCall('service/restart', 'POST', null, 'restart');
                         showToast('服务已重启', 'success');
                         await fetchStatus();
-                    } catch (e) {}
+                    } catch (e) { }
                 };
-                
-                // Config management
+
+                // 订阅管理
+                const addSub = async () => {
+                    if (!newSubUrl.value) return;
+                    try {
+                        await apiCall('subs', 'POST', { url: newSubUrl.value }, 'addSub');
+                        showToast('订阅已添加', 'success');
+                        newSubUrl.value = '';
+                        await fetchSubs();
+                    } catch (e) { }
+                };
+
+                const deleteSub = async (url) => {
+                    try {
+                        await apiCall('subs', 'DELETE', { url }, 'deleteSub');
+                        showToast('订阅已删除', 'success');
+                        await fetchSubs();
+                    } catch (e) { }
+                };
+
+                // 节点管理
+                const addNode = async () => {
+                    if (!canAddNode.value) return;
+                    try {
+                        const nodeData = { ...newNode.value };
+                        if (!nodeData.sni) delete nodeData.sni;
+                        await apiCall('nodes', 'POST', nodeData, 'addNode');
+                        showToast('节点已添加', 'success');
+                        newNode.value = { tag: '', server: '', server_port: 443, password: '', sni: '' };
+                        await fetchNodes();
+                    } catch (e) { }
+                };
+
+                const deleteNode = async (tag) => {
+                    try {
+                        await apiCall('nodes', 'DELETE', { tag }, 'deleteNode');
+                        showToast('节点已删除', 'success');
+                        await fetchNodes();
+                    } catch (e) { }
+                };
+
+                // 配置管理
                 const fetchConfig = async () => {
                     try {
-                        const data = await apiCall('config', 'GET', 'config');
-                        if (data.data) {
-                            config.value = data.data;
-                        }
-                    } catch (e) {}
+                        const data = await apiCall('config', 'GET', null, 'config');
+                        if (data.data) config.value = data.data;
+                    } catch (e) { }
                 };
-                
+
                 const generateConfig = async () => {
                     try {
-                        await apiCall('config/generate', 'POST', 'generate');
+                        await apiCall('config/generate', 'POST', null, 'generate');
                         showToast('配置已重新生成', 'success');
-                        if (showConfig.value) {
-                            await fetchConfig();
-                        }
-                    } catch (e) {}
+                        if (showConfig.value) await fetchConfig();
+                    } catch (e) { }
                 };
-                
+
                 const toggleConfig = async () => {
-                    if (!showConfig.value) {
-                        await fetchConfig();
-                    }
+                    if (!showConfig.value) await fetchConfig();
                     showConfig.value = !showConfig.value;
                 };
-                
-                // Formatters
+
+                // 格式化函数
                 const formatUptime = (seconds) => {
                     if (!seconds) return '-';
                     const hrs = Math.floor(seconds / 3600);
                     const mins = Math.floor((seconds % 3600) / 60);
                     const secs = seconds % 60;
-                    if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
-                    if (mins > 0) return `${mins}m ${secs}s`;
-                    return `${secs}s`;
+                    if (hrs > 0) return `${hrs}小时 ${mins}分 ${secs}秒`;
+                    if (mins > 0) return `${mins}分 ${secs}秒`;
+                    return `${secs}秒`;
                 };
-                
+
                 const formatBytes = (bytes) => {
                     if (!bytes) return '0 B';
                     const k = 1024;
@@ -569,42 +826,34 @@
                     const i = Math.floor(Math.log(bytes) / Math.log(k));
                     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
                 };
-                
+
                 const formatTime = (timestamp) => {
                     if (!timestamp) return '-';
                     return new Date(timestamp * 1000).toLocaleString('zh-CN');
                 };
-                
-                // Lifecycle
+
+                // 生命周期
                 onMounted(() => {
                     fetchStatus();
+                    fetchSubs();
+                    fetchNodes();
                     statusInterval = setInterval(fetchStatus, 3000);
                 });
-                
-                onUnmounted(() => {
-                    if (statusInterval) clearInterval(statusInterval);
-                });
-                
+
+                onUnmounted(() => { if (statusInterval) clearInterval(statusInterval); });
+
                 return {
-                    status,
-                    config,
-                    showConfig,
-                    loading,
-                    loadingAction,
-                    toasts,
-                    showToast,
-                    getToastIcon,
-                    startService,
-                    stopService,
-                    restartService,
-                    generateConfig,
-                    toggleConfig,
-                    formatUptime,
-                    formatBytes,
-                    formatTime
+                    status, config, subs, nodes, showConfig, loading, loadingAction, toasts,
+                    newSubUrl, newNode, canAddNode,
+                    showToast, getToastIcon,
+                    startService, stopService, restartService,
+                    addSub, deleteSub, addNode, deleteNode,
+                    generateConfig, toggleConfig,
+                    formatUptime, formatBytes, formatTime
                 };
             }
         }).mount('#app');
     </script>
 </body>
+
 </html>

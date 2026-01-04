@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{Html, Json},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use lazy_static::lazy_static;
@@ -26,10 +26,10 @@ const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-arm64");
 // Data Structures
 // ============================================================================
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Config {
     port: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     sing_box_home: Option<String>,
     #[serde(default)]
     subs: Vec<String>,
@@ -37,9 +37,8 @@ struct Config {
     nodes: Vec<String>,
 }
 
-#[derive(Clone)]
 struct AppState {
-    config: Config,
+    config: Mutex<Config>,
     sing_box_home: String,
 }
 
@@ -85,10 +84,7 @@ impl<T: Serialize> ApiResponse<T> {
         }
     }
 
-    fn success_no_data(message: impl Into<String>) -> Self
-    where
-        T: Default,
-    {
+    fn success_no_data(message: impl Into<String>) -> Self {
         Self {
             success: true,
             message: message.into(),
@@ -121,6 +117,36 @@ struct ConfigData {
     size: u64,
 }
 
+// Request types for subscription and node management
+#[derive(Deserialize)]
+struct SubRequest {
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct NodeRequest {
+    tag: String,
+    server: String,
+    server_port: u16,
+    password: String,
+    #[serde(default)]
+    sni: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteNodeRequest {
+    tag: String,
+}
+
+#[derive(Serialize)]
+struct NodeInfo {
+    tag: String,
+    server: String,
+    server_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sni: Option<String>,
+}
+
 // ============================================================================
 // Global State
 // ============================================================================
@@ -147,15 +173,12 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
     let mut lock = SING_PROCESS.lock().await;
 
     let (running, pid, uptime_secs) = if let Some(ref mut proc) = *lock {
-        // Check if still running
         match proc.child.try_wait() {
             Ok(Some(_)) => {
-                // Process has exited
                 *lock = None;
                 (false, None, None)
             }
             Ok(None) => {
-                // Still running
                 let uptime = proc.started_at.elapsed().as_secs();
                 (true, proc.child.id(), Some(uptime))
             }
@@ -181,7 +204,6 @@ async fn start_service(
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     let mut lock = SING_PROCESS.lock().await;
 
-    // Check if already running
     if let Some(ref mut proc) = *lock {
         if proc.child.try_wait().ok().flatten().is_none() {
             return Err((
@@ -213,8 +235,6 @@ async fn restart_service(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     stop_sing_internal().await;
-
-    // Small delay to ensure clean shutdown
     sleep(Duration::from_millis(500)).await;
 
     match start_sing_internal(&state.sing_box_home).await {
@@ -252,7 +272,6 @@ async fn get_config(
         }
     };
 
-    // Pretty print JSON
     let pretty_content = match serde_json::from_str::<serde_json::Value>(&content) {
         Ok(v) => serde_json::to_string_pretty(&v).unwrap_or(content),
         Err(_) => content,
@@ -279,7 +298,8 @@ async fn get_config(
 async fn generate_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    match gen_config(&state.config, &state.sing_box_home).await {
+    let config = state.config.lock().await;
+    match gen_config(&config, &state.sing_box_home).await {
         Ok(_) => Ok(Json(ApiResponse::success_no_data("Config generated successfully"))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -289,8 +309,195 @@ async fn generate_config(
 }
 
 // ============================================================================
+// Subscription Management APIs
+// ============================================================================
+
+/// GET /api/subs - Get all subscription URLs
+async fn get_subs(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<String>>> {
+    let config = state.config.lock().await;
+    Json(ApiResponse::success("Subscriptions loaded", config.subs.clone()))
+}
+
+/// POST /api/subs - Add a subscription URL
+async fn add_sub(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut config = state.config.lock().await;
+
+    // Check if already exists
+    if config.subs.contains(&req.url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Subscription already exists")),
+        ));
+    }
+
+    config.subs.push(req.url);
+
+    // Save to file
+    if let Err(e) = save_config(&config).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+        ));
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Subscription added")))
+}
+
+/// DELETE /api/subs - Delete a subscription URL
+async fn delete_sub(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut config = state.config.lock().await;
+
+    let original_len = config.subs.len();
+    config.subs.retain(|s| s != &req.url);
+
+    if config.subs.len() == original_len {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Subscription not found")),
+        ));
+    }
+
+    if let Err(e) = save_config(&config).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+        ));
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Subscription deleted")))
+}
+
+// ============================================================================
+// Node Management APIs
+// ============================================================================
+
+/// GET /api/nodes - Get all manual nodes
+async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<NodeInfo>>> {
+    let config = state.config.lock().await;
+
+    let nodes: Vec<NodeInfo> = config
+        .nodes
+        .iter()
+        .filter_map(|s| {
+            serde_json::from_str::<serde_json::Value>(s).ok().map(|v| NodeInfo {
+                tag: v.get("tag").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                server: v.get("server").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                server_port: v.get("server_port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
+                sni: v
+                    .get("tls")
+                    .and_then(|t| t.get("server_name"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+            })
+        })
+        .collect();
+
+    Json(ApiResponse::success("Nodes loaded", nodes))
+}
+
+/// POST /api/nodes - Add a Hysteria2 node
+async fn add_node(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<NodeRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut config = state.config.lock().await;
+
+    // Check if tag already exists
+    for node_str in &config.nodes {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+            if v.get("tag").and_then(|t| t.as_str()) == Some(&req.tag) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Node with this tag already exists")),
+                ));
+            }
+        }
+    }
+
+    // Build Hysteria2 node
+    let node = Hysteria2 {
+        outbound_type: "hysteria2".to_string(),
+        tag: req.tag,
+        server: req.server,
+        server_port: req.server_port,
+        password: req.password,
+        up_mbps: 40,
+        down_mbps: 350,
+        tls: Tls {
+            enabled: true,
+            server_name: req.sni,
+            insecure: true,
+        },
+    };
+
+    let node_json = serde_json::to_string(&node).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to serialize node: {}", e))),
+        )
+    })?;
+
+    config.nodes.push(node_json);
+
+    if let Err(e) = save_config(&config).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+        ));
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Node added")))
+}
+
+/// DELETE /api/nodes - Delete a node by tag
+async fn delete_node(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeleteNodeRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut config = state.config.lock().await;
+
+    let original_len = config.nodes.len();
+    config.nodes.retain(|node_str| {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+            v.get("tag").and_then(|t| t.as_str()) != Some(&req.tag)
+        } else {
+            true
+        }
+    });
+
+    if config.nodes.len() == original_len {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Node not found")),
+        ));
+    }
+
+    if let Err(e) = save_config(&config).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+        ));
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Node deleted")))
+}
+
+// ============================================================================
 // Internal Functions
 // ============================================================================
+
+/// Save config to miao.yaml
+async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let yaml = serde_yaml::to_string(config)?;
+    tokio::fs::write("miao.yaml", yaml).await?;
+    Ok(())
+}
 
 /// Extract embedded sing-box binary to current working directory
 fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
@@ -695,33 +902,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let app_state = Arc::new(AppState {
-        config: config.clone(),
+        config: Mutex::new(config.clone()),
         sing_box_home: sing_box_home.clone(),
     });
 
     // Start background task to regenerate config backup every 6 hours
-    let config_regen = config.clone();
-    let sing_box_home_regen = sing_box_home.clone();
+    let app_state_backup = Arc::clone(&app_state);
     tokio::spawn(async move {
         loop {
-            sleep(Duration::from_secs(6 * 60 * 60)).await; // 6 hours
+            sleep(Duration::from_secs(6 * 60 * 60)).await;
             println!("Regenerating config backup...");
-            match gen_config_backup(&config_regen, &sing_box_home_regen).await {
+            let config = app_state_backup.config.lock().await;
+            match gen_config_backup(&config, &app_state_backup.sing_box_home).await {
                 Ok(_) => println!("Config backup regenerated successfully"),
                 Err(e) => eprintln!("Failed to regenerate config backup: {}", e),
             }
         }
     });
 
-    // Build router with new API endpoints
+    // Build router with API endpoints
     let app = Router::new()
         .route("/", get(serve_index))
+        // Status and service control
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
         .route("/api/service/restart", post(restart_service))
+        // Config management
         .route("/api/config", get(get_config))
         .route("/api/config/generate", post(generate_config))
+        // Subscription management
+        .route("/api/subs", get(get_subs))
+        .route("/api/subs", post(add_sub))
+        .route("/api/subs", delete(delete_sub))
+        // Node management
+        .route("/api/nodes", get(get_nodes))
+        .route("/api/nodes", post(add_node))
+        .route("/api/nodes", delete(delete_node))
         .with_state(app_state);
 
     println!("Miao server listening on http://0.0.0.0:{}", port);
