@@ -1,123 +1,610 @@
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="dark">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Miao Control Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <style>
+        :root {
+            --bg-gradient-start: #0f0c29;
+            --bg-gradient-mid: #302b63;
+            --bg-gradient-end: #24243e;
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --accent-green: #00d9a5;
+            --accent-red: #ff4757;
+            --accent-blue: #5f9ea0;
+            --accent-orange: #ffa502;
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
         body {
-            padding-top: 2rem;
-            padding-bottom: 2rem;
+            min-height: 100vh;
+            background: linear-gradient(135deg, var(--bg-gradient-start), var(--bg-gradient-mid), var(--bg-gradient-end));
+            color: #e0e0e0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }
+        
         .container {
-            max-width: 800px;
+            max-width: 900px;
+            padding: 2rem 1rem;
         }
-        .card {
+        
+        .header {
+            text-align: center;
+            margin-bottom: 2.5rem;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #fff, var(--accent-green));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.5rem;
+        }
+        
+        .header p {
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.95rem;
+        }
+        
+        .glass-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.5rem;
             margin-bottom: 1.5rem;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
-        #config-display {
-            max-height: 500px;
+        
+        .glass-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(0, 217, 165, 0.1);
+        }
+        
+        .card-header-custom {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1.25rem;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        
+        .card-header-custom i {
+            font-size: 1.25rem;
+            color: var(--accent-green);
+        }
+        
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 50px;
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        
+        .status-running {
+            background: rgba(0, 217, 165, 0.15);
+            color: var(--accent-green);
+            border: 1px solid rgba(0, 217, 165, 0.3);
+        }
+        
+        .status-stopped {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--accent-red);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-running .status-dot {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+        }
+        
+        .status-stopped .status-dot {
+            background: var(--accent-red);
+            animation: none;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .status-details {
+            display: flex;
+            gap: 2rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        
+        .status-label {
+            font-size: 0.75rem;
+            color: rgba(255, 255, 255, 0.5);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .status-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        
+        .btn-custom {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            border-radius: 12px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 120px;
+        }
+        
+        .btn-custom:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .btn-start {
+            background: linear-gradient(135deg, #00d9a5, #00b894);
+            color: #fff;
+        }
+        
+        .btn-start:hover:not(:disabled) {
+            background: linear-gradient(135deg, #00f7bc, #00d9a5);
+            box-shadow: 0 4px 20px rgba(0, 217, 165, 0.4);
+        }
+        
+        .btn-stop {
+            background: linear-gradient(135deg, #ff4757, #ff6b7a);
+            color: #fff;
+        }
+        
+        .btn-stop:hover:not(:disabled) {
+            background: linear-gradient(135deg, #ff6b7a, #ff4757);
+            box-shadow: 0 4px 20px rgba(255, 71, 87, 0.4);
+        }
+        
+        .btn-restart {
+            background: linear-gradient(135deg, #ffa502, #ff7f00);
+            color: #fff;
+        }
+        
+        .btn-restart:hover:not(:disabled) {
+            background: linear-gradient(135deg, #ffb732, #ffa502);
+            box-shadow: 0 4px 20px rgba(255, 165, 2, 0.4);
+        }
+        
+        .btn-secondary-custom {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .btn-secondary-custom:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+        
+        .btn-group-custom {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .config-display {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 1rem;
+            max-height: 400px;
             overflow-y: auto;
-            background-color: #212529;
+            font-family: 'Fira Code', 'Monaco', monospace;
+            font-size: 0.85rem;
+            line-height: 1.6;
+            margin-top: 1rem;
         }
-        .btn-group .btn {
-            margin-right: 0.5rem;
+        
+        .config-display::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .config-display::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+        }
+        
+        .config-display::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+        
+        .config-meta {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 0.75rem;
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.5);
+        }
+        
+        .toast-container {
+            position: fixed;
+            top: 1.5rem;
+            right: 1.5rem;
+            z-index: 1050;
+        }
+        
+        .toast-custom {
+            background: rgba(30, 30, 40, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            max-width: 350px;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        
+        .toast-success {
+            border-left: 3px solid var(--accent-green);
+        }
+        
+        .toast-error {
+            border-left: 3px solid var(--accent-red);
+        }
+        
+        .toast-info {
+            border-left: 3px solid var(--accent-blue);
+        }
+        
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .fade-enter-active, .fade-leave-active {
+            transition: opacity 0.3s ease;
+        }
+        
+        .fade-enter-from, .fade-leave-to {
+            opacity: 0;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header class="d-flex justify-content-between align-items-center mb-4">
-            <h1 class="h3">Miao Control Panel</h1>
-        </header>
-
-        <div id="status-alert" class="alert" role="alert" style="display: none;"></div>
-
-        <div class="card">
-            <div class="card-header">Process Control</div>
-            <div class="card-body btn-group">
-                <button id="start-btn" class="btn btn-success">Start</button>
-                <button id="stop-btn" class="btn btn-danger">Stop</button>
-                <button id="restart-btn" class="btn btn-warning">Restart</button>
+    <div id="app">
+        <div class="container">
+            <!-- Header -->
+            <div class="header">
+                <h1><i class="bi bi-box-seam"></i> Miao</h1>
+                <p>sing-box 控制面板</p>
+            </div>
+            
+            <!-- Status Card -->
+            <div class="glass-card">
+                <div class="card-header-custom">
+                    <i class="bi bi-activity"></i>
+                    <span>服务状态</span>
+                </div>
+                <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
+                    <div>
+                        <div :class="['status-indicator', status.running ? 'status-running' : 'status-stopped']">
+                            <span class="status-dot"></span>
+                            {{ status.running ? '运行中' : '已停止' }}
+                        </div>
+                        <div class="status-details" v-if="status.running">
+                            <div class="status-item">
+                                <span class="status-label">PID</span>
+                                <span class="status-value">{{ status.pid || '-' }}</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">运行时间</span>
+                                <span class="status-value">{{ formatUptime(status.uptime_secs) }}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="btn-group-custom">
+                        <button 
+                            class="btn-custom btn-start" 
+                            @click="startService" 
+                            :disabled="loading || status.running">
+                            <span v-if="loading && loadingAction === 'start'" class="spinner"></span>
+                            <i v-else class="bi bi-play-fill"></i>
+                            启动
+                        </button>
+                        <button 
+                            class="btn-custom btn-stop" 
+                            @click="stopService" 
+                            :disabled="loading || !status.running">
+                            <span v-if="loading && loadingAction === 'stop'" class="spinner"></span>
+                            <i v-else class="bi bi-stop-fill"></i>
+                            停止
+                        </button>
+                        <button 
+                            class="btn-custom btn-restart" 
+                            @click="restartService" 
+                            :disabled="loading">
+                            <span v-if="loading && loadingAction === 'restart'" class="spinner"></span>
+                            <i v-else class="bi bi-arrow-clockwise"></i>
+                            重启
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Config Card -->
+            <div class="glass-card">
+                <div class="card-header-custom">
+                    <i class="bi bi-gear"></i>
+                    <span>配置管理</span>
+                </div>
+                <div class="btn-group-custom">
+                    <button 
+                        class="btn-custom btn-secondary-custom" 
+                        @click="generateConfig" 
+                        :disabled="loading">
+                        <span v-if="loading && loadingAction === 'generate'" class="spinner"></span>
+                        <i v-else class="bi bi-arrow-repeat"></i>
+                        重新生成
+                    </button>
+                    <button 
+                        class="btn-custom btn-secondary-custom" 
+                        @click="toggleConfig" 
+                        :disabled="loading">
+                        <i :class="showConfig ? 'bi bi-eye-slash' : 'bi bi-eye'"></i>
+                        {{ showConfig ? '隐藏配置' : '查看配置' }}
+                    </button>
+                </div>
+                
+                <div v-if="showConfig && config.content">
+                    <div class="config-meta">
+                        <span><i class="bi bi-file-earmark-code"></i> {{ formatBytes(config.size) }}</span>
+                        <span><i class="bi bi-clock"></i> 修改于 {{ formatTime(config.modified) }}</span>
+                    </div>
+                    <pre class="config-display"><code>{{ config.content }}</code></pre>
+                </div>
             </div>
         </div>
-
-        <div class="card">
-            <div class="card-header">Configuration Management</div>
-            <div class="card-body btn-group">
-                <button id="gen-config-btn" class="btn btn-primary">Generate Config</button>
-                <button id="gen-rule-btn" class="btn btn-primary">Generate Rule</button>
-                <button id="show-config-btn" class="btn btn-info">Show Current Config</button>
-            </div>
-        </div>
-
-        <div class="card" id="config-card" style="display: none;">
-            <div class="card-header">
-                Current sing-box Config
-            </div>
-            <div class="card-body">
-                <pre id="config-display"><code></code></pre>
-            </div>
+        
+        <!-- Toast Container -->
+        <div class="toast-container">
+            <transition-group name="fade">
+                <div 
+                    v-for="toast in toasts" 
+                    :key="toast.id" 
+                    :class="['toast-custom', `toast-${toast.type}`]">
+                    <i :class="getToastIcon(toast.type)"></i>
+                    <span>{{ toast.message }}</span>
+                </div>
+            </transition-group>
         </div>
     </div>
-
+    
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script>
-        const startBtn = document.getElementById('start-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        const restartBtn = document.getElementById('restart-btn');
-        const genConfigBtn = document.getElementById('gen-config-btn');
-        const genRuleBtn = document.getElementById('gen-rule-btn');
-        const showConfigBtn = document.getElementById('show-config-btn');
-        const configCard = document.getElementById('config-card');
-        const configDisplay = document.getElementById('config-display').querySelector('code');
-        const statusAlert = document.getElementById('status-alert');
-
-        function showAlert(message, type = 'success') {
-            statusAlert.textContent = message;
-            statusAlert.className = `alert alert-${type}`;
-            statusAlert.style.display = 'block';
-            setTimeout(() => {
-                statusAlert.style.display = 'none';
-            }, 5000);
-        }
-
-        async function apiCall(endpoint, method = 'POST', showSuccess = true) {
-            try {
-                const response = await fetch(`/api/${endpoint}`, { method });
-                const text = await response.text();
-                if (!response.ok) {
-                    throw new Error(`[${response.status}] ${text}`);
-                }
-                if (showSuccess) {
-                    showAlert(`Successfully executed: ${endpoint}`, 'success');
-                }
-                return text;
-            } catch (error) {
-                showAlert(`Error: ${error.message}`, 'danger');
-                return null;
+        const { createApp, ref, onMounted, onUnmounted } = Vue;
+        
+        createApp({
+            setup() {
+                // State
+                const status = ref({ running: false, pid: null, uptime_secs: null });
+                const config = ref({ content: '', modified: 0, size: 0 });
+                const showConfig = ref(false);
+                const loading = ref(false);
+                const loadingAction = ref('');
+                const toasts = ref([]);
+                let statusInterval = null;
+                let toastId = 0;
+                
+                // Toast notifications
+                const showToast = (message, type = 'info') => {
+                    const id = ++toastId;
+                    toasts.value.push({ id, message, type });
+                    setTimeout(() => {
+                        toasts.value = toasts.value.filter(t => t.id !== id);
+                    }, 4000);
+                };
+                
+                const getToastIcon = (type) => {
+                    const icons = {
+                        success: 'bi bi-check-circle-fill',
+                        error: 'bi bi-x-circle-fill',
+                        info: 'bi bi-info-circle-fill'
+                    };
+                    return icons[type] || icons.info;
+                };
+                
+                // API calls
+                const apiCall = async (endpoint, method = 'GET', action = '') => {
+                    loading.value = true;
+                    loadingAction.value = action;
+                    try {
+                        const response = await fetch(`/api/${endpoint}`, { method });
+                        const data = await response.json();
+                        if (!response.ok || !data.success) {
+                            throw new Error(data.message || 'Request failed');
+                        }
+                        return data;
+                    } catch (error) {
+                        showToast(error.message, 'error');
+                        throw error;
+                    } finally {
+                        loading.value = false;
+                        loadingAction.value = '';
+                    }
+                };
+                
+                // Fetch status
+                const fetchStatus = async () => {
+                    try {
+                        const response = await fetch('/api/status');
+                        const data = await response.json();
+                        if (data.success && data.data) {
+                            status.value = data.data;
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch status:', e);
+                    }
+                };
+                
+                // Service controls
+                const startService = async () => {
+                    try {
+                        await apiCall('service/start', 'POST', 'start');
+                        showToast('服务已启动', 'success');
+                        await fetchStatus();
+                    } catch (e) {}
+                };
+                
+                const stopService = async () => {
+                    try {
+                        await apiCall('service/stop', 'POST', 'stop');
+                        showToast('服务已停止', 'success');
+                        await fetchStatus();
+                    } catch (e) {}
+                };
+                
+                const restartService = async () => {
+                    try {
+                        await apiCall('service/restart', 'POST', 'restart');
+                        showToast('服务已重启', 'success');
+                        await fetchStatus();
+                    } catch (e) {}
+                };
+                
+                // Config management
+                const fetchConfig = async () => {
+                    try {
+                        const data = await apiCall('config', 'GET', 'config');
+                        if (data.data) {
+                            config.value = data.data;
+                        }
+                    } catch (e) {}
+                };
+                
+                const generateConfig = async () => {
+                    try {
+                        await apiCall('config/generate', 'POST', 'generate');
+                        showToast('配置已重新生成', 'success');
+                        if (showConfig.value) {
+                            await fetchConfig();
+                        }
+                    } catch (e) {}
+                };
+                
+                const toggleConfig = async () => {
+                    if (!showConfig.value) {
+                        await fetchConfig();
+                    }
+                    showConfig.value = !showConfig.value;
+                };
+                
+                // Formatters
+                const formatUptime = (seconds) => {
+                    if (!seconds) return '-';
+                    const hrs = Math.floor(seconds / 3600);
+                    const mins = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
+                    if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+                    if (mins > 0) return `${mins}m ${secs}s`;
+                    return `${secs}s`;
+                };
+                
+                const formatBytes = (bytes) => {
+                    if (!bytes) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+                };
+                
+                const formatTime = (timestamp) => {
+                    if (!timestamp) return '-';
+                    return new Date(timestamp * 1000).toLocaleString('zh-CN');
+                };
+                
+                // Lifecycle
+                onMounted(() => {
+                    fetchStatus();
+                    statusInterval = setInterval(fetchStatus, 3000);
+                });
+                
+                onUnmounted(() => {
+                    if (statusInterval) clearInterval(statusInterval);
+                });
+                
+                return {
+                    status,
+                    config,
+                    showConfig,
+                    loading,
+                    loadingAction,
+                    toasts,
+                    showToast,
+                    getToastIcon,
+                    startService,
+                    stopService,
+                    restartService,
+                    generateConfig,
+                    toggleConfig,
+                    formatUptime,
+                    formatBytes,
+                    formatTime
+                };
             }
-        }
-
-        startBtn.addEventListener('click', () => apiCall('sing/start'));
-        stopBtn.addEventListener('click', () => apiCall('sing/stop'));
-        restartBtn.addEventListener('click', () => apiCall('sing/restart'));
-        genConfigBtn.addEventListener('click', () => apiCall('config/generate', 'GET'));
-        genRuleBtn.addEventListener('click', () => apiCall('rule/generate', 'GET'));
-
-        showConfigBtn.addEventListener('click', async () => {
-            const data = await apiCall('config', 'GET', false);
-            if (data) {
-                try {
-                    const jsonData = JSON.parse(data);
-                    configDisplay.textContent = jsonData.config_content;
-                    configCard.style.display = 'block';
-                    showAlert('Configuration loaded.', 'info');
-                } catch (e) {
-                    showAlert('Failed to parse configuration JSON.', 'danger');
-                }
-            }
-        });
+        }).mount('#app');
     </script>
 </body>
 </html>

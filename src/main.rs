@@ -7,12 +7,13 @@ use axum::{
 };
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
-use std::path::PathBuf;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 // Embed sing-box binary based on target architecture
 #[cfg(target_arch = "x86_64")]
@@ -21,9 +22,9 @@ const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-amd64");
 #[cfg(target_arch = "aarch64")]
 const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-arm64");
 
-async fn serve_index() -> Html<&'static str> {
-    Html(include_str!("../public/index.html"))
-}
+// ============================================================================
+// Data Structures
+// ============================================================================
 
 #[derive(Clone, Deserialize)]
 struct Config {
@@ -63,17 +64,239 @@ struct Tls {
     insecure: bool,
 }
 
-lazy_static! {
-    static ref SING_PROCESS: Mutex<Option<tokio::process::Child>> = Mutex::new(None);
+// ============================================================================
+// API Response Types
+// ============================================================================
+
+#[derive(Serialize)]
+struct ApiResponse<T: Serialize> {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<T>,
 }
+
+impl<T: Serialize> ApiResponse<T> {
+    fn success(message: impl Into<String>, data: T) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+            data: Some(data),
+        }
+    }
+
+    fn success_no_data(message: impl Into<String>) -> Self
+    where
+        T: Default,
+    {
+        Self {
+            success: true,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct StatusData {
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ConfigData {
+    content: String,
+    modified: u64,
+    size: u64,
+}
+
+// ============================================================================
+// Global State
+// ============================================================================
+
+struct SingBoxProcess {
+    child: tokio::process::Child,
+    started_at: Instant,
+}
+
+lazy_static! {
+    static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
+}
+
+// ============================================================================
+// API Handlers
+// ============================================================================
+
+async fn serve_index() -> Html<&'static str> {
+    Html(include_str!("../public/index.html"))
+}
+
+/// GET /api/status - Get sing-box running status
+async fn get_status() -> Json<ApiResponse<StatusData>> {
+    let mut lock = SING_PROCESS.lock().await;
+
+    let (running, pid, uptime_secs) = if let Some(ref mut proc) = *lock {
+        // Check if still running
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                // Process has exited
+                *lock = None;
+                (false, None, None)
+            }
+            Ok(None) => {
+                // Still running
+                let uptime = proc.started_at.elapsed().as_secs();
+                (true, proc.child.id(), Some(uptime))
+            }
+            Err(_) => (false, None, None),
+        }
+    } else {
+        (false, None, None)
+    };
+
+    Json(ApiResponse::success(
+        if running { "running" } else { "stopped" },
+        StatusData {
+            running,
+            pid,
+            uptime_secs,
+        },
+    ))
+}
+
+/// POST /api/service/start - Start sing-box
+async fn start_service(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut lock = SING_PROCESS.lock().await;
+
+    // Check if already running
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait().ok().flatten().is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("sing-box is already running")),
+            ));
+        }
+    }
+
+    drop(lock);
+
+    match start_sing_internal(&state.sing_box_home).await {
+        Ok(_) => Ok(Json(ApiResponse::success_no_data("sing-box started successfully"))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to start: {}", e))),
+        )),
+    }
+}
+
+/// POST /api/service/stop - Stop sing-box
+async fn stop_service() -> Json<ApiResponse<()>> {
+    stop_sing_internal().await;
+    Json(ApiResponse::success_no_data("sing-box stopped"))
+}
+
+/// POST /api/service/restart - Restart sing-box
+async fn restart_service(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    stop_sing_internal().await;
+
+    // Small delay to ensure clean shutdown
+    sleep(Duration::from_millis(500)).await;
+
+    match start_sing_internal(&state.sing_box_home).await {
+        Ok(_) => Ok(Json(ApiResponse::success_no_data("sing-box restarted successfully"))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+        )),
+    }
+}
+
+/// GET /api/config - Get current sing-box configuration
+async fn get_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<ConfigData>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let config_path = format!("{}/config.json", state.sing_box_home);
+
+    let metadata = match tokio::fs::metadata(&config_path).await {
+        Ok(m) => m,
+        Err(_) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("Config file not found")),
+            ))
+        }
+    };
+
+    let content = match tokio::fs::read_to_string(&config_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to read config: {}", e))),
+            ))
+        }
+    };
+
+    // Pretty print JSON
+    let pretty_content = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or(content),
+        Err(_) => content,
+    };
+
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Ok(Json(ApiResponse::success(
+        "Config loaded",
+        ConfigData {
+            content: pretty_content,
+            modified,
+            size: metadata.len(),
+        },
+    )))
+}
+
+/// POST /api/config/generate - Regenerate sing-box configuration
+async fn generate_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    match gen_config(&state.config, &state.sing_box_home).await {
+        Ok(_) => Ok(Json(ApiResponse::success_no_data("Config generated successfully"))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to generate config: {}", e))),
+        )),
+    }
+}
+
+// ============================================================================
+// Internal Functions
+// ============================================================================
 
 /// Extract embedded sing-box binary to current working directory
 fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    // Use current working directory
     let current_dir = std::env::current_dir()?;
     let sing_box_path = current_dir.join("sing-box");
 
-    // Extract sing-box binary if it doesn't exist
     if !sing_box_path.exists() {
         println!("Extracting embedded sing-box binary to {:?}", sing_box_path);
         fs::write(&sing_box_path, SING_BOX_BINARY)?;
@@ -81,7 +304,6 @@ fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync
         println!("sing-box binary extracted successfully");
     }
 
-    // Create dashboard directory if it doesn't exist
     let dashboard_dir = current_dir.join("dashboard");
     if !dashboard_dir.exists() {
         fs::create_dir_all(&dashboard_dir)?;
@@ -90,15 +312,14 @@ fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync
     Ok(current_dir)
 }
 
-async fn check_and_install_openwrt_dependencies() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Check if /etc/openwrt_release exists to identify OpenWrt
+async fn check_and_install_openwrt_dependencies(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !PathBuf::from("/etc/openwrt_release").exists() {
         return Ok(());
     }
 
     println!("OpenWrt system detected. Checking dependencies...");
 
-    // Check installed packages
     let output = tokio::process::Command::new("opkg")
         .arg("list-installed")
         .output()
@@ -124,9 +345,11 @@ async fn check_and_install_openwrt_dependencies() -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
-    println!("Missing dependencies: {:?}. Installing...", packages_to_install);
+    println!(
+        "Missing dependencies: {:?}. Installing...",
+        packages_to_install
+    );
 
-    // Run opkg update
     println!("Running 'opkg update'...");
     let update_status = tokio::process::Command::new("opkg")
         .arg("update")
@@ -137,7 +360,6 @@ async fn check_and_install_openwrt_dependencies() -> Result<(), Box<dyn std::err
         eprintln!("'opkg update' finished with error, but proceeding with installation attempt...");
     }
 
-    // Install packages
     for pkg in packages_to_install {
         println!("Installing {}...", pkg);
         let install_status = tokio::process::Command::new("opkg")
@@ -145,9 +367,11 @@ async fn check_and_install_openwrt_dependencies() -> Result<(), Box<dyn std::err
             .arg(pkg)
             .status()
             .await?;
-        
+
         if !install_status.success() {
-            return Err(format!("Failed to install {}. Please install it manually.", pkg).into());
+            return Err(
+                format!("Failed to install {}. Please install it manually.", pkg).into(),
+            );
         }
     }
 
@@ -155,113 +379,56 @@ async fn check_and_install_openwrt_dependencies() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config: Config = serde_yaml::from_str(&tokio::fs::read_to_string("miao.yaml").await?)?;
-    let port = config.port;
-
-    // Extract embedded sing-box binary and determine working directory
-    let sing_box_home = if let Some(custom_home) = &config.sing_box_home {
-        custom_home.clone()
-    } else {
-        extract_sing_box()?.to_string_lossy().to_string()
-    };
-
-    // Generate initial config, retrying until success
-    loop {
-        match gen_config(&config, &sing_box_home).await {
-            Ok(_) => break,
-            Err(e) => {
-                eprintln!(
-                    "Failed to generate config: {}. Retrying in 300 seconds...",
-                    e
-                );
-                sleep(Duration::from_secs(300)).await;
-            }
+async fn start_sing_internal(
+    sing_box_home: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lock = SING_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait()?.is_none() {
+            return Err("already running!".into());
         }
     }
 
-    // Check OpenWrt dependencies
-    if let Err(e) = check_and_install_openwrt_dependencies().await {
-        eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
-    }
+    let sing_box_path = PathBuf::from(sing_box_home).join("sing-box");
+    let config_path = PathBuf::from(sing_box_home).join("config.json");
 
-    // Start sing-box
-    match start_sing(&sing_box_home).await {
-        Ok(_) => println!("sing-box started successfully"),
-        Err(e) => eprintln!("Failed to start sing-box: {}", e),
-    }
+    println!("Starting sing-box from: {:?}", sing_box_path);
+    println!("Using config: {:?}", config_path);
 
-    let app_state = Arc::new(AppState {
-        config: config.clone(),
-        sing_box_home: sing_box_home.clone(),
+    let child = tokio::process::Command::new(&sing_box_path)
+        .current_dir(sing_box_home)
+        .arg("run")
+        .arg("-c")
+        .arg(&config_path)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    let pid = child.id();
+    println!("sing-box process spawned with PID: {:?}", pid);
+
+    *lock = Some(SingBoxProcess {
+        child,
+        started_at: Instant::now(),
     });
 
-    // Start background task to regenerate config backup every 6 hours
-    let config_regen = config.clone();
-    let sing_box_home_regen = sing_box_home.clone();
-    tokio::spawn(async move {
-        loop {
-            sleep(Duration::from_secs(6 * 60 * 60)).await; // 6 hours
-            println!("Regenerating config backup...");
-            match gen_config_backup(&config_regen, &sing_box_home_regen).await {
-                Ok(_) => println!("Config backup regenerated successfully"),
-                Err(e) => eprintln!("Failed to regenerate config backup: {}", e),
-            }
-        }
-    });
-    let app = Router::new()
-        .route("/", get(serve_index))
-        .route("/api/config", get(get_config_handler))
-        .route("/api/config/generate", get(generate_config_handler))
-        .route("/api/sing/restart", post(restart_sing))
-        .route("/api/sing/start", post(start_sing_handler))
-        .route("/api/sing/stop", post(stop_sing_handler))
-        .with_state(app_state);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn get_config_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config_output_loc = format!("{}/config.json", state.sing_box_home);
-    let stat = tokio::fs::metadata(&config_output_loc)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "config file not found".to_string()))?;
-    let config_content = tokio::fs::read_to_string(&config_output_loc)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "config file not found".to_string()))?;
-    let config_json: serde_json::Value = serde_json::from_str(&config_content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "config_stat": serde_json::json!({
-            "size": stat.len(),
-            "modified": stat.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            "created": stat.created().unwrap_or(std::time::SystemTime::UNIX_EPOCH).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        }),
-        "config_content": serde_json::to_string_pretty(&config_json).unwrap()
-    })))
-}
-
-async fn generate_config_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<axum::response::Response, (StatusCode, String)> {
-    match gen_config(&state.config, &state.sing_box_home).await {
-        Ok(_) => {
-            let config_output_loc = format!("{}/config.json", state.sing_box_home);
-            let file = tokio::fs::read(&config_output_loc)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(axum::response::Response::new(axum::body::Body::from(file)))
+async fn stop_sing_internal() {
+    let mut lock = SING_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait().ok().flatten().is_none() {
+            proc.child.start_kill().ok();
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+    *lock = None;
 }
 
-async fn gen_config(config: &Config, sing_box_home: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn gen_config(
+    config: &Config,
+    sing_box_home: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let my_outbounds: Vec<serde_json::Value> = config
         .nodes
         .iter()
@@ -271,8 +438,10 @@ async fn gen_config(config: &Config, sing_box_home: &str) -> Result<(), Box<dyn 
         .iter()
         .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
         .collect();
+
     let mut final_outbounds: Vec<serde_json::Value> = vec![];
     let mut final_node_names: Vec<String> = vec![];
+
     for sub in &config.subs {
         match fetch_sub(sub).await {
             Ok((node_names, outbounds)) => {
@@ -285,10 +454,11 @@ async fn gen_config(config: &Config, sing_box_home: &str) -> Result<(), Box<dyn 
         }
     }
 
-    // Check if we have at least one node (either from manual config or subscriptions)
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
-        return Err("No nodes available: all subscriptions failed and no manual nodes configured".into());
+        return Err(
+            "No nodes available: all subscriptions failed and no manual nodes configured".into(),
+        );
     }
 
     let mut sing_box_config = get_config_template();
@@ -298,19 +468,21 @@ async fn gen_config(config: &Config, sing_box_home: &str) -> Result<(), Box<dyn 
                 my_names
                     .into_iter()
                     .chain(final_node_names.into_iter())
-                    .map(|s| serde_json::Value::String(s)),
+                    .map(serde_json::Value::String),
             );
         }
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
         arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
     }
+
     let config_output_loc = format!("{}/config.json", sing_box_home);
     tokio::fs::write(
         &config_output_loc,
         serde_json::to_string_pretty(&sing_box_config)?,
     )
     .await?;
+
     println!(
         "Generated config: {}",
         serde_json::to_string_pretty(&sing_box_config).unwrap()
@@ -318,7 +490,10 @@ async fn gen_config(config: &Config, sing_box_home: &str) -> Result<(), Box<dyn 
     Ok(())
 }
 
-async fn gen_config_backup(config: &Config, sing_box_home: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn gen_config_backup(
+    config: &Config,
+    sing_box_home: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let my_outbounds: Vec<serde_json::Value> = config
         .nodes
         .iter()
@@ -328,8 +503,10 @@ async fn gen_config_backup(config: &Config, sing_box_home: &str) -> Result<(), B
         .iter()
         .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
         .collect();
+
     let mut final_outbounds: Vec<serde_json::Value> = vec![];
     let mut final_node_names: Vec<String> = vec![];
+
     for sub in &config.subs {
         match fetch_sub(sub).await {
             Ok((node_names, outbounds)) => {
@@ -342,10 +519,11 @@ async fn gen_config_backup(config: &Config, sing_box_home: &str) -> Result<(), B
         }
     }
 
-    // Check if we have at least one node (either from manual config or subscriptions)
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
-        return Err("No nodes available: all subscriptions failed and no manual nodes configured".into());
+        return Err(
+            "No nodes available: all subscriptions failed and no manual nodes configured".into(),
+        );
     }
 
     let mut sing_box_config = get_config_template();
@@ -355,19 +533,21 @@ async fn gen_config_backup(config: &Config, sing_box_home: &str) -> Result<(), B
                 my_names
                     .into_iter()
                     .chain(final_node_names.into_iter())
-                    .map(|s| serde_json::Value::String(s)),
+                    .map(serde_json::Value::String),
             );
         }
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
         arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
     }
+
     let config_backup_loc = format!("{}/config.bak.json", sing_box_home);
     tokio::fs::write(
         &config_backup_loc,
         serde_json::to_string_pretty(&sing_box_config)?,
     )
     .await?;
+
     println!("Generated config backup: {}", config_backup_loc);
     Ok(())
 }
@@ -429,10 +609,11 @@ async fn fetch_sub(
         .and_then(|p| p.as_sequence())
         .unwrap_or(&vec![])
         .clone();
-    // Accept all nodes from subscription (no geographic filtering)
+
     let nodes: Vec<serde_yaml::Value> = proxies.into_iter().collect();
     let mut node_names = vec![];
     let mut outbounds = vec![];
+
     for node in nodes {
         let typ = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let name = node.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -472,72 +653,79 @@ async fn fetch_sub(
     Ok((node_names, outbounds))
 }
 
-async fn restart_sing(State(state): State<Arc<AppState>>) -> Result<String, (StatusCode, String)> {
-    stop_sing_internal().await;
-    match start_sing(&state.sing_box_home).await {
-        Ok(_) => Ok("ok".to_string()),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-}
+// ============================================================================
+// Main Entry Point
+// ============================================================================
 
-async fn start_sing_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<String, (StatusCode, String)> {
-    let mut lock = SING_PROCESS.lock().await;
-    if lock.is_some() && lock.as_mut().unwrap().try_wait().unwrap().is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "sing box is already running".to_string(),
-        ));
-    }
-    drop(lock);
-    match start_sing(&state.sing_box_home).await {
-        Ok(_) => Ok("ok".to_string()),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
-}
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config: Config = serde_yaml::from_str(&tokio::fs::read_to_string("miao.yaml").await?)?;
+    let port = config.port;
 
-async fn stop_sing_handler(
-    State(_state): State<Arc<AppState>>,
-) -> Result<String, (StatusCode, String)> {
-    stop_sing_internal().await;
-    Ok("stopped".to_string())
-}
+    // Extract embedded sing-box binary and determine working directory
+    let sing_box_home = if let Some(custom_home) = &config.sing_box_home {
+        custom_home.clone()
+    } else {
+        extract_sing_box()?.to_string_lossy().to_string()
+    };
 
-async fn start_sing(sing_box_home: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut lock = SING_PROCESS.lock().await;
-    if lock.is_some() && lock.as_mut().unwrap().try_wait()?.is_none() {
-        return Err("already running!".into());
-    }
-
-    // Use absolute path to sing-box binary
-    let sing_box_path = PathBuf::from(sing_box_home).join("sing-box");
-    let config_path = PathBuf::from(sing_box_home).join("config.json");
-
-    println!("Starting sing-box from: {:?}", sing_box_path);
-    println!("Using config: {:?}", config_path);
-
-    let child = tokio::process::Command::new(&sing_box_path)
-        .current_dir(sing_box_home)
-        .arg("run")
-        .arg("-c")
-        .arg(&config_path)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
-    let pid = child.id();
-    println!("sing-box process spawned with PID: {:?}", pid);
-    *lock = Some(child);
-    Ok(())
-}
-
-async fn stop_sing_internal() {
-    let mut lock = SING_PROCESS.lock().await;
-    if let Some(ref mut p) = *lock {
-        if p.try_wait().ok().flatten().is_none() {
-            p.start_kill().ok();
+    // Generate initial config, retrying until success
+    loop {
+        match gen_config(&config, &sing_box_home).await {
+            Ok(_) => break,
+            Err(e) => {
+                eprintln!(
+                    "Failed to generate config: {}. Retrying in 300 seconds...",
+                    e
+                );
+                sleep(Duration::from_secs(300)).await;
+            }
         }
     }
-    *lock = None;
+
+    // Check OpenWrt dependencies
+    if let Err(e) = check_and_install_openwrt_dependencies().await {
+        eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
+    }
+
+    // Start sing-box
+    match start_sing_internal(&sing_box_home).await {
+        Ok(_) => println!("sing-box started successfully"),
+        Err(e) => eprintln!("Failed to start sing-box: {}", e),
+    }
+
+    let app_state = Arc::new(AppState {
+        config: config.clone(),
+        sing_box_home: sing_box_home.clone(),
+    });
+
+    // Start background task to regenerate config backup every 6 hours
+    let config_regen = config.clone();
+    let sing_box_home_regen = sing_box_home.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(6 * 60 * 60)).await; // 6 hours
+            println!("Regenerating config backup...");
+            match gen_config_backup(&config_regen, &sing_box_home_regen).await {
+                Ok(_) => println!("Config backup regenerated successfully"),
+                Err(e) => eprintln!("Failed to regenerate config backup: {}", e),
+            }
+        }
+    });
+
+    // Build router with new API endpoints
+    let app = Router::new()
+        .route("/", get(serve_index))
+        .route("/api/status", get(get_status))
+        .route("/api/service/start", post(start_service))
+        .route("/api/service/stop", post(stop_service))
+        .route("/api/service/restart", post(restart_service))
+        .route("/api/config", get(get_config))
+        .route("/api/config/generate", post(generate_config))
+        .with_state(app_state);
+
+    println!("Miao server listening on http://0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
