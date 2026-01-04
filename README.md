@@ -54,6 +54,8 @@ sudo ./miao
 > 需要 root 权限创建 TUN 网卡
 
 ### 4. 完成！🎉
+<img width="1823" height="1420" alt="image" src="https://github.com/user-attachments/assets/7cec4dd0-9a9c-4fe1-882b-6ec4344411bb" />
+
 
 - 访问 `http://localhost:6161` 打开控制面板
 - 国内流量直连，国外流量自动走代理
