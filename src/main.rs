@@ -858,7 +858,9 @@ fn get_config_template() -> serde_json::Value {
 async fn fetch_sub(
     link: &str,
 ) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let res = client
         .get(link)
         .header("User-Agent", "clash-meta")
