@@ -38,7 +38,11 @@ subs:
 ```yaml
 port: 6161
 nodes:
-  - '{"type":"hysteria2","tag":"我的节点","server":"example.com","server_port":443,"password":"your-password"}'
+  # 基础配置 (SNI 默认使用 server 地址)
+  - '{"type":"hysteria2","tag":"节点1","server":"example.com","server_port":443,"password":"xxx"}'
+  
+  # 指定 SNI (当 server 是 IP 时需要)
+  - '{"type":"hysteria2","tag":"节点2","server":"1.2.3.4","server_port":443,"password":"xxx","sni":"example.com"}'
 ```
 
 ### 3. 运行
