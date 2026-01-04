@@ -762,7 +762,7 @@ async fn gen_config_backup(
 fn get_config_template() -> serde_json::Value {
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
-        "experimental": {"clash_api": {"external_controller": "0.0.0.0:9090", "external_ui": "dashboard"}},
+        "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "external_ui": "dashboard"}},
         "dns": {
             "final": "googledns",
             "strategy": "prefer_ipv4",
