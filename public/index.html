@@ -453,6 +453,11 @@
             <div class="header">
                 <h1><i class="bi bi-box-seam"></i> Miao</h1>
                 <p>sing-box 控制面板</p>
+                <a :href="clashApiUrl" target="_blank" class="btn-custom btn-secondary-custom"
+                    style="margin-top: 1rem; display: inline-flex;">
+                    <i class="bi bi-speedometer2"></i>
+                    Clash 面板 (选择节点/流量统计)
+                </a>
             </div>
 
             <!-- 状态卡片 -->
@@ -661,6 +666,11 @@
                     return newNode.value.tag && newNode.value.server && newNode.value.server_port && newNode.value.password;
                 });
 
+                const clashApiUrl = computed(() => {
+                    const host = window.location.hostname;
+                    return `http://${host}:6262/ui`;
+                });
+
                 // Toast 通知
                 const showToast = (message, type = 'info') => {
                     const id = ++toastId;
@@ -844,7 +854,7 @@
 
                 return {
                     status, config, subs, nodes, showConfig, loading, loadingAction, toasts,
-                    newSubUrl, newNode, canAddNode,
+                    newSubUrl, newNode, canAddNode, clashApiUrl,
                     showToast, getToastIcon,
                     startService, stopService, restartService,
                     addSub, deleteSub, addNode, deleteNode,

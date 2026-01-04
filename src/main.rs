@@ -323,27 +323,35 @@ async fn add_sub(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut config = state.config.lock().await;
+    let config_clone;
+    {
+        let mut config = state.config.lock().await;
 
-    // Check if already exists
-    if config.subs.contains(&req.url) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("Subscription already exists")),
-        ));
+        if config.subs.contains(&req.url) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Subscription already exists")),
+            ));
+        }
+
+        config.subs.push(req.url);
+
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config_clone = config.clone();
     }
 
-    config.subs.push(req.url);
+    // Regenerate and restart in background
+    let sing_box_home = state.sing_box_home.clone();
+    tokio::spawn(async move {
+        regenerate_and_restart(&config_clone, &sing_box_home).await;
+    });
 
-    // Save to file
-    if let Err(e) = save_config(&config).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-        ));
-    }
-
-    Ok(Json(ApiResponse::success_no_data("Subscription added")))
+    Ok(Json(ApiResponse::success_no_data("Subscription added, restarting...")))
 }
 
 /// DELETE /api/subs - Delete a subscription URL
@@ -351,26 +359,35 @@ async fn delete_sub(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut config = state.config.lock().await;
+    let config_clone;
+    {
+        let mut config = state.config.lock().await;
 
-    let original_len = config.subs.len();
-    config.subs.retain(|s| s != &req.url);
+        let original_len = config.subs.len();
+        config.subs.retain(|s| s != &req.url);
 
-    if config.subs.len() == original_len {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Subscription not found")),
-        ));
+        if config.subs.len() == original_len {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("Subscription not found")),
+            ));
+        }
+
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config_clone = config.clone();
     }
 
-    if let Err(e) = save_config(&config).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-        ));
-    }
+    let sing_box_home = state.sing_box_home.clone();
+    tokio::spawn(async move {
+        regenerate_and_restart(&config_clone, &sing_box_home).await;
+    });
 
-    Ok(Json(ApiResponse::success_no_data("Subscription deleted")))
+    Ok(Json(ApiResponse::success_no_data("Subscription deleted, restarting...")))
 }
 
 // ============================================================================
@@ -406,53 +423,62 @@ async fn add_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NodeRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut config = state.config.lock().await;
+    let config_clone;
+    {
+        let mut config = state.config.lock().await;
 
-    // Check if tag already exists
-    for node_str in &config.nodes {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
-            if v.get("tag").and_then(|t| t.as_str()) == Some(&req.tag) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error("Node with this tag already exists")),
-                ));
+        // Check if tag already exists
+        for node_str in &config.nodes {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+                if v.get("tag").and_then(|t| t.as_str()) == Some(&req.tag) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::error("Node with this tag already exists")),
+                    ));
+                }
             }
         }
+
+        // Build Hysteria2 node
+        let node = Hysteria2 {
+            outbound_type: "hysteria2".to_string(),
+            tag: req.tag,
+            server: req.server,
+            server_port: req.server_port,
+            password: req.password,
+            up_mbps: 40,
+            down_mbps: 350,
+            tls: Tls {
+                enabled: true,
+                server_name: req.sni,
+                insecure: true,
+            },
+        };
+
+        let node_json = serde_json::to_string(&node).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to serialize node: {}", e))),
+            )
+        })?;
+
+        config.nodes.push(node_json);
+
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config_clone = config.clone();
     }
 
-    // Build Hysteria2 node
-    let node = Hysteria2 {
-        outbound_type: "hysteria2".to_string(),
-        tag: req.tag,
-        server: req.server,
-        server_port: req.server_port,
-        password: req.password,
-        up_mbps: 40,
-        down_mbps: 350,
-        tls: Tls {
-            enabled: true,
-            server_name: req.sni,
-            insecure: true,
-        },
-    };
+    let sing_box_home = state.sing_box_home.clone();
+    tokio::spawn(async move {
+        regenerate_and_restart(&config_clone, &sing_box_home).await;
+    });
 
-    let node_json = serde_json::to_string(&node).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to serialize node: {}", e))),
-        )
-    })?;
-
-    config.nodes.push(node_json);
-
-    if let Err(e) = save_config(&config).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-        ));
-    }
-
-    Ok(Json(ApiResponse::success_no_data("Node added")))
+    Ok(Json(ApiResponse::success_no_data("Node added, restarting...")))
 }
 
 /// DELETE /api/nodes - Delete a node by tag
@@ -460,32 +486,41 @@ async fn delete_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeleteNodeRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut config = state.config.lock().await;
+    let config_clone;
+    {
+        let mut config = state.config.lock().await;
 
-    let original_len = config.nodes.len();
-    config.nodes.retain(|node_str| {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
-            v.get("tag").and_then(|t| t.as_str()) != Some(&req.tag)
-        } else {
-            true
+        let original_len = config.nodes.len();
+        config.nodes.retain(|node_str| {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+                v.get("tag").and_then(|t| t.as_str()) != Some(&req.tag)
+            } else {
+                true
+            }
+        });
+
+        if config.nodes.len() == original_len {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("Node not found")),
+            ));
         }
+
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config_clone = config.clone();
+    }
+
+    let sing_box_home = state.sing_box_home.clone();
+    tokio::spawn(async move {
+        regenerate_and_restart(&config_clone, &sing_box_home).await;
     });
 
-    if config.nodes.len() == original_len {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Node not found")),
-        ));
-    }
-
-    if let Err(e) = save_config(&config).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-        ));
-    }
-
-    Ok(Json(ApiResponse::success_no_data("Node deleted")))
+    Ok(Json(ApiResponse::success_no_data("Node deleted, restarting...")))
 }
 
 // ============================================================================
@@ -497,6 +532,26 @@ async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + 
     let yaml = serde_yaml::to_string(config)?;
     tokio::fs::write("config.yaml", yaml).await?;
     Ok(())
+}
+
+/// Regenerate sing-box config and restart the service
+async fn regenerate_and_restart(config: &Config, sing_box_home: &str) {
+    // Regenerate config
+    if let Err(e) = gen_config(config, sing_box_home).await {
+        eprintln!("Failed to regenerate config: {}", e);
+        return;
+    }
+    println!("Config regenerated successfully");
+
+    // Stop and restart sing-box
+    stop_sing_internal().await;
+    sleep(Duration::from_millis(500)).await;
+
+    if let Err(e) = start_sing_internal(sing_box_home).await {
+        eprintln!("Failed to restart sing-box: {}", e);
+    } else {
+        println!("sing-box restarted successfully");
+    }
 }
 
 /// Extract embedded sing-box binary to current working directory
