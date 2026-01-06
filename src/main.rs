@@ -6,6 +6,8 @@ use axum::{
     Router,
 };
 use lazy_static::lazy_static;
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -932,7 +934,21 @@ async fn stop_sing_internal() {
     let mut lock = SING_PROCESS.lock().await;
     if let Some(ref mut proc) = *lock {
         if proc.child.try_wait().ok().flatten().is_none() {
-            proc.child.start_kill().ok();
+            // Use SIGTERM to allow sing-box to gracefully shutdown and cleanup nftables rules
+            if let Some(pid) = proc.child.id() {
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                // Wait up to 3 seconds for graceful shutdown
+                for _ in 0..30 {
+                    sleep(Duration::from_millis(100)).await;
+                    if proc.child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                }
+                // Force kill if still running
+                if proc.child.try_wait().ok().flatten().is_none() {
+                    proc.child.start_kill().ok();
+                }
+            }
         }
     }
     *lock = None;
@@ -943,9 +959,22 @@ async fn stop_sing_internal_and_wait() {
     let mut lock = SING_PROCESS.lock().await;
     if let Some(ref mut proc) = *lock {
         if proc.child.try_wait().ok().flatten().is_none() {
-            proc.child.start_kill().ok();
-            // Wait for process to exit
-            let _ = proc.child.wait().await;
+            // Use SIGTERM to allow sing-box to gracefully shutdown and cleanup nftables rules
+            if let Some(pid) = proc.child.id() {
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                // Wait up to 3 seconds for graceful shutdown
+                for _ in 0..30 {
+                    sleep(Duration::from_millis(100)).await;
+                    if proc.child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                }
+                // Force kill if still running
+                if proc.child.try_wait().ok().flatten().is_none() {
+                    proc.child.start_kill().ok();
+                    let _ = proc.child.wait().await;
+                }
+            }
         }
     }
     *lock = None;
