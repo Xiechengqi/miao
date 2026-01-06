@@ -1106,7 +1106,7 @@
                     <div class="glass-card" v-if="status.running">
                         <div class="card-header-custom">
                             <i class="bi bi-shuffle"></i>
-                            <span>代理选择</span>
+                            <span>节点选择</span>
                         </div>
 
                         <div v-if="!proxies || Object.keys(proxies).length === 0" class="empty-state">
@@ -1128,7 +1128,7 @@
                             <div class="proxy-group-header">
                                 <div class="proxy-group-name">
                                     <i class="bi bi-collection"></i>
-                                    {{ groupName }}
+                                    {{ groupName === 'proxy' ? '选中节点' : groupName }}
                                     <span class="proxy-group-now">{{ group.now }}</span>
                                 </div>
                                 <div class="proxy-controls">
@@ -1279,7 +1279,7 @@
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">密码</label>
-                                    <input type="password" class="form-input" v-model="newNode.password"
+                                    <input type="text" class="form-input" v-model="newNode.password"
                                         placeholder="密码">
                                 </div>
                                 <div class="form-group">
@@ -1554,8 +1554,12 @@
                 const testDelay = async (nodeName) => {
                     try {
                         const res = await fetch(`${clashApiBase.value}/proxies/${encodeURIComponent(nodeName)}/delay?timeout=5000&url=http://www.gstatic.com/generate_204`);
+                        if (!res.ok) {
+                            delays.value[nodeName] = -1;
+                            return;
+                        }
                         const data = await res.json();
-                        delays.value[nodeName] = data.delay || 0;
+                        delays.value[nodeName] = data.delay > 0 ? data.delay : -1;
                     } catch (e) {
                         delays.value[nodeName] = -1;
                     }
