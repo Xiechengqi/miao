@@ -37,6 +37,8 @@ wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux
 # 订阅方式
 subs:
   - "https://your-hysteria2-subscription-url"
+  - "https://your-hysteria2-subscription-url2"
+  - "https://your-hysteria2-subscription-url3"
 ```
 
 或手动配置节点：
