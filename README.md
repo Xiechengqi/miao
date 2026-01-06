@@ -2,46 +2,48 @@
 
 一个开箱即用的 [sing-box](https://github.com/SagerNet/sing-box) 管理器。下载、配置、运行，即可实现 **TUN 模式透明代理 + 国内外自动分流**。
 
-> ⚠️ **当前仅支持 Hysteria2 协议节点**
+> **当前仅支持 Hysteria2 协议节点**
 
-## 🚀 30 秒快速开始
+## 特性
 
-### 1. 创建目录并下载
+- **零配置 sing-box** - 内嵌 sing-box 二进制，无需单独安装
+- **TUN 透明代理** - 系统级代理，所有流量自动走代理
+- **国内外自动分流** - 基于 geosite/geoip 规则，国内直连、国外代理
+- **Web 管理面板** - 节点管理、订阅管理、实时流量监控、测速
+- **自动更新** - 支持从 GitHub 一键更新到最新版本
+- **OpenWrt 支持** - 自动安装所需内核模块
+
+## 快速开始
+
+### 1. 下载
 
 ```bash
-# 创建工作目录
 mkdir ~/miao && cd ~/miao
 
-# 下载 (根据你的架构选择一个)
-
 # Linux amd64
-wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux-amd64 -O miao
-chmod +x miao
+wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux-amd64 -O miao && chmod +x miao
 
-# Linux arm64 (树莓派、软路由等)
-wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux-arm64 -O miao
-chmod +x miao
+# Linux arm64 (树莓派、路由器等)
+wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux-arm64 -O miao && chmod +x miao
 ```
 
-### 2. 创建配置文件
+### 2. 配置
 
-在**同一目录**下创建 `config.yaml`：
+在同一目录下创建 `config.yaml`：
 
 ```yaml
-port: 6161
+# 订阅方式
 subs:
   - "https://your-hysteria2-subscription-url"
 ```
 
-或者手动配置节点：
+或手动配置节点：
 
 ```yaml
-port: 6161
+# 手动配置节点
 nodes:
-  # 基础配置 (SNI 默认使用 server 地址)
-  - '{"type":"hysteria2","tag":"节点1","server":"example.com","server_port":443,"password":"xxx"}'
-  
-  # 指定 SNI (当 server 是 IP 时需要)
+  - '{"type":"hysteria2","tag":"节点名","server":"example.com","server_port":443,"password":"xxx"}'
+  # server 是 IP 时需指定 sni
   - '{"type":"hysteria2","tag":"节点2","server":"1.2.3.4","server_port":443,"password":"xxx","sni":"example.com"}'
 ```
 
@@ -51,8 +53,25 @@ nodes:
 sudo ./miao
 ```
 
+访问 `http://localhost:6161` 打开管理面板。
+
 > 需要 root 权限创建 TUN 网卡
 
-### 4. 完成！🎉
+## 配置说明
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `port` | Web 面板端口 | `6161` |
+| `subs` | 订阅 URL 列表 | - |
+| `nodes` | 手动配置的节点 (JSON 格式) | - |
+
+## 端口
+
+| 端口 | 用途 |
+|------|------|
+| 6161 | Web 管理面板 |
+| 6262 | sing-box Clash API (内部使用) |
+
+## 截图
 
 <img width="2404" height="1435" alt="image" src="https://github.com/user-attachments/assets/d71c581d-e74e-477c-b97b-d3f992c77bb9" />
