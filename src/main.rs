@@ -414,12 +414,17 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     let backup_path = format!("{}.bak", current_exe.display());
     let _ = fs::copy(&current_exe, &backup_path);
 
-    // 9. Replace binary (use copy+remove instead of rename for cross-device support)
+    // 9. Replace binary: delete first then copy (Linux allows deleting running executables)
+    if let Err(e) = fs::remove_file(&current_exe) {
+        return Json(ApiResponse::error(format!("Failed to remove old binary: {}", e)));
+    }
     if let Err(e) = fs::copy(temp_path, &current_exe) {
         // Try to restore from backup
         let _ = fs::copy(&backup_path, &current_exe);
-        return Json(ApiResponse::error(format!("Failed to replace binary: {}", e)));
+        return Json(ApiResponse::error(format!("Failed to copy new binary: {}", e)));
     }
+    // Set executable permission
+    let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
     let _ = fs::remove_file(temp_path);
 
     println!("Upgrade successful! Restarting...");
