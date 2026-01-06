@@ -31,7 +31,8 @@ const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-arm64");
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
-    port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sing_box_home: Option<String>,
     #[serde(default)]
@@ -39,6 +40,8 @@ struct Config {
     #[serde(default)]
     nodes: Vec<String>,
 }
+
+const DEFAULT_PORT: u16 = 6161;
 
 struct AppState {
     config: Mutex<Config>,
@@ -1062,7 +1065,7 @@ async fn fetch_sub(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config: Config = serde_yaml::from_str(&tokio::fs::read_to_string("config.yaml").await?)?;
-    let port = config.port;
+    let port = config.port.unwrap_or(DEFAULT_PORT);
 
     // Extract embedded sing-box binary and determine working directory
     let sing_box_home = if let Some(custom_home) = &config.sing_box_home {
@@ -1124,8 +1127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/nodes", delete(delete_node))
         .with_state(app_state);
 
-    println!("Miao server listening on http://0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    println!("✅ Miao 控制面板已启动: http://localhost:{}", port);
     axum::serve(listener, app).await?;
     Ok(())
 }
