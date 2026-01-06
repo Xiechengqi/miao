@@ -1454,7 +1454,7 @@
 
     <script src="https://registry.npmmirror.com/vue/3/files/dist/vue.global.prod.js"></script>
     <script>
-        const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+        const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
 
         createApp({
             setup() {
@@ -1688,10 +1688,12 @@
                         try {
                             const data = JSON.parse(event.data);
                             traffic.value = { up: data.up, down: data.down };
-                        } catch (e) { }
+                        } catch (e) { console.error('解析流量数据失败:', e); }
                     };
                     trafficWs.onclose = () => {
-                        setTimeout(connectTrafficWs, 3000);
+                        setTimeout(() => {
+                            if (status.value.running) connectTrafficWs();
+                        }, 3000);
                     };
                 };
 
@@ -1719,11 +1721,13 @@
                             }
                             // 自动滚动到底部（如果启用）
                             if (logAutoScroll.value && logContainer.value) {
-                                setTimeout(() => {
-                                    logContainer.value.scrollTop = logContainer.value.scrollHeight;
-                                }, 10);
+                                nextTick(() => {
+                                    if (logContainer.value) {
+                                        logContainer.value.scrollTop = logContainer.value.scrollHeight;
+                                    }
+                                });
                             }
-                        } catch (e) { }
+                        } catch (e) { console.error('解析日志失败:', e); }
                     };
                     logsWs.onclose = () => {
                         setTimeout(() => {
@@ -1799,9 +1803,12 @@
                     try {
                         await apiCall('service/stop', 'POST', null, 'stop');
                         delays.value = {};
+                        traffic.value = {};
+                        if (trafficWs) { trafficWs.close(); trafficWs = null; }
+                        if (logsWs) { logsWs.close(); logsWs = null; }
                         showToast('服务已停止', 'success');
                         await fetchStatus();
-                    } catch (e) { }
+                    } catch (e) { console.error('停止服务失败:', e); }
                 };
 
                 // 切换服务状态
@@ -1940,7 +1947,7 @@
                     if (!seconds) return '-';
                     const hrs = Math.floor(seconds / 3600);
                     const mins = Math.floor((seconds % 3600) / 60);
-                    const secs = seconds % 60;
+                    const secs = Math.floor(seconds % 60);
                     if (hrs > 0) return `${hrs}小时 ${mins}分 ${secs}秒`;
                     if (mins > 0) return `${mins}分 ${secs}秒`;
                     return `${secs}秒`;
