@@ -1798,6 +1798,7 @@
                 const stopService = async () => {
                     try {
                         await apiCall('service/stop', 'POST', null, 'stop');
+                        delays.value = {};
                         showToast('服务已停止', 'success');
                         await fetchStatus();
                     } catch (e) { }
