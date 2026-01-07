@@ -1965,8 +1965,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/upgrade", post(upgrade))
         // Clash API proxy (protected HTTP)
         .route("/api/clash/proxies", get(clash_get_proxies))
-        .route("/api/clash/proxies/:group", put(clash_switch_proxy))
-        .route("/api/clash/proxies/:node/delay", get(clash_test_delay))
+        .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
+        .route("/api/clash/proxies/{node}/delay", get(clash_test_delay))
         .route("/api/selections", get(get_selections))
         // Subscription management
         .route("/api/subs", get(get_subs))
