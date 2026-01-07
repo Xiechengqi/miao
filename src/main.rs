@@ -79,7 +79,7 @@ struct LoginResponse {
     token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ClashSwitchRequest {
     name: String,
 }
@@ -541,7 +541,9 @@ async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
             match msg {
                 Message::Text(t) => {
                     if upstream_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Text(t))
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            t.to_string(),
+                        ))
                         .await
                         .is_err()
                     {
@@ -550,7 +552,9 @@ async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
                 }
                 Message::Binary(b) => {
                     if upstream_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Binary(b))
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(
+                            b.to_vec(),
+                        ))
                         .await
                         .is_err()
                     {
@@ -559,12 +563,16 @@ async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
                 }
                 Message::Ping(b) => {
                     let _ = upstream_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Ping(b))
+                        .send(tokio_tungstenite::tungstenite::Message::Ping(
+                            b.to_vec(),
+                        ))
                         .await;
                 }
                 Message::Pong(b) => {
                     let _ = upstream_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Pong(b))
+                        .send(tokio_tungstenite::tungstenite::Message::Pong(
+                            b.to_vec(),
+                        ))
                         .await;
                 }
                 Message::Close(_) => {
@@ -581,20 +589,28 @@ async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
         while let Some(msg) = upstream_rx.next().await {
             match msg {
                 Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => {
-                    if client_tx.send(Message::Text(t)).await.is_err() {
+                    if client_tx.send(Message::Text(t.into())).await.is_err() {
                         break;
                     }
                 }
                 Ok(tokio_tungstenite::tungstenite::Message::Binary(b)) => {
-                    if client_tx.send(Message::Binary(b)).await.is_err() {
+                    if client_tx
+                        .send(Message::Binary(axum::body::Bytes::from(b)))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 Ok(tokio_tungstenite::tungstenite::Message::Ping(b)) => {
-                    let _ = client_tx.send(Message::Ping(b)).await;
+                    let _ = client_tx
+                        .send(Message::Ping(axum::body::Bytes::from(b)))
+                        .await;
                 }
                 Ok(tokio_tungstenite::tungstenite::Message::Pong(b)) => {
-                    let _ = client_tx.send(Message::Pong(b)).await;
+                    let _ = client_tx
+                        .send(Message::Pong(axum::body::Bytes::from(b)))
+                        .await;
                 }
                 Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
                     let _ = client_tx.send(Message::Close(None)).await;
