@@ -1103,8 +1103,8 @@ fn get_config_template() -> serde_json::Value {
             "independent_cache": true,
             "servers": [
                 {"tag": "dns-direct", "address": "223.5.5.5", "detour": "direct"},
-                {"tag": "alidns", "address": "https://dns.alidns.com/dns-query", address_resolver": "dns-direct", "detour": "direct"},
-                {"tag": "tencent", "address": "https://doh.pub/dns-query", address_resolver": "dns-direct", "detour": "direct"},
+                {"tag": "alidns", "address": "https://dns.alidns.com/dns-query", "address_resolver": "dns-direct", "detour": "direct"},
+                {"tag": "tencent", "address": "https://doh.pub/dns-query", "address_resolver": "dns-direct", "detour": "direct"},
                 {"tag": "114", "address": "114.114.114.114", "detour": "direct"},
                 {"tag": "cloudflare", "address": "1.1.1.1", "detour": "proxy"},
                 {"tag": "google", "address": "8.8.8.8", "detour": "proxy"}
