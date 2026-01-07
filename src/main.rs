@@ -1124,7 +1124,8 @@ fn get_config_template() -> serde_json::Value {
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
-                {"ip_is_private": true, "action": "route", "outbound": "direct"}
+                {"ip_is_private": true, "action": "route", "outbound": "direct"},
+                {"protocol": "icmp", "action": "route", "outbound": "direct"}
             ]
         }
     })
