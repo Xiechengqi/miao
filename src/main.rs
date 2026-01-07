@@ -1100,6 +1100,17 @@ async fn fetch_sub(
         .send()
         .await?;
     let text = res.text().await?;
+
+    // Try parsing as JSON first (sing-box format)
+    if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(outbounds_arr) = json_obj.get("outbounds").and_then(|o| o.as_array()) {
+            println!("Detected sing-box JSON format subscription");
+            return parse_singbox_json(outbounds_arr);
+        }
+    }
+
+    // Fall back to YAML parsing (Clash format)
+    println!("Parsing as Clash YAML format");
     let clash_obj: serde_yaml::Value = serde_yaml::from_str(&text)?;
     let proxies = clash_obj
         .get("proxies")
@@ -1148,6 +1159,70 @@ async fn fetch_sub(
         }
     }
     Ok((node_names, outbounds))
+}
+
+/// Parse sing-box JSON format subscription
+fn parse_singbox_json(
+    outbounds: &Vec<serde_json::Value>,
+) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
+    let mut node_names = vec![];
+    let mut result_outbounds = vec![];
+
+    // Filter out non-proxy outbounds (selector, urltest, direct, etc.)
+    let proxy_types = ["hysteria2", "vmess", "vless", "trojan", "shadowsocks", "ss"];
+
+    for outbound in outbounds {
+        let typ = outbound.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let tag = outbound.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+
+        if !proxy_types.contains(&typ) {
+            continue;
+        }
+
+        match typ {
+            "hysteria2" => {
+                // Extract hysteria2 node and convert to our format
+                let server = outbound.get("server").and_then(|s| s.as_str()).unwrap_or("");
+                let password = outbound.get("password").and_then(|p| p.as_str()).unwrap_or("");
+                let server_port = outbound.get("server_port").and_then(|p| p.as_u64()).unwrap_or(443) as u16;
+
+                let tls = outbound.get("tls");
+                let server_name = tls
+                    .and_then(|t| t.get("server_name"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+
+                let hysteria2 = Hysteria2 {
+                    outbound_type: "hysteria2".to_string(),
+                    tag: tag.to_string(),
+                    server: server.to_string(),
+                    server_port,
+                    password: password.to_string(),
+                    up_mbps: 40,
+                    down_mbps: 350,
+                    tls: Tls {
+                        enabled: true,
+                        server_name,
+                        insecure: true,
+                    },
+                };
+
+                node_names.push(tag.to_string());
+                result_outbounds.push(serde_json::to_value(hysteria2)?);
+            }
+            _ => {
+                // For other types, use the outbound as-is
+                // But skip if it's missing required fields
+                if !tag.is_empty() {
+                    node_names.push(tag.to_string());
+                    result_outbounds.push(outbound.clone());
+                }
+            }
+        }
+    }
+
+    println!("Parsed {} nodes from sing-box JSON", node_names.len());
+    Ok((node_names, result_outbounds))
 }
 
 // ============================================================================
