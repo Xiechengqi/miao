@@ -1,8 +1,9 @@
-name: Build Release
+name: Build and Release
 
 on:
   push:
-    tags: ["v*"]
+    branches:
+      - master
 
 permissions:
   contents: write
@@ -115,8 +116,81 @@ jobs:
           name: miao-rust-${{ matrix.target }}
           path: ${{ env.RELEASE_ASSET }}
 
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          files: ${{ env.RELEASE_ASSET }}
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release-files
+          cp artifacts/miao-rust-amd64/miao-rust-linux-amd64 release-files/
+          cp artifacts/miao-rust-arm64/miao-rust-linux-arm64 release-files/
+          ls -lh release-files/
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "Current version: v${VERSION}"
+
+      - name: Delete existing latest release and tag
+        run: |
+          # Delete the release if it exists
+          gh release delete latest --yes || true
+          # Delete the tag locally and remotely
+          git push origin :refs/tags/latest || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create latest tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Create or Update Latest Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Build (v${{ steps.version.outputs.version }})"
+          body: |
+            ## 最新自动构建版本
+
+            **版本**: ${{ steps.version.outputs.version }}
+            **提交**: ${{ github.sha }}
+            **分支**: ${{ github.ref_name }}
+            **构建时间**: ${{ github.event.head_commit.timestamp }}
+
+            ### 变更内容
+
+            ${{ github.event.head_commit.message }}
+
+            ---
+
+            ### 下载
+
+            - **Linux AMD64**: `miao-rust-linux-amd64`
+            - **Linux ARM64**: `miao-rust-linux-arm64`
+
+            ### 快速安装
+
+            ```bash
+            # AMD64
+            wget https://github.com/${{ github.repository }}/releases/download/latest/miao-rust-linux-amd64 -O miao && chmod +x miao
+
+            # ARM64
+            wget https://github.com/${{ github.repository }}/releases/download/latest/miao-rust-linux-arm64 -O miao && chmod +x miao
+            ```
+          files: release-files/*
+          prerelease: false
+          draft: false
