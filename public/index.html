@@ -1129,12 +1129,177 @@
                 font-size: 0.75rem;
             }
         }
+
+        /* 登录容器 */
+        .login-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+
+        /* 登录卡片 */
+        .login-card {
+            background: rgba(30, 30, 40, 0.95);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 3rem;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        /* 登录标题 */
+        .login-title {
+            text-align: center;
+            margin-bottom: 2rem;
+            font-size: 2rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* 登录输入框 */
+        .login-input {
+            width: 100%;
+            padding: 1rem 1.25rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            margin-bottom: 1.5rem;
+        }
+
+        .login-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            background: rgba(255, 255, 255, 0.08);
+            box-shadow: 0 0 0 3px rgba(95, 158, 160, 0.1);
+        }
+
+        .login-input::placeholder {
+            color: rgba(255, 255, 255, 0.3);
+        }
+
+        /* 登录按钮 */
+        .login-btn {
+            width: 100%;
+            padding: 1rem;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .login-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(95, 158, 160, 0.3);
+        }
+
+        .login-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* 登录错误提示 */
+        .login-error {
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background: rgba(255, 71, 87, 0.1);
+            border: 1px solid var(--accent-red);
+            border-radius: 8px;
+            color: var(--accent-red);
+            text-align: center;
+            font-size: 0.9rem;
+        }
+
+        /* 登出按钮 */
+        .logout-widget {
+            position: fixed;
+            bottom: 1.5rem;
+            right: 1.5rem;
+            z-index: 999;
+        }
+
+        .logout-btn {
+            background: rgba(255, 71, 87, 0.2);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+            color: var(--accent-red);
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logout-btn:hover {
+            background: rgba(255, 71, 87, 0.3);
+            transform: translateY(-2px);
+        }
+
+        @media (max-width: 576px) {
+            .logout-widget {
+                bottom: 1rem;
+                right: 1rem;
+            }
+
+            .logout-btn {
+                padding: 0.6rem 0.8rem;
+                font-size: 1rem;
+            }
+        }
     </style>
 </head>
 
 <body>
     <div id="app">
-        <div class="container">
+        <!-- 登录页面 -->
+        <div v-if="!authenticated" class="login-container">
+            <div class="login-card">
+                <h1 class="login-title">🔐 Miao 登录</h1>
+                <form @submit.prevent="handleLogin">
+                    <div class="form-group">
+                        <input
+                            v-model="loginPassword"
+                            type="password"
+                            class="login-input"
+                            placeholder="请输入密码"
+                            :disabled="loggingIn"
+                            autofocus
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        class="login-btn"
+                        :disabled="loggingIn || !loginPassword"
+                    >
+                        <span v-if="loggingIn" class="spinner" style="width:16px;height:16px;"></span>
+                        <span v-else>登录</span>
+                    </button>
+                </form>
+                <p v-if="loginError" class="login-error">{{ loginError }}</p>
+            </div>
+        </div>
+
+        <!-- 主应用 -->
+        <div v-if="authenticated" class="container">
             <!-- 头部 -->
             <div class="header">
                 <h1><i class="bi bi-box-seam"></i> Miao</h1>
@@ -1413,6 +1578,7 @@
             <!-- layout-grid 结束 -->
 
         </div>
+        <!-- 主应用结束 -->
 
         <!-- Toast 容器 -->
         <div class="toast-container">
@@ -1440,11 +1606,18 @@
         </div>
 
         <!-- 更新按钮 -->
-        <div class="update-widget">
+        <div class="update-widget" v-if="authenticated">
             <button class="update-btn" @click="handleUpdateClick" :disabled="upgrading">
                 <span v-if="upgrading" class="spinner" style="width:14px;height:14px;"></span>
                 <i v-else class="bi bi-cloud-download"></i>
                 <span>{{ upgrading ? '更新中...' : '强制更新' }}</span>
+            </button>
+        </div>
+
+        <!-- 登出按钮 -->
+        <div class="logout-widget" v-if="authenticated">
+            <button class="logout-btn" @click="handleLogout" title="登出">
+                <i class="bi bi-box-arrow-right"></i>
             </button>
         </div>
     </div>
@@ -1455,6 +1628,12 @@
 
         createApp({
             setup() {
+                // 认证状态
+                const authenticated = ref(false);
+                const loginPassword = ref('');
+                const loggingIn = ref(false);
+                const loginError = ref('');
+
                 // 状态
                 const status = ref({ running: false, pid: null, uptime_secs: null });
                 const subs = ref([]);
@@ -1519,6 +1698,61 @@
                     }
                     return groups;
                 });
+
+                // 认证函数
+                // 检查是否已登录
+                const checkAuth = () => {
+                    const token = localStorage.getItem('miao_token');
+                    if (token) {
+                        authenticated.value = true;
+                        return true;
+                    }
+                    return false;
+                };
+
+                // 登录处理
+                const handleLogin = async () => {
+                    if (!loginPassword.value) return;
+
+                    loggingIn.value = true;
+                    loginError.value = '';
+
+                    try {
+                        const response = await fetch('/api/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ password: loginPassword.value })
+                        });
+
+                        const data = await response.json();
+
+                        if (data.success && data.data?.token) {
+                            // 保存 token
+                            localStorage.setItem('miao_token', data.data.token);
+                            authenticated.value = true;
+                            loginPassword.value = '';
+
+                            // 初始化应用数据
+                            await initApp();
+                        } else {
+                            loginError.value = data.message || '登录失败';
+                        }
+                    } catch (error) {
+                        loginError.value = '网络错误，请重试';
+                        console.error('Login error:', error);
+                    } finally {
+                        loggingIn.value = false;
+                    }
+                };
+
+                // 登出处理
+                const handleLogout = () => {
+                    localStorage.removeItem('miao_token');
+                    authenticated.value = false;
+                    // 断开 WebSocket
+                    if (trafficWs) trafficWs.close();
+                    if (logsWs) logsWs.close();
+                };
 
                 // Toast 通知
                 const showToast = (message, type = 'info') => {
@@ -1742,9 +1976,24 @@
                     loading.value = true;
                     loadingAction.value = action;
                     try {
-                        const options = { method, headers: { 'Content-Type': 'application/json' } };
+                        const token = localStorage.getItem('miao_token');
+                        const headers = {
+                            'Content-Type': 'application/json',
+                            'Authorization': token ? `Bearer ${token}` : ''
+                        };
+
+                        const options = { method, headers };
                         if (body) options.body = JSON.stringify(body);
+
                         const response = await fetch(`/api/${endpoint}`, options);
+
+                        // 如果返回 401，说明 token 失效，退出登录
+                        if (response.status === 401) {
+                            handleLogout();
+                            showToast('登录已过期，请重新登录', 'error');
+                            throw new Error('Unauthorized');
+                        }
+
                         const data = await response.json();
                         if (!response.ok || !data.success) throw new Error(data.message || '请求失败');
                         return data;
@@ -1946,21 +2195,29 @@
                     return `${secs}秒`;
                 };
 
-
-
-                // 生命周期
-                onMounted(() => {
-                    fetchStatus();
-                    fetchSubs();
-                    fetchNodes();
-                    fetchProxies();
+                // 初始化应用数据
+                const initApp = async () => {
+                    await fetchStatus();
+                    await fetchSubs();
+                    await fetchNodes();
+                    await fetchProxies();
                     connectTrafficWs();
                     connectLogsWs();
                     checkVersion();
-                    statusInterval = setInterval(() => {
-                        fetchStatus();
-                        if (status.value.running) fetchProxies();
+
+                    // 定时刷新状态
+                    statusInterval = setInterval(async () => {
+                        await fetchStatus();
+                        if (status.value.running) await fetchProxies();
                     }, 3000);
+                };
+
+                // 生命周期
+                onMounted(() => {
+                    // 检查登录状态
+                    if (checkAuth()) {
+                        initApp();
+                    }
                 });
 
                 onUnmounted(() => {
@@ -1970,6 +2227,10 @@
                 });
 
                 return {
+                    // 认证相关
+                    authenticated, loginPassword, loggingIn, loginError,
+                    handleLogin, handleLogout,
+                    // 状态
                     status, subs, nodes, loading, loadingAction, toasts,
                     newSubUrl, newNode, canAddNode,
                     proxies, delays, traffic, testingGroup, selectorGroups,

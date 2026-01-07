@@ -1,10 +1,12 @@
 use axum::{
     extract::State,
-    http::StatusCode,
-    response::{Html, Json},
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{Html, Json, Response},
     routing::{delete, get, post},
     Router,
 };
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -37,6 +39,8 @@ struct Config {
     port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sing_box_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,  // 登录密码
     #[serde(default)]
     subs: Vec<String>,
     #[serde(default)]
@@ -44,6 +48,28 @@ struct Config {
 }
 
 const DEFAULT_PORT: u16 = 6161;
+
+// JWT 密钥（生产环境应使用环境变量）
+const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
+
+// JWT Claims 结构
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,   // subject (用户标识)
+    exp: usize,    // expiration time
+}
+
+// 登录请求结构
+#[derive(Deserialize)]
+struct LoginRequest {
+    password: String,
+}
+
+// 登录响应结构
+#[derive(Serialize)]
+struct LoginResponse {
+    token: String,
+}
 
 struct AppState {
     config: Mutex<Config>,
@@ -128,6 +154,39 @@ impl<T: Serialize> ApiResponse<T> {
     }
 }
 
+// ============================================================================
+// JWT Helper Functions
+// ============================================================================
+
+// 生成 JWT token
+fn generate_token() -> Result<String, jsonwebtoken::errors::Error> {
+    let expiration = chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::hours(24))
+        .expect("valid timestamp")
+        .timestamp() as usize;
+
+    let claims = Claims {
+        sub: "admin".to_string(),
+        exp: expiration,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(JWT_SECRET.as_ref()),
+    )
+}
+
+// 验证 JWT token
+fn verify_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(JWT_SECRET.as_ref()),
+        &Validation::default(),
+    )
+    .map(|data| data.claims)
+}
+
 #[derive(Serialize)]
 struct StatusData {
     running: bool,
@@ -188,6 +247,40 @@ lazy_static! {
 
 async fn serve_index() -> Html<&'static str> {
     Html(include_str!("../public/index.html"))
+}
+
+/// POST /api/login - User login
+async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Json<ApiResponse<LoginResponse>> {
+    let config = state.config.lock().await;
+
+    // 获取配置中的密码，如果未设置则使用默认密码 "admin"
+    let expected_password = config.password.as_deref().unwrap_or("admin");
+
+    // 验证密码
+    if req.password != expected_password {
+        return Json(ApiResponse {
+            success: false,
+            message: "密码错误".to_string(),
+            data: None,
+        });
+    }
+
+    // 生成 token
+    match generate_token() {
+        Ok(token) => Json(ApiResponse {
+            success: true,
+            message: "登录成功".to_string(),
+            data: Some(LoginResponse { token }),
+        }),
+        Err(_) => Json(ApiResponse {
+            success: false,
+            message: "生成 token 失败".to_string(),
+            data: None,
+        }),
+    }
 }
 
 /// GET /api/status - Get sing-box running status
@@ -1394,6 +1487,35 @@ fn url_decode(input: &str) -> String {
 }
 
 // ============================================================================
+// Authentication Middleware
+// ============================================================================
+
+// JWT 认证中间件
+async fn auth_middleware<B>(
+    req: Request<B>,
+    next: Next<B>,
+) -> Result<Response, StatusCode> {
+    // 从 header 中获取 Authorization
+    let auth_header = req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok());
+
+    if let Some(auth) = auth_header {
+        // 检查是否是 Bearer token 格式
+        if let Some(token) = auth.strip_prefix("Bearer ") {
+            // 验证 token
+            if verify_token(token).is_ok() {
+                return Ok(next.run(req).await);
+            }
+        }
+    }
+
+    // 认证失败
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -1442,8 +1564,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 
     // Build router with API endpoints
-    let app = Router::new()
-        .route("/", get(serve_index))
+
+    // 需要认证的路由
+    let protected_routes = Router::new()
         // Status and service control
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
@@ -1460,6 +1583,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))
         .route("/api/nodes", delete(delete_node))
+        .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
+
+    // 公开路由（不需要认证）
+    let app = Router::new()
+        .route("/", get(serve_index))           // 首页可访问（前端会检查）
+        .route("/api/login", post(login))       // 登录接口
+        .merge(protected_routes)                // 合并受保护的路由
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
