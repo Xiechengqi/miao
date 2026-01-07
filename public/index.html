@@ -1269,12 +1269,49 @@
 </head>
 
 <body>
-    <div id="app">
-        <!-- 登录页面 -->
-        <div v-if="!authenticated" class="login-container">
-            <div class="login-card">
-                <h1 class="login-title">🔐 Miao 登录</h1>
-                <form @submit.prevent="handleLogin">
+	        <div id="app">
+	            <!-- 初始化向导（首次运行无 config.yaml） -->
+	            <div v-if="setupRequired" class="login-container">
+	                <div class="login-card">
+	                    <h1 class="login-title">🛠️ 初始化设置</h1>
+	                    <form @submit.prevent="handleSetupInit">
+	                        <div class="form-group">
+	                            <input
+	                                v-model="setupPassword"
+	                                type="password"
+	                                class="login-input"
+	                                placeholder="设置登录密码"
+	                                :disabled="settingUp"
+	                                autofocus
+	                            />
+	                        </div>
+	                        <div class="form-group">
+	                            <textarea
+	                                v-model="setupSubsText"
+	                                class="login-input"
+	                                style="min-height: 120px; resize: vertical;"
+	                                placeholder="订阅链接（每行一个）"
+	                                :disabled="settingUp"
+	                            ></textarea>
+	                        </div>
+	                        <button
+	                            type="submit"
+	                            class="login-btn"
+	                            :disabled="settingUp || !setupPassword || !setupSubsText"
+	                        >
+	                            <span v-if="settingUp" class="spinner" style="width:16px;height:16px;"></span>
+	                            <span v-else>完成初始化</span>
+	                        </button>
+	                    </form>
+	                    <p v-if="setupError" class="login-error">{{ setupError }}</p>
+	                </div>
+	            </div>
+
+	        <!-- 登录页面 -->
+	        <div v-else-if="!authenticated" class="login-container">
+	            <div class="login-card">
+	                <h1 class="login-title">🔐 Miao 登录</h1>
+	                <form @submit.prevent="handleLogin">
                     <div class="form-group">
                         <input
                             v-model="loginPassword"
@@ -1296,10 +1333,10 @@
                 </form>
                 <p v-if="loginError" class="login-error">{{ loginError }}</p>
             </div>
-        </div>
+	        </div>
 
-        <!-- 主应用 -->
-        <div v-if="authenticated" class="container">
+	        <!-- 主应用 -->
+	        <div v-else class="container">
             <!-- 头部 -->
             <div class="header">
                 <h1><i class="bi bi-box-seam"></i> Miao</h1>
@@ -1626,8 +1663,15 @@
     <script>
         const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
 
-        createApp({
+	        createApp({
 	            setup() {
+	                // 初始化状态
+	                const setupRequired = ref(false);
+	                const setupPassword = ref('');
+	                const setupSubsText = ref('');
+	                const settingUp = ref(false);
+	                const setupError = ref('');
+
 	                // 认证状态
 	                const authenticated = ref(false);
 	                const loginPassword = ref('');
@@ -1731,6 +1775,55 @@
 	                        throw new Error(data.message || '请求失败');
 	                    }
 	                    return data;
+	                };
+
+	                const fetchSetupStatus = async () => {
+	                    try {
+	                        const res = await fetch('/api/setup/status');
+	                        const data = await res.json();
+	                        if (data.success && data.data) {
+	                            setupRequired.value = !data.data.initialized;
+	                        }
+	                    } catch (e) {
+	                        // 如果取不到状态，默认按已初始化处理，避免卡死
+	                        setupRequired.value = false;
+	                    }
+	                };
+
+	                const handleSetupInit = async () => {
+	                    if (!setupPassword.value) return;
+	                    const subs = setupSubsText.value
+	                        .split('\n')
+	                        .map(s => s.trim())
+	                        .filter(Boolean);
+	                    if (subs.length === 0) {
+	                        setupError.value = '请输入至少一个订阅链接';
+	                        return;
+	                    }
+
+	                    settingUp.value = true;
+	                    setupError.value = '';
+	                    try {
+	                        const res = await fetch('/api/setup/init', {
+	                            method: 'POST',
+	                            headers: { 'Content-Type': 'application/json' },
+	                            body: JSON.stringify({ password: setupPassword.value, subs })
+	                        });
+	                        const data = await res.json();
+	                        if (!res.ok || !data.success) {
+	                            setupError.value = data.message || '初始化失败';
+	                            return;
+	                        }
+
+	                        setupRequired.value = false;
+	                        loginPassword.value = setupPassword.value;
+	                        // 尝试自动登录
+	                        await handleLogin();
+	                    } catch (e) {
+	                        setupError.value = '网络错误，请重试';
+	                    } finally {
+	                        settingUp.value = false;
+	                    }
 	                };
 
 	                // 登录处理
@@ -2219,12 +2312,15 @@
                 };
 
                 // 生命周期
-                onMounted(() => {
-                    // 检查登录状态
-                    if (checkAuth()) {
-                        initApp();
-                    }
-                });
+	                onMounted(async () => {
+	                    await fetchSetupStatus();
+	                    // 未初始化时只展示初始化向导
+	                    if (setupRequired.value) return;
+	                    // 检查登录状态
+	                    if (checkAuth()) {
+	                        initApp();
+	                    }
+	                });
 
                 onUnmounted(() => {
                     if (statusInterval) clearInterval(statusInterval);
@@ -2232,10 +2328,13 @@
                     if (logsWs) logsWs.close();
                 });
 
-                return {
-                    // 认证相关
-                    authenticated, loginPassword, loggingIn, loginError,
-                    handleLogin, handleLogout,
+	                return {
+	                    // 初始化相关
+	                    setupRequired, setupPassword, setupSubsText, settingUp, setupError,
+	                    handleSetupInit,
+	                    // 认证相关
+	                    authenticated, loginPassword, loggingIn, loginError,
+	                    handleLogin, handleLogout,
                     // 状态
                     status, subs, nodes, loading, loadingAction, toasts,
                     newSubUrl, newNode, canAddNode,

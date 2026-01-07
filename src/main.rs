@@ -20,6 +20,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio_tungstenite::connect_async;
 use tokio::sync::Mutex;
@@ -89,6 +90,17 @@ struct SelectionsResponse {
     selections: HashMap<String, String>,
 }
 
+#[derive(Serialize)]
+struct SetupStatusResponse {
+    initialized: bool,
+}
+
+#[derive(Deserialize)]
+struct SetupInitRequest {
+    password: String,
+    subs: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct WsAuthQuery {
     token: String,
@@ -99,6 +111,7 @@ struct WsAuthQuery {
 struct AppState {
     config: Mutex<Config>,
     sing_box_home: String,
+    setup_required: AtomicBool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -279,6 +292,14 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Json<ApiResponse<LoginResponse>> {
+    if state.setup_required.load(Ordering::Relaxed) {
+        return Json(ApiResponse {
+            success: false,
+            message: "未初始化，请先完成初始化设置".to_string(),
+            data: None,
+        });
+    }
+
     let config = state.config.lock().await;
 
     // 获取配置中的密码，如果未设置则使用默认密码 "admin"
@@ -374,6 +395,100 @@ async fn start_service(
 async fn stop_service() -> Json<ApiResponse<()>> {
     stop_sing_internal().await;
     Json(ApiResponse::success_no_data("sing-box stopped"))
+}
+
+// ============================================================================
+// Setup APIs (first run)
+// ============================================================================
+
+async fn setup_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<SetupStatusResponse>> {
+    Json(ApiResponse::success(
+        "Setup status",
+        SetupStatusResponse {
+            initialized: !state.setup_required.load(Ordering::Relaxed),
+        },
+    ))
+}
+
+async fn setup_init(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetupInitRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !state.setup_required.load(Ordering::Relaxed) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error("Already initialized")),
+        ));
+    }
+
+    let password = req.password.trim();
+    if password.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Password is required")),
+        ));
+    }
+
+    let mut subs: Vec<String> = req
+        .subs
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    subs.sort();
+    subs.dedup();
+    if subs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("At least one subscription URL is required")),
+        ));
+    }
+
+    let mut new_config = {
+        let config = state.config.lock().await;
+        let mut c = config.clone();
+        c.password = Some(password.to_string());
+        c.subs = subs;
+        c.nodes = vec![];
+        c.selections = HashMap::new();
+        c
+    };
+    new_config.port = Some(DEFAULT_PORT);
+
+    if let Err(e) = save_config(&new_config).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+        ));
+    }
+
+    // Try generate sing-box config and start sing-box
+    if let Err(e) = gen_config(&new_config, &state.sing_box_home)
+        .await
+        .map_err(|e| e.to_string())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to generate config: {}", e))),
+        ));
+    }
+
+    // Start sing-box (ignore if already running, but in setup mode it shouldn't be)
+    if let Err(e) = start_sing_internal(&state.sing_box_home).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to start sing-box: {}", e))),
+        ));
+    }
+    let _ = apply_saved_selections(&new_config).await;
+
+    {
+        let mut config = state.config.lock().await;
+        *config = new_config;
+    }
+    state.setup_required.store(false, Ordering::Relaxed);
+
+    Ok(Json(ApiResponse::success_no_data("Initialized")))
 }
 
 // ============================================================================
@@ -1908,7 +2023,22 @@ async fn auth_middleware(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config: Config = serde_yaml::from_str(&tokio::fs::read_to_string("config.yaml").await?)?;
+    let (config, setup_required) = match tokio::fs::read_to_string("config.yaml").await {
+        Ok(text) => (serde_yaml::from_str::<Config>(&text)?, false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            Config {
+                port: Some(DEFAULT_PORT),
+                sing_box_home: None,
+                password: None,
+                selections: HashMap::new(),
+                subs: vec![],
+                nodes: vec![],
+            },
+            true,
+        ),
+        Err(e) => return Err(e.into()),
+    };
+
     let port = config.port.unwrap_or(DEFAULT_PORT);
 
     // Extract embedded sing-box binary and determine working directory
@@ -1918,37 +2048,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         extract_sing_box()?.to_string_lossy().to_string()
     };
 
-    // Generate initial config, retrying until success
-    loop {
-        match gen_config(&config, &sing_box_home).await {
-            Ok(_) => break,
-            Err(e) => {
-                eprintln!(
-                    "Failed to generate config: {}. Retrying in 300 seconds...",
-                    e
-                );
-                sleep(Duration::from_secs(300)).await;
+    if !setup_required {
+        // Generate initial config, retrying until success
+        loop {
+            match gen_config(&config, &sing_box_home).await {
+                Ok(_) => break,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to generate config: {}. Retrying in 300 seconds...",
+                        e
+                    );
+                    sleep(Duration::from_secs(300)).await;
+                }
             }
         }
-    }
 
-    // Check OpenWrt dependencies
-    if let Err(e) = check_and_install_openwrt_dependencies().await {
-        eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
-    }
-
-    // Start sing-box
-    match start_sing_internal(&sing_box_home).await {
-        Ok(_) => {
-            let _ = apply_saved_selections(&config).await;
-            println!("sing-box started successfully")
+        // Check OpenWrt dependencies
+        if let Err(e) = check_and_install_openwrt_dependencies().await {
+            eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
         }
-        Err(e) => eprintln!("Failed to start sing-box: {}", e),
+
+        // Start sing-box
+        match start_sing_internal(&sing_box_home).await {
+            Ok(_) => {
+                let _ = apply_saved_selections(&config).await;
+                println!("sing-box started successfully")
+            }
+            Err(e) => eprintln!("Failed to start sing-box: {}", e),
+        }
+    } else {
+        println!("No config.yaml found, entering setup mode at http://localhost:{}", port);
     }
 
     let app_state = Arc::new(AppState {
         config: Mutex::new(config.clone()),
         sing_box_home: sing_box_home.clone(),
+        setup_required: AtomicBool::new(setup_required),
     });
 
 
@@ -1986,6 +2121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = Router::new()
         .route("/", get(serve_index))           // 首页可访问（前端会检查）
+        .route("/api/setup/status", get(setup_status))
+        .route("/api/setup/init", post(setup_init))
         .route("/api/login", post(login))       // 登录接口
         .route("/api/version", get(get_version)) // 版本信息与更新检查（公开，便于探活）
         .merge(ws_routes)
