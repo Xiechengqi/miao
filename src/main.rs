@@ -1386,8 +1386,7 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
 
 /// URL decode helper - handles UTF-8 multi-byte sequences (including emoji)
 fn url_decode(input: &str) -> String {
-    // Use Rust's standard library percent_encoding
-    std::percent_encoding::percent_decode_str(input)
+    percent_encoding::percent_decode_str(input)
         .decode_utf8()
         .unwrap_or_else(|_| input.to_string())
         .into_owned()
