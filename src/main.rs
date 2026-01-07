@@ -50,6 +50,14 @@ struct AppState {
     sing_box_home: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct IpCheckResponse {
+    ip: String,
+    location: String,
+    #[serde(default)]
+    xad: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Hysteria2 {
     #[serde(rename = "type")]
@@ -734,6 +742,19 @@ async fn delete_node(
 // Internal Functions
 // ============================================================================
 
+/// Check if the location indicates mainland China (excluding Hong Kong, Macau, Taiwan)
+fn is_mainland_china(location: &str) -> bool {
+    if location.contains("中国") {
+        // Hong Kong, Macau, Taiwan are considered as proxy nodes
+        let is_special_region = location.contains("香港")
+                             || location.contains("澳门")
+                             || location.contains("台湾");
+        !is_special_region
+    } else {
+        false
+    }
+}
+
 /// Save config to config.yaml
 async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let yaml = serde_yaml::to_string(config)?;
@@ -888,44 +909,58 @@ async fn start_sing_internal(
     // Wait for sing-box to fully initialize
     sleep(Duration::from_secs(5)).await;
 
-    // Connectivity check (3 attempts)
+    // Connectivity check using 3.0.3.0 IP service (3 attempts)
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    
-    let mut connectivity_ok = false;
+
     for attempt in 1..=3 {
         println!("Connectivity check attempt {}/3...", attempt);
-        match client.get("http://connectivitycheck.gstatic.com/generate_204").send().await {
-            Ok(res) if res.status().as_u16() == 204 => {
-                println!("Connectivity check passed!");
-                connectivity_ok = true;
-                break;
+
+        match client.get("http://3.0.3.0").send().await {
+            Ok(res) if res.status().is_success() => {
+                match res.text().await {
+                    Ok(text) => {
+                        // Try to parse JSON response
+                        if let Ok(info) = serde_json::from_str::<IpCheckResponse>(&text) {
+                            if is_mainland_china(&info.location) {
+                                println!("⚠️  Warning: Traffic appears to be using direct connection");
+                                println!("   Current IP: {}", info.ip);
+                                println!("   Location: {}", info.location);
+                                println!("   This may indicate proxy is not working properly.");
+                            } else {
+                                println!("✅ Connectivity check passed!");
+                                println!("   Current IP: {}", info.ip);
+                                println!("   Location: {}", info.location);
+                            }
+                        } else {
+                            println!("✅ Network is reachable (could not parse response)");
+                        }
+                        // Always return Ok, don't kill sing-box
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        println!("✅ Network is reachable (could not read body: {})", e);
+                        return Ok(());
+                    }
+                }
             }
             Ok(res) => {
-                println!("Connectivity check failed: status {}", res.status());
+                println!("Connectivity check: unexpected status {}", res.status());
             }
             Err(e) => {
                 println!("Connectivity check failed: {}", e);
             }
         }
+
         if attempt < 3 {
             sleep(Duration::from_secs(2)).await;
         }
     }
 
-    if !connectivity_ok {
-        // Stop sing-box and clean up
-        println!("Connectivity check failed, stopping sing-box...");
-        let mut lock = SING_PROCESS.lock().await;
-        if let Some(ref mut proc) = *lock {
-            proc.child.start_kill().ok();
-            // Wait for process to exit
-            let _ = proc.child.wait().await;
-        }
-        *lock = None;
-        return Err("sing-box started but connectivity check failed".into());
-    }
+    // Even if all checks failed, don't kill sing-box
+    println!("⚠️  Warning: All connectivity checks failed, but sing-box is still running");
+    println!("   You can verify connectivity manually via the web panel.");
 
     Ok(())
 }
