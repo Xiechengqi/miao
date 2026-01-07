@@ -1388,7 +1388,7 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
 fn url_decode(input: &str) -> String {
     percent_encoding::percent_decode_str(input)
         .decode_utf8()
-        .unwrap_or_else(|_| input.to_string())
+        .unwrap_or_else(|_| input.to_string().into())
         .into_owned()
 }
 
