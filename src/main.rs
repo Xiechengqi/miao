@@ -79,6 +79,17 @@ struct Tls {
     insecure: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+struct Shadowsocks {
+    #[serde(rename = "type")]
+    outbound_type: String,
+    tag: String,
+    server: String,
+    server_port: u16,
+    method: String,
+    password: String,
+}
+
 // ============================================================================
 // API Response Types
 // ============================================================================
@@ -1087,11 +1098,15 @@ fn get_config_template() -> serde_json::Value {
         "log": {"disabled": false, "timestamp": true, "level": "info"},
         "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "access_control_allow_origin": ["*"]}},
         "dns": {
-            "final": "googledns",
+            "final": "alidns",
             "strategy": "prefer_ipv4",
             "independent_cache": true,
             "servers": [
-                {"type": "udp", "tag": "googledns", "server": "8.8.8.8", "detour": "proxy"}
+                {"type": "https", "tag": "alidns", "address": "https://dns.alidns.com/dns-query", "detour": "direct"},
+                {"type": "https", "tag": "tencent", "address": "https://doh.pub/dns-query", "detour": "direct"},
+                {"type": "udp", "tag": "114", "address": "114.114.114.114", "detour": "direct"},
+                {"type": "udp", "tag": "cloudflare", "address": "1.1.1.1", "detour": "direct"},
+                {"type": "udp", "tag": "google", "address": "8.8.8.8", "detour": "direct"}
             ]
         },
         "inbounds": [
@@ -1132,6 +1147,12 @@ async fn fetch_sub(
             println!("Detected sing-box JSON format subscription");
             return parse_singbox_json(outbounds_arr);
         }
+    }
+
+    // Try parsing as Shadowsocks URL list (base64 encoded)
+    if let Some(ss_result) = try_parse_ss_urls(&text) {
+        println!("Detected Shadowsocks URL format subscription");
+        return ss_result;
     }
 
     // Fall back to YAML parsing (Clash format)
@@ -1248,6 +1269,150 @@ fn parse_singbox_json(
 
     println!("Parsed {} nodes from sing-box JSON", node_names.len());
     Ok((node_names, result_outbounds))
+}
+
+/// Try to detect if the text is base64 encoded SS URLs
+fn try_parse_ss_urls(text: &str) -> Option<Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>>> {
+    // Check if the text looks like base64 (only contains valid base64 characters)
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Try to decode as base64
+    match base64_decode(trimmed) {
+        Ok(decoded) => {
+            let decoded_str = String::from_utf8_lossy(&decoded);
+            // Check if decoded content contains ss:// URLs
+            if decoded_str.contains("ss://") {
+                Some(parse_ss_url_list(&decoded_str))
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Base64 decode helper
+fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    // Handle URL-safe base64 as well
+    let input = input.trim();
+    if input.contains('_') || input.contains('-') {
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, input)
+    } else {
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input)
+    }
+}
+
+/// Parse a list of SS URLs (base64 decoded content)
+fn parse_ss_url_list(content: &str) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
+    let mut node_names = vec![];
+    let mut outbounds = vec![];
+
+    // Split by newlines and parse each SS URL
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.starts_with("ss://") {
+            continue;
+        }
+
+        if let Some((name, ss)) = parse_single_ss_url(line) {
+            node_names.push(name.clone());
+            outbounds.push(ss);
+        }
+    }
+
+    println!("Parsed {} nodes from Shadowsocks URLs", node_names.len());
+    Ok((node_names, outbounds))
+}
+
+/// Parse a single SS URL
+/// Format: ss://BASE64(method:password)@server:port#name
+/// Or with plugin: ss://BASE64(method:password)@server:port?plugin=xxx#name
+fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
+    // Remove the ss:// prefix
+    let url = url.strip_prefix("ss://")?;
+
+    // Find the fragment (#) for the name
+    let (url_part, name) = match url.rsplit_once('#') {
+        Some((u, n)) => (u, url_decode(n)),
+        None => (url, String::new()),
+    };
+
+    // Find the @ sign separating userinfo from server:port
+    let (userinfo, server_part) = match url_part.split_once('@') {
+        Some((u, s)) => (u, s),
+        None => return None,
+    };
+
+    // Parse server:port
+    let (server, port) = match server_part.rsplit_once(':') {
+        Some((s, p)) => (s, p.parse::<u16>().ok()?),
+        None => return None,
+    };
+
+    // Decode userinfo (method:password)
+    let decoded_userinfo = match base64_decode(userinfo) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => return None,
+    };
+
+    let (method, password) = match decoded_userinfo.split_once(':') {
+        Some((m, p)) => (m.to_string(), p.to_string()),
+        None => {
+            // Handle case where password contains ':'
+            let parts: Vec<&str> = decoded_userinfo.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                return None;
+            }
+        }
+    };
+
+    // Create shadowsocks outbound
+    let ss = Shadowsocks {
+        outbound_type: "shadowsocks".to_string(),
+        tag: if name.is_empty() { format!("{}:{}", server, port) } else { name },
+        server: server.to_string(),
+        server_port: port,
+        method,
+        password,
+    };
+
+    Some((ss.tag.clone(), serde_json::to_value(ss).ok()?))
+}
+
+/// URL decode helper
+fn url_decode(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let Some(h1) = chars.next() {
+                if let Some(h2) = chars.next() {
+                    if let Some(byte) = hex_to_byte(h1, h2) {
+                        if let Some(chr) = std::char::from_u32(byte as u32) {
+                            result.push(chr);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(c);
+    }
+
+    result
+}
+
+/// Convert hex characters to byte
+fn hex_to_byte(h1: char, h2: char) -> Option<u8> {
+    let d1 = h1.to_digit(16)?;
+    let d2 = h2.to_digit(16)?;
+    Some(((d1 as u8) << 4) | (d2 as u8))
 }
 
 // ============================================================================
