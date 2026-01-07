@@ -70,3 +70,5 @@ sudo ./miao
 | `selections` | 记住的节点选择（selector -> node） | `{}` |
 | `subs` | 订阅 URL 列表 | - |
 | `nodes` | 手动配置的节点 (JSON 格式) | - |
+
+> 默认规则会让所有 `tcp/22`（SSH）直连，避免代理出口对 22 端口的限制导致 SSH 断连。
