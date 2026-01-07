@@ -6,6 +6,11 @@
 # Web login password (optional, default: "admin")
 # password: admin
 
+# Remembered node selections (optional)
+# Key is selector group name, value is selected node name.
+# selections:
+#   proxy: "节点名"
+
 # sing-box home directory (optional)
 # If not specified, miao will use embedded sing-box binary
 # and extract it to ./runtime directory

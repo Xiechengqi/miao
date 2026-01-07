@@ -1,21 +1,27 @@
 use axum::{
-    extract::State,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{Html, Json, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio_tungstenite::connect_async;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
@@ -41,6 +47,8 @@ struct Config {
     sing_box_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,  // 登录密码
+    #[serde(default)]
+    selections: HashMap<String, String>, // selector group -> node name
     #[serde(default)]
     subs: Vec<String>,
     #[serde(default)]
@@ -69,6 +77,23 @@ struct LoginRequest {
 #[derive(Serialize)]
 struct LoginResponse {
     token: String,
+}
+
+#[derive(Deserialize)]
+struct ClashSwitchRequest {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct SelectionsResponse {
+    selections: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct WsAuthQuery {
+    token: String,
+    #[serde(default)]
+    level: Option<String>,
 }
 
 struct AppState {
@@ -331,7 +356,13 @@ async fn start_service(
     drop(lock);
 
     match start_sing_internal(&state.sing_box_home).await {
-        Ok(_) => Ok(Json(ApiResponse::success_no_data("sing-box started successfully"))),
+        Ok(_) => {
+            let config = state.config.lock().await;
+            let _ = apply_saved_selections(&config).await;
+            Ok(Json(ApiResponse::success_no_data(
+                "sing-box started successfully",
+            )))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(format!("Failed to start: {}", e))),
@@ -343,6 +374,245 @@ async fn start_service(
 async fn stop_service() -> Json<ApiResponse<()>> {
     stop_sing_internal().await;
     Json(ApiResponse::success_no_data("sing-box stopped"))
+}
+
+// ============================================================================
+// Clash API Proxy (HTTP + WebSocket)
+// ============================================================================
+
+const CLASH_HTTP_BASE: &str = "http://127.0.0.1:6262";
+const CLASH_WS_BASE: &str = "ws://127.0.0.1:6262";
+
+async fn clash_get_proxies() -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/proxies", CLASH_HTTP_BASE))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(format!("Clash API request failed: {}", e)))))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(format!("Clash API parse failed: {}", e)))))?;
+
+    Ok(Json(ApiResponse::success("Clash proxies", json)))
+}
+
+async fn clash_switch_proxy(
+    State(state): State<Arc<AppState>>,
+    Path(group): Path<String>,
+    Json(req): Json<ClashSwitchRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!(
+            "{}/proxies/{}",
+            CLASH_HTTP_BASE,
+            percent_encoding::utf8_percent_encode(&group, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(format!("Clash API request failed: {}", e)))))?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ApiResponse::error(format!("Clash API returned {}", resp.status()))),
+        ));
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        config.selections.insert(group, req.name);
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Switched")))
+}
+
+#[derive(Deserialize)]
+struct DelayQuery {
+    timeout: Option<u32>,
+    url: Option<String>,
+}
+
+async fn clash_test_delay(
+    Path(node): Path<String>,
+    Query(q): Query<DelayQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let client = reqwest::Client::new();
+    let mut req = client.get(format!(
+        "{}/proxies/{}/delay",
+        CLASH_HTTP_BASE,
+        percent_encoding::utf8_percent_encode(&node, percent_encoding::NON_ALPHANUMERIC)
+    ));
+    if let Some(timeout) = q.timeout {
+        req = req.query(&[("timeout", timeout.to_string())]);
+    }
+    if let Some(url) = q.url {
+        req = req.query(&[("url", url)]);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(format!("Clash API request failed: {}", e)))))?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ApiResponse::error(format!("Clash API returned {}", resp.status()))),
+        ));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(format!("Clash API parse failed: {}", e)))))?;
+
+    Ok(Json(ApiResponse::success("Delay", json)))
+}
+
+async fn get_selections(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<SelectionsResponse>> {
+    let config = state.config.lock().await;
+    Json(ApiResponse::success(
+        "Selections",
+        SelectionsResponse {
+            selections: config.selections.clone(),
+        },
+    ))
+}
+
+async fn clash_ws_traffic(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(|socket| proxy_websocket(socket, format!("{}/traffic", CLASH_WS_BASE))))
+}
+
+async fn clash_ws_logs(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let level = q.level.unwrap_or_else(|| "info".to_string());
+    Ok(ws.on_upgrade(move |socket| {
+        proxy_websocket(
+            socket,
+            format!(
+                "{}/logs?level={}",
+                CLASH_WS_BASE,
+                percent_encoding::utf8_percent_encode(&level, percent_encoding::NON_ALPHANUMERIC)
+            ),
+        )
+    }))
+}
+
+async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
+    let upstream = connect_async(&upstream_url).await;
+    let (upstream_ws, _) = match upstream {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to connect upstream websocket {}: {}", upstream_url, e);
+            let _ = client_socket.close().await;
+            return;
+        }
+    };
+
+    let (mut client_tx, mut client_rx) = client_socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream_ws.split();
+
+    let client_to_upstream = async {
+        while let Some(Ok(msg)) = client_rx.next().await {
+            match msg {
+                Message::Text(t) => {
+                    if upstream_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Text(t))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Message::Binary(b) => {
+                    if upstream_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(b))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Message::Ping(b) => {
+                    let _ = upstream_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Ping(b))
+                        .await;
+                }
+                Message::Pong(b) => {
+                    let _ = upstream_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Pong(b))
+                        .await;
+                }
+                Message::Close(_) => {
+                    let _ = upstream_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Close(None))
+                        .await;
+                    break;
+                }
+            }
+        }
+    };
+
+    let upstream_to_client = async {
+        while let Some(msg) = upstream_rx.next().await {
+            match msg {
+                Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => {
+                    if client_tx.send(Message::Text(t)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Binary(b)) => {
+                    if client_tx.send(Message::Binary(b)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Ping(b)) => {
+                    let _ = client_tx.send(Message::Ping(b)).await;
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Pong(b)) => {
+                    let _ = client_tx.send(Message::Pong(b)).await;
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
+                    let _ = client_tx.send(Message::Close(None)).await;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("Upstream websocket error: {}", e);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = client_to_upstream => {},
+        _ = upstream_to_client => {},
+    }
 }
 
 // ============================================================================
@@ -915,6 +1185,55 @@ async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + 
     Ok(())
 }
 
+async fn apply_saved_selections(config: &Config) -> Result<(), String> {
+    if config.selections.is_empty() {
+        return Ok(());
+    }
+
+    let client = reqwest::Client::new();
+
+    for (group, name) in &config.selections {
+        let mut last_err: Option<String> = None;
+
+        for attempt in 1..=10 {
+            let resp = client
+                .put(format!(
+                    "{}/proxies/{}",
+                    CLASH_HTTP_BASE,
+                    percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+                ))
+                .json(&ClashSwitchRequest { name: name.clone() })
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    println!("Restored selection: {} -> {}", group, name);
+                    last_err = None;
+                    break;
+                }
+                Ok(r) => {
+                    last_err = Some(format!("Clash API returned {}", r.status()));
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                }
+            }
+
+            // Clash API may not be ready right after sing-box starts
+            if attempt < 10 {
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+
+        if let Some(e) = last_err {
+            eprintln!("Failed to restore selection for {}: {}", group, e);
+        }
+    }
+
+    Ok(())
+}
+
 /// Regenerate sing-box config and restart the service
 async fn regenerate_and_restart(config: &Config, sing_box_home: &str) -> Result<(), String> {
     // Regenerate config
@@ -926,6 +1245,7 @@ async fn regenerate_and_restart(config: &Config, sing_box_home: &str) -> Result<
     sleep(Duration::from_millis(500)).await;
 
     start_sing_internal(sing_box_home).await.map_err(|e| format!("Failed to restart sing-box: {}", e))?;
+    let _ = apply_saved_selections(config).await;
     println!("sing-box restarted successfully");
     Ok(())
 }
@@ -1238,7 +1558,7 @@ async fn gen_config(
 fn get_config_template() -> serde_json::Value {
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
-        "experimental": {"clash_api": {"external_controller": "0.0.0.0:6262", "access_control_allow_origin": ["*"]}},
+        "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262", "access_control_allow_origin": ["*"]}},
         "dns": {
             "final": "alidns",
             "strategy": "prefer_ipv4",
@@ -1603,7 +1923,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Start sing-box
     match start_sing_internal(&sing_box_home).await {
-        Ok(_) => println!("sing-box started successfully"),
+        Ok(_) => {
+            let _ = apply_saved_selections(&config).await;
+            println!("sing-box started successfully")
+        }
         Err(e) => eprintln!("Failed to start sing-box: {}", e),
     }
 
@@ -1624,6 +1947,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/service/stop", post(stop_service))
         // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
+        // Clash API proxy (protected HTTP)
+        .route("/api/clash/proxies", get(clash_get_proxies))
+        .route("/api/clash/proxies/:group", put(clash_switch_proxy))
+        .route("/api/clash/proxies/:node/delay", get(clash_test_delay))
+        .route("/api/selections", get(get_selections))
         // Subscription management
         .route("/api/subs", get(get_subs))
         .route("/api/subs", post(add_sub))
@@ -1636,10 +1964,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
+    let ws_routes = Router::new()
+        .route("/api/clash/ws/traffic", get(clash_ws_traffic))
+        .route("/api/clash/ws/logs", get(clash_ws_logs));
+
     let app = Router::new()
         .route("/", get(serve_index))           // 首页可访问（前端会检查）
         .route("/api/login", post(login))       // 登录接口
         .route("/api/version", get(get_version)) // 版本信息与更新检查（公开，便于探活）
+        .merge(ws_routes)
         .merge(protected_routes)                // 合并受保护的路由
         .with_state(app_state);
 

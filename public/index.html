@@ -1677,11 +1677,7 @@
 	                let logsWs = null;
 	                let logId = 0;
 
-                // Clash API 基础 URL
-                const clashApiBase = computed(() => {
-                    const host = window.location.hostname;
-                    return `http://${host}:6262`;
-                });
+	                // Clash API 已通过后端转发（/api/clash/*），避免浏览器直连 6262 绕过认证
 
                 // 计算属性
                 const canAddNode = computed(() => {
@@ -1877,42 +1873,36 @@
                     }
                 };
 
-                // Clash API 函数
-                const fetchProxies = async () => {
-                    try {
-                        const res = await fetch(`${clashApiBase.value}/proxies`);
-                        const data = await res.json();
-                        proxies.value = data.proxies || {};
-                    } catch (e) { console.error('获取代理失败:', e); }
-                };
+	                // Clash API 函数
+	                const fetchProxies = async () => {
+	                    try {
+	                        const resp = await apiFetch('/api/clash/proxies');
+	                        proxies.value = resp.data?.proxies || {};
+	                    } catch (e) { console.error('获取代理失败:', e); }
+	                };
 
-                const switchProxy = async (groupName, nodeName) => {
-                    try {
-                        await fetch(`${clashApiBase.value}/proxies/${encodeURIComponent(groupName)}`, {
-                            method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ name: nodeName })
-                        });
-                        await fetchProxies();
-                        showToast(`已切换到 ${nodeName}`, 'success');
-                    } catch (e) {
-                        showToast('切换节点失败', 'error');
-                    }
-                };
+	                const switchProxy = async (groupName, nodeName) => {
+	                    try {
+	                        await apiFetch(`/api/clash/proxies/${encodeURIComponent(groupName)}`, {
+	                            method: 'PUT',
+	                            headers: { 'Content-Type': 'application/json' },
+	                            body: JSON.stringify({ name: nodeName })
+	                        });
+	                        await fetchProxies();
+	                        showToast(`已切换到 ${nodeName}`, 'success');
+	                    } catch (e) {
+	                        showToast('切换节点失败', 'error');
+	                    }
+	                };
 
-                const testDelay = async (nodeName) => {
-                    try {
-                        const res = await fetch(`${clashApiBase.value}/proxies/${encodeURIComponent(nodeName)}/delay?timeout=5000&url=http://www.gstatic.com/generate_204`);
-                        if (!res.ok) {
-                            delays.value[nodeName] = -1;
-                            return;
-                        }
-                        const data = await res.json();
-                        delays.value[nodeName] = data.delay > 0 ? data.delay : -1;
-                    } catch (e) {
-                        delays.value[nodeName] = -1;
-                    }
-                };
+	                const testDelay = async (nodeName) => {
+	                    try {
+	                        const resp = await apiFetch(`/api/clash/proxies/${encodeURIComponent(nodeName)}/delay?timeout=5000&url=http://www.gstatic.com/generate_204`);
+	                        delays.value[nodeName] = resp.data?.delay > 0 ? resp.data.delay : -1;
+	                    } catch (e) {
+	                        delays.value[nodeName] = -1;
+	                    }
+	                };
 
                 const testAllDelays = async (groupName, nodeNames) => {
                     testingGroup.value = groupName;
@@ -1943,13 +1933,15 @@
                     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
                 };
 
-                const connectTrafficWs = () => {
-                    const host = window.location.hostname;
-                    trafficWs = new WebSocket(`ws://${host}:6262/traffic`);
-                    trafficWs.onmessage = (event) => {
-                        try {
-                            const data = JSON.parse(event.data);
-                            traffic.value = { up: data.up, down: data.down };
+	                const connectTrafficWs = () => {
+	                    const token = localStorage.getItem('miao_token');
+	                    if (!token) return;
+	                    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+	                    trafficWs = new WebSocket(`${scheme}://${window.location.host}/api/clash/ws/traffic?token=${encodeURIComponent(token)}`);
+	                    trafficWs.onmessage = (event) => {
+	                        try {
+	                            const data = JSON.parse(event.data);
+	                            traffic.value = { up: data.up, down: data.down };
                         } catch (e) { console.error('解析流量数据失败:', e); }
                     };
                     trafficWs.onclose = () => {
@@ -1960,16 +1952,18 @@
                 };
 
                 // 日志 WebSocket
-                const connectLogsWs = () => {
-                    if (logsWs) {
-                        logsWs.close();
-                    }
-                    const host = window.location.hostname;
-                    logsWs = new WebSocket(`ws://${host}:6262/logs?level=info`);
-                    logsWs.onmessage = (event) => {
-                        try {
-                            const data = JSON.parse(event.data);
-                            const now = new Date();
+	                const connectLogsWs = () => {
+	                    if (logsWs) {
+	                        logsWs.close();
+	                    }
+	                    const token = localStorage.getItem('miao_token');
+	                    if (!token) return;
+	                    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+	                    logsWs = new WebSocket(`${scheme}://${window.location.host}/api/clash/ws/logs?level=info&token=${encodeURIComponent(token)}`);
+	                    logsWs.onmessage = (event) => {
+	                        try {
+	                            const data = JSON.parse(event.data);
+	                            const now = new Date();
                             const time = now.toLocaleTimeString('zh-CN', { hour12: false });
                             logs.value.push({
                                 id: ++logId,

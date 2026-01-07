@@ -65,5 +65,6 @@ sudo ./miao
 |------|------|--------|
 | `port` | Web 面板端口 | `6161` |
 | `password` | Web 登录密码 | `admin` |
+| `selections` | 记住的节点选择（selector -> node） | `{}` |
 | `subs` | 订阅 URL 列表 | - |
 | `nodes` | 手动配置的节点 (JSON 格式) | - |
