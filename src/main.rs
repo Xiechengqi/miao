@@ -569,16 +569,20 @@ async fn upgrade() -> Json<ApiResponse<String>> {
 
     println!("Upgrade successful! Restarting...");
 
-    // 10. Exec to restart with new binary
+    // 10. Restart:
+    // - Prefer systemd restart (when deployed as a service)
+    // - Fallback to exec() restart (for non-systemd environments / failures)
     let new_version = release.tag_name.clone();
     tokio::spawn(async move {
         sleep(Duration::from_millis(500)).await;
 
+        if try_restart_systemd("miao").await.is_ok() {
+            return;
+        }
+
         use std::os::unix::process::CommandExt;
         let args: Vec<String> = std::env::args().collect();
-        let err = std::process::Command::new(&current_exe)
-            .args(&args[1..])
-            .exec();
+        let err = std::process::Command::new(&current_exe).args(&args[1..]).exec();
 
         // exec() only returns if there's an error, try to restore from backup
         eprintln!("Failed to exec new binary: {}", err);
@@ -588,9 +592,7 @@ async fn upgrade() -> Json<ApiResponse<String>> {
             if fs::copy(&backup_path, &current_exe).is_ok() {
                 let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
                 eprintln!("Restored from backup, restarting with old version...");
-                let _ = std::process::Command::new(&current_exe)
-                    .args(&args[1..])
-                    .exec();
+                let _ = std::process::Command::new(&current_exe).args(&args[1..]).exec();
             }
         }
         eprintln!("Failed to restore from backup, manual intervention required");
@@ -598,6 +600,55 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     });
 
     Json(ApiResponse::success("Upgrade complete, restarting...", new_version))
+}
+
+async fn try_restart_systemd(unit: &str) -> Result<(), String> {
+    // Prefer running the restart from a separate transient unit so it won't be killed when the
+    // current service cgroup is stopped.
+    let transient_unit = format!("miao-upgrade-restart-{}", std::process::id());
+    let script = format!("sleep 0.5; systemctl restart {}", unit);
+
+    let via_systemd_run = tokio::process::Command::new("systemd-run")
+        .arg("--unit")
+        .arg(&transient_unit)
+        .arg("--property=Type=oneshot")
+        .arg("--collect")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .await;
+
+    match via_systemd_run {
+        Ok(out) if out.status.success() => return Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!("systemd-run restart failed: {}", stderr.trim());
+        }
+        Err(e) => {
+            eprintln!("systemd-run not available/failed: {}", e);
+        }
+    }
+
+    // Fallback: direct systemctl (may still work, but can be killed if the unit stops quickly)
+    let direct = tokio::process::Command::new("systemctl")
+        .arg("restart")
+        .arg(unit)
+        .arg("--no-block")
+        .output()
+        .await
+        .map_err(|e| format!("systemctl restart failed: {}", e))?;
+
+    if direct.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&direct.stderr);
+        Err(format!(
+            "systemctl restart exited with {}: {}",
+            direct.status,
+            stderr.trim()
+        ))
+    }
 }
 
 // ============================================================================
