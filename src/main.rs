@@ -320,7 +320,7 @@ async fn get_version() -> Json<ApiResponse<VersionInfo>> {
     };
 
     let resp = client
-        .get("https://api.github.com/repos/YUxiangLuo/miao/releases/latest")
+        .get("https://api.github.com/repos/xiechengqi/miao/releases/latest")
         .header("User-Agent", "miao")
         .send()
         .await;
@@ -381,7 +381,7 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     };
 
     let release: GitHubRelease = match client
-        .get("https://api.github.com/repos/YUxiangLuo/miao/releases/latest")
+        .get("https://api.github.com/repos/xiechengqi/miao/releases/latest")
         .header("User-Agent", "miao")
         .send()
         .await {
@@ -392,10 +392,8 @@ async fn upgrade() -> Json<ApiResponse<String>> {
         Err(e) => return Json(ApiResponse::error(format!("Failed to fetch release info: {}", e))),
     };
 
-    let current = format!("v{}", VERSION);
-    if !is_newer_version(&current, &release.tag_name) {
-        return Json(ApiResponse::success_no_data("Already up to date"));
-    }
+    // 移除版本检查，允许强制更新到 latest
+    // 这样即使当前版本与 latest 相同也可以重新安装
 
     // 2. Find download URL for current architecture
     let asset_name = if cfg!(target_arch = "x86_64") {

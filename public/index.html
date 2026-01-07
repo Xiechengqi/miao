@@ -1441,13 +1441,10 @@
 
         <!-- 更新按钮 -->
         <div class="update-widget">
-            <button :class="['update-btn', { 'has-update': versionInfo.has_update, 'upgrading': upgrading }]"
-                @click="handleUpdateClick" :disabled="upgrading">
+            <button class="update-btn" @click="handleUpdateClick" :disabled="upgrading">
                 <span v-if="upgrading" class="spinner" style="width:14px;height:14px;"></span>
-                <i v-else-if="versionInfo.has_update" class="bi bi-cloud-download"></i>
-                <i v-else class="bi bi-info-circle"></i>
-                <span class="version">{{ versionInfo.current || '...' }}</span>
-                <span v-if="versionInfo.has_update">→ {{ versionInfo.latest }}</span>
+                <i v-else class="bi bi-cloud-download"></i>
+                <span>{{ upgrading ? '更新中...' : '强制更新' }}</span>
             </button>
         </div>
     </div>
@@ -1891,16 +1888,12 @@
 
                 // 处理更新按钮点击
                 const handleUpdateClick = () => {
-                    if (versionInfo.value.has_update) {
-                        showConfirm(
-                            '更新确认',
-                            `确定要从 ${versionInfo.value.current} 更新到 ${versionInfo.value.latest} 吗？\n\n更新过程中服务将短暂中断。`,
-                            doUpgrade
-                        );
-                    } else {
-                        checkVersion();
-                        showToast('已是最新版本', 'info');
-                    }
+                    // 始终弹出确认对话框
+                    showConfirm(
+                        '强制更新确认',
+                        '确定要强制更新到最新版本吗？\n\n更新过程中服务将短暂中断。',
+                        doUpgrade
+                    );
                 };
 
                 // 执行更新
