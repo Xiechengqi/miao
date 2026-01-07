@@ -1102,11 +1102,11 @@ fn get_config_template() -> serde_json::Value {
             "strategy": "prefer_ipv4",
             "independent_cache": true,
             "servers": [
-                {"tag": "alidns", "address": "https://dns.alidns.com/dns-query", "detour": "direct"},
-                {"tag": "tencent", "address": "https://doh.pub/dns-query", "detour": "direct"},
-                {"tag": "cloudflare", "address": "https://1.1.1.1/dns-query", "detour": "direct"},
-                {"tag": "google", "address": "https://dns.google/dns-query", "detour": "direct"},
-                {"tag": "114", "address": "114.114.114.114", "detour": "direct"}
+                {"type": "https", "tag": "alidns", "server": "dns.alidns.com"},
+                {"type": "https", "tag": "tencent", "server": "doh.pub"},
+                {"type": "https", "tag": "cloudflare", "server": "1.1.1.1"},
+                {"type": "https", "tag": "google", "server": "dns.google"},
+                {"type": "udp", "tag": "114", "server": "114.114.114.114"}
             ]
         },
         "inbounds": [
