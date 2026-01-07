@@ -1091,10 +1091,8 @@ fn get_config_template() -> serde_json::Value {
             "strategy": "prefer_ipv4",
             "independent_cache": true,
             "servers": [
-                {"type": "udp", "tag": "googledns", "server": "8.8.8.8", "detour": "proxy"},
-                {"tag": "local", "type": "udp", "server": "223.5.5.5"}
-            ],
-            "rules": [{"rule_set": ["chinasite"], "action": "route", "server": "local"}]
+                {"type": "udp", "tag": "googledns", "server": "8.8.8.8", "detour": "proxy"}
+            ]
         },
         "inbounds": [
             {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "auto_redirect": true}
@@ -1106,18 +1104,10 @@ fn get_config_template() -> serde_json::Value {
         "route": {
             "final": "proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": "local",
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
-                {"ip_is_private": true, "action": "route", "outbound": "direct"},
-                {"protocol": ["bittorrent"], "action": "route", "outbound": "direct"},
-                {"rule_set": ["chinasite"], "action": "route", "outbound": "direct"},
-                {"rule_set": ["chinaip"], "action": "route", "outbound": "direct"}
-            ],
-            "rule_set": [
-                {"type": "remote", "tag": "chinasite", "format": "binary", "url": "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs", "download_detour": "direct"},
-                {"type": "remote", "tag": "chinaip", "format": "binary", "url": "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "direct"}
+                {"ip_is_private": true, "action": "route", "outbound": "direct"}
             ]
         }
     })
