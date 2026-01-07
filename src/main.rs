@@ -1491,9 +1491,9 @@ fn url_decode(input: &str) -> String {
 // ============================================================================
 
 // JWT 认证中间件
-async fn auth_middleware<B>(
-    req: Request<B>,
-    next: Next<B>,
+async fn auth_middleware(
+    req: Request<axum::body::Body>,
+    next: Next,
 ) -> Result<Response, StatusCode> {
     // 从 header 中获取 Authorization
     let auth_header = req
