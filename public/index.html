@@ -1627,12 +1627,12 @@
         const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
 
         createApp({
-            setup() {
-                // 认证状态
-                const authenticated = ref(false);
-                const loginPassword = ref('');
-                const loggingIn = ref(false);
-                const loginError = ref('');
+	            setup() {
+	                // 认证状态
+	                const authenticated = ref(false);
+	                const loginPassword = ref('');
+	                const loggingIn = ref(false);
+	                const loginError = ref('');
 
                 // 状态
                 const status = ref({ running: false, pid: null, uptime_secs: null });
@@ -1673,9 +1673,9 @@
 
                 let statusInterval = null;
                 let toastId = 0;
-                let trafficWs = null;
-                let logsWs = null;
-                let logId = 0;
+	                let trafficWs = null;
+	                let logsWs = null;
+	                let logId = 0;
 
                 // Clash API 基础 URL
                 const clashApiBase = computed(() => {
@@ -1699,20 +1699,47 @@
                     return groups;
                 });
 
-                // 认证函数
-                // 检查是否已登录
-                const checkAuth = () => {
-                    const token = localStorage.getItem('miao_token');
-                    if (token) {
-                        authenticated.value = true;
-                        return true;
-                    }
-                    return false;
-                };
+	                // 认证函数
+	                // 检查是否已登录
+	                const checkAuth = () => {
+	                    const token = localStorage.getItem('miao_token');
+	                    if (token) {
+	                        authenticated.value = true;
+	                        return true;
+	                    }
+	                    return false;
+	                };
 
-                // 登录处理
-                const handleLogin = async () => {
-                    if (!loginPassword.value) return;
+	                const authHeaders = (extra = {}) => {
+	                    const token = localStorage.getItem('miao_token');
+	                    return {
+	                        ...extra,
+	                        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+	                    };
+	                };
+
+	                const apiFetch = async (path, options = {}, { handle401 = true } = {}) => {
+	                    const headers = authHeaders(options.headers || {});
+	                    const response = await fetch(path, { ...options, headers });
+
+	                    if (response.status === 401) {
+	                        if (handle401) {
+	                            handleLogout();
+	                            showToast('登录已过期，请重新登录', 'error');
+	                        }
+	                        throw new Error('Unauthorized');
+	                    }
+
+	                    const data = await response.json();
+	                    if (!response.ok || !data.success) {
+	                        throw new Error(data.message || '请求失败');
+	                    }
+	                    return data;
+	                };
+
+	                // 登录处理
+	                const handleLogin = async () => {
+	                    if (!loginPassword.value) return;
 
                     loggingIn.value = true;
                     loginError.value = '';
@@ -1745,14 +1772,18 @@
                     }
                 };
 
-                // 登出处理
-                const handleLogout = () => {
-                    localStorage.removeItem('miao_token');
-                    authenticated.value = false;
-                    // 断开 WebSocket
-                    if (trafficWs) trafficWs.close();
-                    if (logsWs) logsWs.close();
-                };
+	                // 登出处理
+	                const handleLogout = () => {
+	                    localStorage.removeItem('miao_token');
+	                    authenticated.value = false;
+	                    if (statusInterval) {
+	                        clearInterval(statusInterval);
+	                        statusInterval = null;
+	                    }
+	                    // 断开 WebSocket
+	                    if (trafficWs) { trafficWs.close(); trafficWs = null; }
+	                    if (logsWs) { logsWs.close(); logsWs = null; }
+	                };
 
                 // Toast 通知
                 const showToast = (message, type = 'info') => {
@@ -1971,70 +2002,63 @@
                     logs.value = [];
                 };
 
-                // API 调用
-                const apiCall = async (endpoint, method = 'GET', body = null, action = '') => {
-                    loading.value = true;
-                    loadingAction.value = action;
-                    try {
-                        const token = localStorage.getItem('miao_token');
-                        const headers = {
-                            'Content-Type': 'application/json',
-                            'Authorization': token ? `Bearer ${token}` : ''
-                        };
+	                // API 调用
+	                const apiCall = async (endpoint, method = 'GET', body = null, action = '') => {
+	                    loading.value = true;
+	                    loadingAction.value = action;
+	                    try {
+	                        const headers = authHeaders({ 'Content-Type': 'application/json' });
 
-                        const options = { method, headers };
-                        if (body) options.body = JSON.stringify(body);
+	                        const options = { method, headers };
+	                        if (body) options.body = JSON.stringify(body);
 
-                        const response = await fetch(`/api/${endpoint}`, options);
+	                        const response = await fetch(`/api/${endpoint}`, options);
 
-                        // 如果返回 401，说明 token 失效，退出登录
-                        if (response.status === 401) {
-                            handleLogout();
-                            showToast('登录已过期，请重新登录', 'error');
-                            throw new Error('Unauthorized');
-                        }
+	                        // 如果返回 401，说明 token 失效，退出登录
+	                        if (response.status === 401) {
+	                            handleLogout();
+	                            showToast('登录已过期，请重新登录', 'error');
+	                            throw new Error('Unauthorized');
+	                        }
 
-                        const data = await response.json();
-                        if (!response.ok || !data.success) throw new Error(data.message || '请求失败');
-                        return data;
-                    } catch (error) {
-                        showToast(error.message, 'error');
-                        throw error;
-                    } finally {
-                        loading.value = false;
-                        loadingAction.value = '';
-                    }
-                };
+	                        const data = await response.json();
+	                        if (!response.ok || !data.success) throw new Error(data.message || '请求失败');
+	                        return data;
+	                    } catch (error) {
+	                        showToast(error.message, 'error');
+	                        throw error;
+	                    } finally {
+	                        loading.value = false;
+	                        loadingAction.value = '';
+	                    }
+	                };
 
-                // 获取状态
-                const fetchStatus = async () => {
-                    try {
-                        const response = await fetch('/api/status');
-                        const data = await response.json();
-                        if (data.success && data.data) {
-                            status.value = data.data;
-                            updatePageTitle(data.data.running);
-                        }
-                    } catch (e) { console.error('获取状态失败:', e); }
-                };
+	                // 获取状态
+	                const fetchStatus = async () => {
+	                    try {
+	                        const data = await apiFetch('/api/status');
+	                        if (data.data) {
+	                            status.value = data.data;
+	                            updatePageTitle(data.data.running);
+	                        }
+	                    } catch (e) { console.error('获取状态失败:', e); }
+	                };
 
-                // 获取订阅列表
-                const fetchSubs = async () => {
-                    try {
-                        const response = await fetch('/api/subs');
-                        const data = await response.json();
-                        if (data.success && data.data) subs.value = data.data;
-                    } catch (e) { console.error('获取订阅失败:', e); }
-                };
+	                // 获取订阅列表
+	                const fetchSubs = async () => {
+	                    try {
+	                        const data = await apiFetch('/api/subs');
+	                        if (data.data) subs.value = data.data;
+	                    } catch (e) { console.error('获取订阅失败:', e); }
+	                };
 
-                // 获取节点列表
-                const fetchNodes = async () => {
-                    try {
-                        const response = await fetch('/api/nodes');
-                        const data = await response.json();
-                        if (data.success && data.data) nodes.value = data.data;
-                    } catch (e) { console.error('获取节点失败:', e); }
-                };
+	                // 获取节点列表
+	                const fetchNodes = async () => {
+	                    try {
+	                        const data = await apiFetch('/api/nodes');
+	                        if (data.data) nodes.value = data.data;
+	                    } catch (e) { console.error('获取节点失败:', e); }
+	                };
 
                 // 服务控制
                 const startService = async () => {
@@ -2122,18 +2146,15 @@
                     showConfirm('删除节点', `确定要删除节点 "${tag}" 吗？`, () => deleteNode(tag));
                 };
 
-                // 版本检查
-                const checkVersion = async () => {
-                    try {
-                        const res = await fetch('/api/version');
-                        const data = await res.json();
-                        if (data.success && data.data) {
-                            versionInfo.value = data.data;
-                        }
-                    } catch (e) {
-                        console.error('获取版本失败:', e);
-                    }
-                };
+	                // 版本检查
+	                const checkVersion = async () => {
+	                    try {
+	                        const data = await apiFetch('/api/version');
+	                        if (data.data) versionInfo.value = data.data;
+	                    } catch (e) {
+	                        console.error('获取版本失败:', e);
+	                    }
+	                };
 
                 // 处理更新按钮点击
                 const handleUpdateClick = () => {
@@ -2146,43 +2167,34 @@
                 };
 
                 // 执行更新
-                const doUpgrade = async () => {
-                    upgrading.value = true;
-                    showToast('正在下载更新...', 'info');
+	                const doUpgrade = async () => {
+	                    upgrading.value = true;
+	                    showToast('正在下载更新...', 'info');
 
-                    try {
-                        const res = await fetch('/api/upgrade', { method: 'POST' });
-                        const data = await res.json();
-
-                        if (data.success) {
-                            showToast(`更新成功，等待服务重启...`, 'success');
-                            // 轮询等待服务恢复
-                            waitForRestart();
-                        } else {
-                            showToast(data.message || '更新失败', 'error');
-                            upgrading.value = false;
-                        }
-                    } catch (e) {
-                        showToast('更新请求失败', 'error');
-                        upgrading.value = false;
-                    }
-                };
+	                    try {
+	                        await apiFetch('/api/upgrade', { method: 'POST' });
+	                        showToast(`更新成功，等待服务重启...`, 'success');
+	                        // 轮询等待服务恢复
+	                        waitForRestart();
+	                    } catch (e) {
+	                        showToast('更新请求失败', 'error');
+	                        upgrading.value = false;
+	                    }
+	                };
 
                 // 轮询等待服务重启完成
-                const waitForRestart = async () => {
-                    for (let i = 0; i < 30; i++) {  // 最多等 15 秒
-                        await new Promise(r => setTimeout(r, 500));
-                        try {
-                            const res = await fetch('/api/version');
-                            if (res.ok) {
-                                location.reload();
-                                return;
-                            }
-                        } catch (e) { }
-                    }
-                    showToast('服务重启超时，请手动刷新页面', 'error');
-                    upgrading.value = false;
-                };
+	                const waitForRestart = async () => {
+	                    for (let i = 0; i < 30; i++) {  // 最多等 15 秒
+	                        await new Promise(r => setTimeout(r, 500));
+	                        try {
+	                            // 服务恢复后，无论是 200 还是 401（token 过期）都说明服务已启动
+	                            const res = await fetch('/api/version', { headers: authHeaders() });
+	                            if (res.ok || res.status === 401) { location.reload(); return; }
+	                        } catch (e) { }
+	                    }
+	                    showToast('服务重启超时，请手动刷新页面', 'error');
+	                    upgrading.value = false;
+	                };
 
                 // 格式化函数
                 const formatUptime = (seconds) => {

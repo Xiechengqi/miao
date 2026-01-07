@@ -3,6 +3,9 @@
 # HTTP API port (optional, default: 6161)
 # port: 6161
 
+# Web login password (optional, default: "admin")
+# password: admin
+
 # sing-box home directory (optional)
 # If not specified, miao will use embedded sing-box binary
 # and extract it to ./runtime directory

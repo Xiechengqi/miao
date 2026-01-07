@@ -1571,8 +1571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
-        // Version and upgrade
-        .route("/api/version", get(get_version))
+        // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
         // Subscription management
         .route("/api/subs", get(get_subs))
@@ -1589,6 +1588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = Router::new()
         .route("/", get(serve_index))           // 首页可访问（前端会检查）
         .route("/api/login", post(login))       // 登录接口
+        .route("/api/version", get(get_version)) // 版本信息与更新检查（公开，便于探活）
         .merge(protected_routes)                // 合并受保护的路由
         .with_state(app_state);
 
