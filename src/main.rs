@@ -1123,7 +1123,7 @@ fn get_config_template() -> serde_json::Value {
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
                 {"ip_is_private": true, "action": "route", "outbound": "direct"},
-                {"protocol": "icmp", "action": "route", "outbound": "direct"}
+                {"network": "icmp", "action": "route", "outbound": "direct"}
             ]
         }
     })
