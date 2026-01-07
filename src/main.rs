@@ -1081,8 +1081,8 @@ fn get_config_template() -> serde_json::Value {
                 {"rule_set": ["chinaip"], "action": "route", "outbound": "direct"}
             ],
             "rule_set": [
-                {"type": "remote", "tag": "chinasite", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"},
-                {"type": "remote", "tag": "chinaip", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
+                {"type": "remote", "tag": "chinasite", "format": "binary", "url": "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"},
+                {"type": "remote", "tag": "chinaip", "format": "binary", "url": "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
             ]
         }
     })
