@@ -1111,7 +1111,7 @@ fn get_config_template() -> serde_json::Value {
             ]
         },
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "stack": "mixed", "sniff": true}
+            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30"], "mtu": 9000, "auto_route": true, "strict_route": true, "stack": "system", "sniff": true, "sniff_override_destination": true }
         ],
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
