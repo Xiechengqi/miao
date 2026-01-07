@@ -1384,35 +1384,13 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
     Some((ss.tag.clone(), serde_json::to_value(ss).ok()?))
 }
 
-/// URL decode helper
+/// URL decode helper - handles UTF-8 multi-byte sequences (including emoji)
 fn url_decode(input: &str) -> String {
-    let mut result = String::new();
-    let mut chars = input.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            if let Some(h1) = chars.next() {
-                if let Some(h2) = chars.next() {
-                    if let Some(byte) = hex_to_byte(h1, h2) {
-                        if let Some(chr) = std::char::from_u32(byte as u32) {
-                            result.push(chr);
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        result.push(c);
-    }
-
-    result
-}
-
-/// Convert hex characters to byte
-fn hex_to_byte(h1: char, h2: char) -> Option<u8> {
-    let d1 = h1.to_digit(16)?;
-    let d2 = h2.to_digit(16)?;
-    Some(((d1 as u8) << 4) | (d2 as u8))
+    // Use Rust's standard library percent_encoding
+    std::percent_encoding::percent_decode_str(input)
+        .decode_utf8()
+        .unwrap_or_else(|_| input.to_string())
+        .into_owned()
 }
 
 // ============================================================================
