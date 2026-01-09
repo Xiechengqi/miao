@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -1838,13 +1838,13 @@ fn parse_subscription_text(
 }
 
 async fn load_subscription_file(
-    path: &Path,
+    path: &StdPath,
 ) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
     let text = tokio::fs::read_to_string(path).await?;
     parse_subscription_text(&text)
 }
 
-async fn load_subscription_dir(sub_dir: &Path) -> LoadedSubscriptions {
+async fn load_subscription_dir(sub_dir: &StdPath) -> LoadedSubscriptions {
     let mut file_paths: Vec<(String, PathBuf)> = vec![];
     let mut dir_error: Option<String> = None;
 
