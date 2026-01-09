@@ -1,7 +1,7 @@
 # Miao Configuration Example
 #
 # Tip: If `config.yaml` is missing, open http://localhost:6161 to initialize
-# (set login password + subscriptions) and miao will generate `config.yaml` automatically.
+# (set login password) and miao will generate `config.yaml` automatically.
 
 # HTTP API port (optional, default: 6161)
 # port: 6161
@@ -19,10 +19,8 @@
 # and extract it to ./runtime directory
 # sing_box_home: /home/alice/pros/miao/sing-box
 
-# Subscription URLs (optional)
-subs:
-  - https://example.com/subscription1
-  - https://example.com/subscription2
+# Subscription files are loaded from ./sub by default (or `--sub-dir <path>`).
+# Put subscription files in that directory and reload from the Web UI.
 
 # Manual nodes in JSON format (optional)
 nodes:

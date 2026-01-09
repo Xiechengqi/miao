@@ -9,7 +9,7 @@
 - **零配置 sing-box** - 内嵌 sing-box 二进制，无需单独安装
 - **TUN 透明代理** - 系统级代理，所有流量自动走代理
 - **国内外自动分流** - 基于 geosite/geoip 规则，国内直连、国外代理
-- **Web 管理面板** - 节点管理、订阅管理、实时流量监控、测速
+- **Web 管理面板** - 节点管理、订阅文件管理、实时流量监控、测速
 - **自动更新** - 支持从 GitHub 一键更新到最新版本
 - **OpenWrt 支持** - 自动安装所需内核模块
 
@@ -34,14 +34,17 @@ wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux
 在同一目录下创建 `config.yaml`：
 
 ```yaml
-# 订阅方式
-subs:
-  - "https://your-hysteria2-subscription-url"
-  - "https://your-hysteria2-subscription-url2"
-  - "https://your-hysteria2-subscription-url3"
+# Web 登录密码（可选，默认 admin）
+password: admin
 ```
 
-或手动配置节点：
+订阅文件：
+
+- 默认从 `./sub` 目录加载（可通过启动参数 `--sub-dir <path>` 指定）
+- 目录下的普通文件会按文件名字典序加载，重复条目按“后加载覆盖前加载”
+- 文件格式与之前的订阅链接解析格式一致（sing-box JSON / Clash YAML / SS URL 列表等）；解析失败会跳过该文件
+
+手动配置节点：
 
 ```yaml
 # 手动配置节点
@@ -54,12 +57,12 @@ nodes:
 ### 3. 运行
 
 ```bash
-sudo ./miao
+sudo ./miao --sub-dir ./sub
 ```
 
 访问 `http://localhost:6161` 打开管理面板。
 
-> 如果当前目录没有 `config.yaml`，首次打开页面会进入“初始化设置”，填写登录密码与订阅链接后会自动生成 `config.yaml` 并启动服务。
+> 如果当前目录没有 `config.yaml`，首次打开页面会进入“初始化设置”，填写登录密码后会自动生成 `config.yaml` 并启动 Web 服务。
 
 ## 配置说明
 
@@ -68,7 +71,6 @@ sudo ./miao
 | `port` | Web 面板端口 | `6161` |
 | `password` | Web 登录密码 | `admin` |
 | `selections` | 记住的节点选择（selector -> node） | `{}` |
-| `subs` | 订阅 URL 列表 | - |
 | `nodes` | 手动配置的节点 (JSON 格式) | - |
 
 > 默认规则会让所有 `tcp/22`（SSH）直连，避免代理出口对 22 端口的限制导致 SSH 断连。

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -50,8 +50,6 @@ struct Config {
     password: Option<String>,  // 登录密码
     #[serde(default)]
     selections: HashMap<String, String>, // selector group -> node name
-    #[serde(default)]
-    subs: Vec<String>,
     #[serde(default)]
     nodes: Vec<String>,
 }
@@ -98,7 +96,6 @@ struct SetupStatusResponse {
 #[derive(Deserialize)]
 struct SetupInitRequest {
     password: String,
-    subs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +108,9 @@ struct WsAuthQuery {
 struct AppState {
     config: Mutex<Config>,
     sing_box_home: String,
+    sub_dir: PathBuf,
+    sub_files: Mutex<Vec<SubFileStatus>>,
+    sub_dir_error: Mutex<Option<String>>,
     setup_required: AtomicBool,
 }
 
@@ -253,10 +253,29 @@ struct ConnectivityResult {
     success: bool,
 }
 
-// Request types for subscription and node management
-#[derive(Deserialize)]
-struct SubRequest {
-    url: String,
+#[derive(Serialize, Clone)]
+struct SubFileStatus {
+    file_name: String,
+    file_path: String,
+    loaded: bool,
+    node_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SubFilesResponse {
+    sub_dir: String,
+    files: Vec<SubFileStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+struct LoadedSubscriptions {
+    files: Vec<SubFileStatus>,
+    outbounds: Vec<serde_json::Value>,
+    node_names: Vec<String>,
+    dir_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -487,26 +506,10 @@ async fn setup_init(
         ));
     }
 
-    let mut subs: Vec<String> = req
-        .subs
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    subs.sort();
-    subs.dedup();
-    if subs.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("At least one subscription URL is required")),
-        ));
-    }
-
     let mut new_config = {
         let config = state.config.lock().await;
         let mut c = config.clone();
         c.password = Some(password.to_string());
-        c.subs = subs;
         c.nodes = vec![];
         c.selections = HashMap::new();
         c
@@ -520,31 +523,19 @@ async fn setup_init(
         ));
     }
 
-    // Try generate sing-box config and start sing-box
-    if let Err(e) = gen_config(&new_config, &state.sing_box_home)
-        .await
-        .map_err(|e| e.to_string())
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!("Failed to generate config: {}", e))),
-        ));
-    }
-
-    // Start sing-box (ignore if already running, but in setup mode it shouldn't be)
-    if let Err(e) = start_sing_internal(&state.sing_box_home).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to start sing-box: {}", e))),
-        ));
-    }
-    let _ = apply_saved_selections(&new_config).await;
-
     {
         let mut config = state.config.lock().await;
         *config = new_config;
     }
     state.setup_required.store(false, Ordering::Relaxed);
+
+    // Best-effort generate config and start sing-box in background (may fail if no nodes exist yet)
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = regenerate_and_restart(state_clone).await {
+            eprintln!("Background regenerate failed after setup: {}", e);
+        }
+    });
 
     Ok(Json(ApiResponse::success_no_data("Initialized")))
 }
@@ -1111,101 +1102,31 @@ async fn try_restart_systemd(unit: &str) -> Result<(), String> {
 }
 
 // ============================================================================
-// Subscription Management APIs
+// Subscription File Management APIs
 // ============================================================================
 
-/// GET /api/subs - Get all subscription URLs
-async fn get_subs(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<String>>> {
-    let config = state.config.lock().await;
-    Json(ApiResponse::success("Subscriptions loaded", config.subs.clone()))
+/// GET /api/sub-files - Get all loaded subscription files
+async fn get_sub_files(State(state): State<Arc<AppState>>) -> Json<ApiResponse<SubFilesResponse>> {
+    let files = state.sub_files.lock().await.clone();
+    let error = state.sub_dir_error.lock().await.clone();
+    Json(ApiResponse::success(
+        "Subscription files loaded",
+        SubFilesResponse {
+            sub_dir: state.sub_dir.display().to_string(),
+            files,
+            error,
+        },
+    ))
 }
 
-/// POST /api/subs - Add a subscription URL
-async fn add_sub(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SubRequest>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config_clone;
-    {
-        let mut config = state.config.lock().await;
-
-        if config.subs.contains(&req.url) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("Subscription already exists")),
-            ));
-        }
-
-        config.subs.push(req.url);
-
-        if let Err(e) = save_config(&config).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-        config_clone = config.clone();
-    }
-
-    // Regenerate and restart in background
-    let sing_box_home = state.sing_box_home.clone();
-    tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(&config_clone, &sing_box_home).await {
-            eprintln!("Background regenerate failed: {}", e);
-        }
-    });
-
-    Ok(Json(ApiResponse::success_no_data("Subscription added, restarting...")))
-}
-
-/// DELETE /api/subs - Delete a subscription URL
-async fn delete_sub(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SubRequest>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config_clone;
-    {
-        let mut config = state.config.lock().await;
-
-        let original_len = config.subs.len();
-        config.subs.retain(|s| s != &req.url);
-
-        if config.subs.len() == original_len {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("Subscription not found")),
-            ));
-        }
-
-        if let Err(e) = save_config(&config).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-        config_clone = config.clone();
-    }
-
-    let sing_box_home = state.sing_box_home.clone();
-    tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(&config_clone, &sing_box_home).await {
-            eprintln!("Background regenerate failed: {}", e);
-        }
-    });
-
-    Ok(Json(ApiResponse::success_no_data("Subscription deleted, restarting...")))
-}
-
-/// POST /api/subs/refresh - Refresh subscriptions and restart
-async fn refresh_subs(
+/// POST /api/sub-files/reload - Reload subscription files and restart
+async fn reload_sub_files(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config = state.config.lock().await;
-    let config_clone = config.clone();
-    drop(config);
-
-    match regenerate_and_restart(&config_clone, &state.sing_box_home).await {
-        Ok(_) => Ok(Json(ApiResponse::success_no_data("Subscriptions refreshed and sing-box restarted"))),
+    match regenerate_and_restart(state).await {
+        Ok(_) => Ok(Json(ApiResponse::success_no_data(
+            "Subscription files reloaded and sing-box restarted",
+        ))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(e)),
@@ -1246,7 +1167,6 @@ async fn add_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NodeRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config_clone;
     {
         let mut config = state.config.lock().await;
 
@@ -1324,12 +1244,11 @@ async fn add_node(
                 Json(ApiResponse::error(format!("Failed to save config: {}", e))),
             ));
         }
-        config_clone = config.clone();
     }
 
-    let sing_box_home = state.sing_box_home.clone();
+    let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(&config_clone, &sing_box_home).await {
+        if let Err(e) = regenerate_and_restart(state_clone).await {
             eprintln!("Background regenerate failed: {}", e);
         }
     });
@@ -1342,7 +1261,6 @@ async fn delete_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeleteNodeRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config_clone;
     {
         let mut config = state.config.lock().await;
 
@@ -1368,12 +1286,11 @@ async fn delete_node(
                 Json(ApiResponse::error(format!("Failed to save config: {}", e))),
             ));
         }
-        config_clone = config.clone();
     }
 
-    let sing_box_home = state.sing_box_home.clone();
+    let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(&config_clone, &sing_box_home).await {
+        if let Err(e) = regenerate_and_restart(state_clone).await {
             eprintln!("Background regenerate failed: {}", e);
         }
     });
@@ -1455,17 +1372,31 @@ async fn apply_saved_selections(config: &Config) -> Result<(), String> {
 }
 
 /// Regenerate sing-box config and restart the service
-async fn regenerate_and_restart(config: &Config, sing_box_home: &str) -> Result<(), String> {
-    // Regenerate config
-    gen_config(config, sing_box_home).await.map_err(|e| format!("Failed to regenerate config: {}", e))?;
+async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
+    let config_clone = { state.config.lock().await.clone() };
+    let loaded = load_subscription_dir(&state.sub_dir).await;
+    {
+        let mut sub_files = state.sub_files.lock().await;
+        *sub_files = loaded.files.clone();
+    }
+    {
+        let mut sub_dir_error = state.sub_dir_error.lock().await;
+        *sub_dir_error = loaded.dir_error.clone();
+    }
+
+    gen_config(&config_clone, &state.sing_box_home, &loaded)
+        .await
+        .map_err(|e| format!("Failed to regenerate config: {}", e))?;
     println!("Config regenerated successfully");
 
     // Stop and restart sing-box
     stop_sing_internal().await;
     sleep(Duration::from_millis(500)).await;
 
-    start_sing_internal(sing_box_home).await.map_err(|e| format!("Failed to restart sing-box: {}", e))?;
-    let _ = apply_saved_selections(config).await;
+    start_sing_internal(&state.sing_box_home)
+        .await
+        .map_err(|e| format!("Failed to restart sing-box: {}", e))?;
+    let _ = apply_saved_selections(&config_clone).await;
     println!("sing-box restarted successfully");
     Ok(())
 }
@@ -1711,6 +1642,7 @@ async fn stop_sing_internal_and_wait() {
 async fn gen_config(
     config: &Config,
     sing_box_home: &str,
+    subs: &LoadedSubscriptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let my_outbounds: Vec<serde_json::Value> = config
         .nodes
@@ -1725,19 +1657,8 @@ async fn gen_config(
     let mut final_outbounds: Vec<serde_json::Value> = vec![];
     let mut final_node_names: Vec<String> = vec![];
 
-    for sub in &config.subs {
-        println!("Fetching subscription: {}", sub);
-        match fetch_sub(sub).await {
-            Ok((node_names, outbounds)) => {
-                println!("  -> Success: fetched {} nodes", node_names.len());
-                final_node_names.extend(node_names);
-                final_outbounds.extend(outbounds);
-            }
-            Err(e) => {
-                eprintln!("  -> Failed to fetch subscription: {}", e);
-            }
-        }
-    }
+    final_node_names.extend(subs.node_names.iter().cloned());
+    final_outbounds.extend(subs.outbounds.iter().cloned());
 
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
@@ -1817,21 +1738,11 @@ fn get_config_template() -> serde_json::Value {
     })
 }
 
-async fn fetch_sub(
-    link: &str,
+fn parse_subscription_text(
+    text: &str,
 ) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let res = client
-        .get(link)
-        .header("User-Agent", "clash-meta")
-        .send()
-        .await?;
-    let text = res.text().await?;
-
     // Try parsing as JSON first (sing-box format)
-    if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(&text) {
+    if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(text) {
         if let Some(outbounds_arr) = json_obj.get("outbounds").and_then(|o| o.as_array()) {
             println!("Detected sing-box JSON format subscription");
             return parse_singbox_json(outbounds_arr);
@@ -1839,14 +1750,14 @@ async fn fetch_sub(
     }
 
     // Try parsing as Shadowsocks URL list (base64 encoded)
-    if let Some(ss_result) = try_parse_ss_urls(&text) {
+    if let Some(ss_result) = try_parse_ss_urls(text) {
         println!("Detected Shadowsocks URL format subscription");
         return ss_result;
     }
 
     // Fall back to YAML parsing (Clash format)
     println!("Parsing as Clash YAML format");
-    let clash_obj: serde_yaml::Value = serde_yaml::from_str(&text)?;
+    let clash_obj: serde_yaml::Value = serde_yaml::from_str(text)?;
     let proxies = clash_obj
         .get("proxies")
         .and_then(|p| p.as_sequence())
@@ -1924,6 +1835,101 @@ async fn fetch_sub(
         }
     }
     Ok((node_names, outbounds))
+}
+
+async fn load_subscription_file(
+    path: &Path,
+) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
+    let text = tokio::fs::read_to_string(path).await?;
+    parse_subscription_text(&text)
+}
+
+async fn load_subscription_dir(sub_dir: &Path) -> LoadedSubscriptions {
+    let mut file_paths: Vec<(String, PathBuf)> = vec![];
+    let mut dir_error: Option<String> = None;
+
+    match tokio::fs::read_dir(sub_dir).await {
+        Ok(mut rd) => {
+            loop {
+                match rd.next_entry().await {
+                    Ok(Some(ent)) => {
+                        let md = match ent.metadata().await {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+                        if !md.is_file() {
+                            continue;
+                        }
+                        let file_name = ent.file_name().to_string_lossy().to_string();
+                        file_paths.push((file_name, ent.path()));
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        dir_error = Some(format!("Failed to scan sub dir {}: {}", sub_dir.display(), e));
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            dir_error = Some(format!("Failed to read sub dir {}: {}", sub_dir.display(), e));
+        }
+    }
+
+    file_paths.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut file_statuses: Vec<SubFileStatus> = vec![];
+    let mut merged_by_tag: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut tag_order: Vec<String> = vec![];
+
+    for (file_name, path) in file_paths {
+        match load_subscription_file(&path).await {
+            Ok((_node_names, outbounds)) => {
+                let node_count = outbounds.len();
+                for outbound in outbounds {
+                    let tag = outbound
+                        .get("tag")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let Some(tag) = tag else {
+                        continue;
+                    };
+                    if !merged_by_tag.contains_key(&tag) {
+                        tag_order.push(tag.clone());
+                    }
+                    merged_by_tag.insert(tag, outbound);
+                }
+                file_statuses.push(SubFileStatus {
+                    file_name,
+                    file_path: path.display().to_string(),
+                    loaded: true,
+                    node_count,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                file_statuses.push(SubFileStatus {
+                    file_name,
+                    file_path: path.display().to_string(),
+                    loaded: false,
+                    node_count: 0,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    let outbounds: Vec<serde_json::Value> = tag_order
+        .iter()
+        .filter_map(|tag| merged_by_tag.get(tag).cloned())
+        .collect();
+
+    LoadedSubscriptions {
+        files: file_statuses,
+        node_names: tag_order,
+        outbounds,
+        dir_error,
+    }
 }
 
 /// Parse sing-box JSON format subscription
@@ -2152,6 +2158,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::process::exit(1);
     }
 
+    // CLI args
+    let mut sub_dir = PathBuf::from("sub");
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(v) = arg.strip_prefix("--sub-dir=") {
+            sub_dir = PathBuf::from(v);
+        } else if arg == "--sub-dir" {
+            if let Some(v) = args.next() {
+                sub_dir = PathBuf::from(v);
+            }
+        }
+    }
+
     println!("Reading configuration...");
     let (config, setup_required) = match tokio::fs::read_to_string("config.yaml").await {
         Ok(text) => (serde_yaml::from_str::<Config>(&text)?, false),
@@ -2161,7 +2180,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 sing_box_home: None,
                 password: None,
                 selections: HashMap::new(),
-                subs: vec![],
                 nodes: vec![],
             },
             true,
@@ -2178,36 +2196,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         extract_sing_box()?.to_string_lossy().to_string()
     };
 
+    println!("Loading subscription files from: {}", sub_dir.display());
+    let loaded_subs = load_subscription_dir(&sub_dir).await;
+
     if !setup_required {
-        // Generate initial config, retrying until success
+        // Generate initial config
         println!("Generating initial config...");
-        loop {
-            match gen_config(&config, &sing_box_home).await {
-                Ok(_) => break,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to generate config: {}. Retrying in 300 seconds...",
-                        e
-                    );
-                    sleep(Duration::from_secs(300)).await;
+        match gen_config(&config, &sing_box_home, &loaded_subs).await {
+            Ok(_) => {
+                // Check OpenWrt dependencies
+                println!("Checking dependencies...");
+                if let Err(e) = check_and_install_openwrt_dependencies().await {
+                    eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
+                }
+
+                // Start sing-box
+                match start_sing_internal(&sing_box_home).await {
+                    Ok(_) => {
+                        let _ = apply_saved_selections(&config).await;
+                        println!("sing-box started successfully")
+                    }
+                    Err(e) => eprintln!("Failed to start sing-box: {}", e),
                 }
             }
-        }
-
-        // Check OpenWrt dependencies
-        println!("Checking dependencies...");
-        if let Err(e) = check_and_install_openwrt_dependencies().await {
-            eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
-        }
-
-        // Start sing-box
-        match start_sing_internal(&sing_box_home).await {
-            Ok(_) => {
-                let _ = apply_saved_selections(&config).await;
-                println!("sing-box started successfully")
+            Err(e) => {
+                eprintln!(
+                    "Failed to generate config: {}. Please add subscription files under {} and reload.",
+                    e,
+                    sub_dir.display()
+                );
             }
-            Err(e) => eprintln!("Failed to start sing-box: {}", e),
         }
+
     } else {
         println!("No config.yaml found, entering setup mode at http://localhost:{}", port);
     }
@@ -2215,6 +2235,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app_state = Arc::new(AppState {
         config: Mutex::new(config.clone()),
         sing_box_home: sing_box_home.clone(),
+        sub_dir: sub_dir.clone(),
+        sub_files: Mutex::new(loaded_subs.files.clone()),
+        sub_dir_error: Mutex::new(loaded_subs.dir_error.clone()),
         setup_required: AtomicBool::new(setup_required),
     });
 
@@ -2237,11 +2260,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
         .route("/api/clash/proxies/{node}/delay", get(clash_test_delay))
         .route("/api/selections", get(get_selections))
-        // Subscription management
-        .route("/api/subs", get(get_subs))
-        .route("/api/subs", post(add_sub))
-        .route("/api/subs", delete(delete_sub))
-        .route("/api/subs/refresh", post(refresh_subs))
+        // Subscription file management
+        .route("/api/sub-files", get(get_sub_files))
+        .route("/api/sub-files/reload", post(reload_sub_files))
         // Node management
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))

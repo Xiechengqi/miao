@@ -1374,38 +1374,32 @@
 	            <div v-if="setupRequired" class="login-container">
 	                <div class="login-card">
 	                    <h1 class="login-title">🛠️ 初始化设置</h1>
-	                    <form @submit.prevent="handleSetupInit">
-	                        <div class="form-group">
-	                            <input
-	                                v-model="setupPassword"
-	                                type="password"
-	                                class="login-input"
-	                                placeholder="设置登录密码"
-	                                :disabled="settingUp"
-	                                autofocus
-	                            />
-	                        </div>
-	                        <div class="form-group">
-	                            <textarea
-	                                v-model="setupSubsText"
-	                                class="login-input"
-	                                style="min-height: 120px; resize: vertical;"
-	                                placeholder="订阅链接（每行一个）"
-	                                :disabled="settingUp"
-	                            ></textarea>
-	                        </div>
-	                        <button
-	                            type="submit"
-	                            class="login-btn"
-	                            :disabled="settingUp || !setupPassword || !setupSubsText"
-	                        >
-	                            <span v-if="settingUp" class="spinner" style="width:16px;height:16px;"></span>
-	                            <span v-else>完成初始化</span>
-	                        </button>
-	                    </form>
-	                    <p v-if="setupError" class="login-error">{{ setupError }}</p>
-	                </div>
-	            </div>
+		                    <form @submit.prevent="handleSetupInit">
+		                        <div class="form-group">
+		                            <input
+		                                v-model="setupPassword"
+		                                type="password"
+		                                class="login-input"
+		                                placeholder="设置登录密码"
+		                                :disabled="settingUp"
+		                                autofocus
+		                            />
+		                        </div>
+		                        <button
+		                            type="submit"
+		                            class="login-btn"
+		                            :disabled="settingUp || !setupPassword"
+		                        >
+		                            <span v-if="settingUp" class="spinner" style="width:16px;height:16px;"></span>
+		                            <span v-else>完成初始化</span>
+		                        </button>
+		                    </form>
+		                    <p style="margin-top: 1rem; opacity: 0.9; font-size: 0.95rem;">
+		                        初始化完成后，将订阅文件放入 <code>sub/</code> 目录（或启动参数指定的目录），再在面板中点击“重载”。
+		                    </p>
+		                    <p v-if="setupError" class="login-error">{{ setupError }}</p>
+		                </div>
+		            </div>
 
 	        <!-- 登录页面 -->
 	        <div v-else-if="!authenticated" class="login-container">
@@ -1588,49 +1582,46 @@
                 <!-- 右列 -->
                 <div class="layout-column">
 
-                    <!-- 订阅管理 -->
-                    <div class="glass-card">
-                        <div class="card-header-custom">
-                            <i class="bi bi-rss"></i>
-                            <span>订阅管理</span>
-                            <button class="btn-custom btn-secondary-custom btn-sm-custom" @click="refreshSubs"
-                                :disabled="loading || subs.length === 0" style="margin-left: auto;">
-                                <span v-if="loading && loadingAction === 'refreshSubs'" class="spinner"
-                                    style="width:12px;height:12px;"></span>
-                                <i v-else class="bi bi-arrow-clockwise"></i>
-                                更新订阅
-                            </button>
-                        </div>
+	                    <!-- 订阅文件管理 -->
+	                    <div class="glass-card">
+	                        <div class="card-header-custom">
+	                            <i class="bi bi-rss"></i>
+	                            <span>订阅文件</span>
+	                            <button class="btn-custom btn-secondary-custom btn-sm-custom" @click="reloadSubFiles"
+	                                :disabled="loading" style="margin-left: auto;">
+	                                <span v-if="loading && loadingAction === 'reloadSubFiles'" class="spinner"
+	                                    style="width:12px;height:12px;"></span>
+	                                <i v-else class="bi bi-arrow-clockwise"></i>
+	                                重载
+	                            </button>
+	                        </div>
 
-                        <div v-if="subs.length === 0" class="empty-state">
-                            <i class="bi bi-inbox" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
-                            暂无订阅
-                        </div>
+	                        <div class="node-info" style="margin-bottom: 0.75rem;">
+	                            目录：<code>{{ subDir }}</code>
+	                        </div>
+	                        <div v-if="subDirError" class="empty-state" style="padding: 0.75rem; margin-bottom: 0.75rem;">
+	                            <i class="bi bi-exclamation-triangle" style="font-size: 1.5rem; display: block; margin-bottom: 0.5rem;"></i>
+	                            {{ subDirError }}
+	                        </div>
 
-                        <div v-for="sub in subs" :key="sub" class="list-item">
-                            <span class="list-item-text">{{ sub }}</span>
-                            <button class="btn-custom btn-delete btn-sm-custom" @click="confirmDeleteSub(sub)"
-                                :disabled="loading">
-                                <i class="bi bi-trash"></i>
-                            </button>
-                        </div>
+	                        <div v-if="subFiles.length === 0" class="empty-state">
+	                            <i class="bi bi-inbox" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+	                            目录下暂无订阅文件
+	                        </div>
 
-                        <div class="add-form">
-                            <div class="form-row">
-                                <div class="form-group" style="flex: 3;">
-                                    <input type="text" class="form-input" v-model="newSubUrl" placeholder="输入订阅链接 URL"
-                                        @keyup.enter="addSub">
-                                </div>
-                                <div class="form-group" style="flex: 0;">
-                                    <button class="btn-custom btn-add" @click="addSub"
-                                        :disabled="loading || !newSubUrl">
-                                        <i class="bi bi-plus-lg"></i>
-                                        添加
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+	                        <div v-for="f in subFiles" :key="f.file_path" class="list-item" style="align-items: flex-start;">
+	                            <div style="flex: 1;">
+	                                <div class="list-item-text" style="white-space: normal;">
+	                                    <strong>{{ f.file_name }}</strong>
+	                                    <span style="opacity: 0.8; margin-left: 0.5rem;">({{ f.node_count }} 节点)</span>
+	                                </div>
+	                                <div class="node-info" style="white-space: normal;">
+	                                    <span v-if="f.loaded">已加载</span>
+	                                    <span v-else>跳过：{{ f.error || '解析失败' }}</span>
+	                                </div>
+	                            </div>
+	                        </div>
+	                    </div>
 
                     <!-- 节点管理 -->
                     <div class="glass-card">
@@ -1847,12 +1838,11 @@
 
 	        createApp({
 	            setup() {
-	                // 初始化状态
-	                const setupRequired = ref(false);
-	                const setupPassword = ref('');
-	                const setupSubsText = ref('');
-	                const settingUp = ref(false);
-	                const setupError = ref('');
+		                // 初始化状态
+		                const setupRequired = ref(false);
+		                const setupPassword = ref('');
+		                const settingUp = ref(false);
+		                const setupError = ref('');
 
 	                // 认证状态
 	                const authenticated = ref(false);
@@ -1860,17 +1850,18 @@
 	                const loggingIn = ref(false);
 	                const loginError = ref('');
 
-                // 状态
-                const status = ref({ running: false, pid: null, uptime_secs: null });
-                const subs = ref([]);
-                const nodes = ref([]);
-                const loading = ref(false);
-                const loadingAction = ref('');
-                const toasts = ref([]);
-                const newSubUrl = ref('');
-                const newNode = ref({ tag: '', server: '', server_port: 443, password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' });
-                const showNodeModal = ref(false);
-                const nodeType = ref('hysteria2');
+	                // 状态
+	                const status = ref({ running: false, pid: null, uptime_secs: null });
+	                const subDir = ref('');
+	                const subDirError = ref('');
+	                const subFiles = ref([]);
+	                const nodes = ref([]);
+	                const loading = ref(false);
+	                const loadingAction = ref('');
+	                const toasts = ref([]);
+	                const newNode = ref({ tag: '', server: '', server_port: 443, password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' });
+	                const showNodeModal = ref(false);
+	                const nodeType = ref('hysteria2');
 
                 // Clash API 状态
                 const proxies = ref({});
@@ -1987,25 +1978,16 @@
 	                    }
 	                };
 
-	                const handleSetupInit = async () => {
-	                    if (!setupPassword.value) return;
-	                    const subs = setupSubsText.value
-	                        .split('\n')
-	                        .map(s => s.trim())
-	                        .filter(Boolean);
-	                    if (subs.length === 0) {
-	                        setupError.value = '请输入至少一个订阅链接';
-	                        return;
-	                    }
-
-	                    settingUp.value = true;
-	                    setupError.value = '';
-	                    try {
-	                        const res = await fetch('/api/setup/init', {
-	                            method: 'POST',
-	                            headers: { 'Content-Type': 'application/json' },
-	                            body: JSON.stringify({ password: setupPassword.value, subs })
-	                        });
+		                const handleSetupInit = async () => {
+		                    if (!setupPassword.value) return;
+		                    settingUp.value = true;
+		                    setupError.value = '';
+		                    try {
+		                        const res = await fetch('/api/setup/init', {
+		                            method: 'POST',
+		                            headers: { 'Content-Type': 'application/json' },
+		                            body: JSON.stringify({ password: setupPassword.value })
+		                        });
 	                        const data = await res.json();
 	                        if (!res.ok || !data.success) {
 	                            setupError.value = data.message || '初始化失败';
@@ -2328,13 +2310,17 @@
 	                    } catch (e) { console.error('获取状态失败:', e); }
 	                };
 
-	                // 获取订阅列表
-	                const fetchSubs = async () => {
-	                    try {
-	                        const data = await apiFetch('/api/subs');
-	                        if (data.data) subs.value = data.data;
-	                    } catch (e) { console.error('获取订阅失败:', e); }
-	                };
+		                // 获取订阅文件列表
+		                const fetchSubFiles = async () => {
+		                    try {
+		                        const data = await apiFetch('/api/sub-files');
+		                        if (data.data) {
+		                            subDir.value = data.data.sub_dir || '';
+		                            subFiles.value = data.data.files || [];
+		                            subDirError.value = data.data.error || '';
+		                        }
+		                    } catch (e) { console.error('获取订阅文件失败:', e); }
+		                };
 
 	                // 获取节点列表
 	                const fetchNodes = async () => {
@@ -2374,39 +2360,15 @@
                     }
                 };
 
-                // 订阅管理
-                const addSub = async () => {
-                    if (!newSubUrl.value) return;
-                    try {
-                        await apiCall('subs', 'POST', { url: newSubUrl.value }, 'addSub');
-                        showToast('订阅已添加', 'success');
-                        delays.value = {};
-                        newSubUrl.value = '';
-                        await fetchSubs();
-                    } catch (e) { }
-                };
-
-                const deleteSub = async (url) => {
-                    try {
-                        await apiCall('subs', 'DELETE', { url }, 'deleteSub');
-                        showToast('订阅已删除', 'success');
-                        delays.value = {};
-                        await fetchSubs();
-                    } catch (e) { }
-                };
-
-                const confirmDeleteSub = (url) => {
-                    showConfirm('删除订阅', `确定要删除此订阅吗？\n${url}`, () => deleteSub(url));
-                };
-
-                const refreshSubs = async () => {
-                    try {
-                        await apiCall('subs/refresh', 'POST', null, 'refreshSubs');
-                        showToast('订阅已更新', 'success');
-                        delays.value = {};
-                        await fetchSubs();
-                    } catch (e) { }
-                };
+	                // 订阅文件管理
+	                const reloadSubFiles = async () => {
+	                    try {
+	                        await apiCall('sub-files/reload', 'POST', null, 'reloadSubFiles');
+	                        showToast('订阅文件已重载', 'success');
+	                        delays.value = {};
+	                        await fetchSubFiles();
+	                    } catch (e) { }
+	                };
 
                 // 节点管理
                 const addNode = async () => {
@@ -2579,7 +2541,7 @@
                 // 初始化应用数据
                 const initApp = async () => {
                     await fetchStatus();
-                    await fetchSubs();
+                    await fetchSubFiles();
                     await fetchNodes();
                     await fetchProxies();
                     connectTrafficWs();
@@ -2610,34 +2572,34 @@
                     if (logsWs) logsWs.close();
                 });
 
-	                return {
-	                    // 初始化相关
-	                    setupRequired, setupPassword, setupSubsText, settingUp, setupError,
-	                    handleSetupInit,
-	                    // 认证相关
-	                    authenticated, loginPassword, loggingIn, loginError,
-	                    handleLogin, handleLogout,
-                    // 状态
-                    status, subs, nodes, loading, loadingAction, toasts,
-                    newSubUrl, newNode, canAddNode, showNodeModal, nodeType,
-                    proxies, delays, traffic, testingGroup, selectorGroups,
-                    // 日志相关
-                    logs, logContainer, logAutoScroll, showLogs, clearLogs,
-                    // UI 相关
+		                return {
+		                    // 初始化相关
+		                    setupRequired, setupPassword, settingUp, setupError,
+		                    handleSetupInit,
+		                    // 认证相关
+		                    authenticated, loginPassword, loggingIn, loginError,
+		                    handleLogin, handleLogout,
+	                    // 状态
+	                    status, subDir, subDirError, subFiles, nodes, loading, loadingAction, toasts,
+	                    reloadSubFiles,
+	                    newNode, canAddNode, showNodeModal, nodeType,
+	                    proxies, delays, traffic, testingGroup, selectorGroups,
+	                    // 日志相关
+	                    logs, logContainer, logAutoScroll, showLogs, clearLogs,
+	                    // UI 相关
                     proxySearch, sortByDelay,
                     confirmModal, showConfirm, cancelConfirm, executeConfirm,
                     getFilteredNodes, hasFastestNode, selectFastest,
                     // 版本更新
                     versionInfo, upgrading, handleUpdateClick,
                     // 连通性测试
-                    connectivitySites, connectivityResults, testingConnectivity,
-                    currentTestingSite, testConnectivity, testSingleSite,
+	                    connectivitySites, connectivityResults, testingConnectivity,
+	                    currentTestingSite, testConnectivity, testSingleSite,
                     getConnectivityClass, formatConnectivityDelay,
                     // 其他
                     showToast, getToastIcon,
                     startService, stopService, toggleService,
-                    addSub, deleteSub, confirmDeleteSub, refreshSubs,
-                    addNode, deleteNode, confirmDeleteNode,
+	                    addNode, deleteNode, confirmDeleteNode,
                     switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
                     formatUptime
                 };
