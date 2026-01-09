@@ -53,6 +53,8 @@
             display: flex;
             flex-direction: column;
             gap: 1.5rem;
+            min-width: 0;
+            overflow: hidden;
         }
 
         /* 平板端 */
@@ -166,6 +168,15 @@
 
             .traffic-stats {
                 gap: 1rem;
+            }
+
+            .proxy-group-header {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+
+            .proxy-group-name {
+                white-space: nowrap;
             }
         }
 
@@ -897,6 +908,39 @@
             justify-content: flex-end;
         }
 
+        /* Tab styles */
+        .tab-container {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.25rem;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 0.35rem;
+            border-radius: 12px;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 0.6rem 0.75rem;
+            border: none;
+            background: transparent;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.85rem;
+            font-weight: 500;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .tab-btn.active {
+            background: var(--accent-green);
+            color: #000;
+        }
+
         .btn-cancel {
             background: rgba(255, 255, 255, 0.1);
             color: #fff;
@@ -1057,6 +1101,62 @@
             gap: 0.5rem;
             flex-wrap: wrap;
             align-items: center;
+        }
+
+        /* 连通性测试 */
+        .connectivity-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .connectivity-item {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 0.75rem;
+            text-align: center;
+            transition: all 0.2s ease;
+        }
+
+        .connectivity-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .connectivity-item.testing {
+            animation: pulse 1s infinite;
+        }
+
+        .connectivity-item.pending {
+            opacity: 0.4;
+        }
+
+        .connectivity-name {
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 0.35rem;
+        }
+
+        .connectivity-delay {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        .connectivity-delay.fast {
+            color: var(--accent-green);
+        }
+
+        .connectivity-delay.medium {
+            color: var(--accent-orange);
+        }
+
+        .connectivity-delay.slow {
+            color: var(--accent-red);
+        }
+
+        .connectivity-delay.timeout {
+            color: var(--accent-red);
         }
 
         /* 防止 Vue 加载前闪烁 */
@@ -1372,6 +1472,35 @@
                     </div>
                 </div>
 
+                <!-- 连通性测试 - 全宽 -->
+                <div class="glass-card layout-full" v-if="status.running">
+                    <div class="card-header-custom">
+                        <i class="bi bi-globe"></i>
+                        <span>HTTPS 连通性测试</span>
+                        <button class="btn-custom btn-secondary-custom btn-sm-custom"
+                            @click="testConnectivity" :disabled="testingConnectivity"
+                            style="margin-left: auto;">
+                            <span v-if="testingConnectivity" class="spinner" style="width:12px;height:12px;"></span>
+                            <i v-else class="bi bi-wifi"></i>
+                            测试连接
+                        </button>
+                    </div>
+                    <div class="connectivity-grid">
+                        <div v-for="site in connectivitySites" :key="site.name"
+                            :class="['connectivity-item', {
+                                testing: currentTestingSite === site.name,
+                                pending: testingConnectivity && currentTestingSite !== site.name && !connectivityResults[site.name]
+                            }]"
+                            @click="testSingleSite(site)"
+                            :style="{ cursor: currentTestingSite ? 'wait' : 'pointer' }">
+                            <div class="connectivity-name">{{ site.name }}</div>
+                            <div :class="['connectivity-delay', getConnectivityClass(site.name)]">
+                                {{ formatConnectivityDelay(site.name) }}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 左列 -->
                 <div class="layout-column">
 
@@ -1533,42 +1662,95 @@
                         </div>
 
                         <div class="add-form">
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label class="form-label">节点名称</label>
-                                    <input type="text" class="form-input" v-model="newNode.tag" placeholder="例如: 我的节点">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">服务器地址</label>
-                                    <input type="text" class="form-input" v-model="newNode.server"
-                                        placeholder="例如: example.com">
-                                </div>
-                            </div>
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label class="form-label">端口</label>
-                                    <input type="number" class="form-input" v-model.number="newNode.server_port"
-                                        placeholder="443">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">密码</label>
-                                    <input type="text" class="form-input" v-model="newNode.password"
-                                        placeholder="密码">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">SNI (可选)</label>
-                                    <input type="text" class="form-input" v-model="newNode.sni" placeholder="留空使用服务器地址">
-                                </div>
-                            </div>
-                            <button class="btn-custom btn-add" @click="addNode" :disabled="loading || !canAddNode">
+                            <button class="btn-custom btn-add" @click="showNodeModal = true" :disabled="loading"
+                                style="width: 100%;">
                                 <i class="bi bi-plus-lg"></i>
-                                添加 Hysteria2 节点
+                                添加节点
                             </button>
                         </div>
                     </div>
 
                 </div>
                 <!-- 右列结束 -->
+
+                <!-- 添加节点模态框 -->
+                <div class="modal-overlay" v-if="showNodeModal" v-cloak @click.self="showNodeModal = false">
+                    <div class="modal-content">
+                        <div class="modal-title">
+                            <i class="bi bi-plus-circle"></i>
+                            添加节点
+                            <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="showNodeModal = false">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+
+                        <!-- Tab 切换 -->
+                        <div class="tab-container">
+                            <button class="tab-btn" :class="{ active: nodeType === 'hysteria2' }"
+                                @click="nodeType = 'hysteria2'">Hysteria2</button>
+                            <button class="tab-btn" :class="{ active: nodeType === 'anytls' }"
+                                @click="nodeType = 'anytls'">AnyTLS</button>
+                            <button class="tab-btn" :class="{ active: nodeType === 'ss' }"
+                                @click="nodeType = 'ss'">Shadowsocks</button>
+                        </div>
+
+                        <!-- 通用字段 -->
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">节点名称</label>
+                                <input type="text" class="form-input" v-model="newNode.tag" placeholder="例如: 我的节点">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">服务器地址</label>
+                                <input type="text" class="form-input" v-model="newNode.server"
+                                    placeholder="例如: example.com">
+                            </div>
+                            <div class="form-group" style="max-width: 120px;">
+                                <label class="form-label">端口</label>
+                                <input type="number" class="form-input" v-model.number="newNode.server_port"
+                                    placeholder="443">
+                            </div>
+                        </div>
+
+                        <!-- Shadowsocks 特有字段 -->
+                        <div class="form-row" v-if="nodeType === 'ss'">
+                            <div class="form-group">
+                                <label class="form-label">加密方式</label>
+                                <select class="form-input" v-model="newNode.cipher">
+                                    <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option>
+                                    <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
+                                    <option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option>
+                                    <option value="aes-128-gcm">aes-128-gcm</option>
+                                    <option value="aes-256-gcm">aes-256-gcm</option>
+                                    <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">密码</label>
+                                <input type="text" class="form-input" v-model="newNode.password" placeholder="密码">
+                            </div>
+                        </div>
+
+                        <!-- Hysteria2/AnyTLS 的 SNI 字段 -->
+                        <div class="form-row" v-if="nodeType !== 'ss'">
+                            <div class="form-group">
+                                <label class="form-label">SNI (可选)</label>
+                                <input type="text" class="form-input" v-model="newNode.sni" placeholder="留空使用服务器地址">
+                            </div>
+                        </div>
+
+                        <button class="btn-custom btn-add" @click="addNode" :disabled="loading || !canAddNode"
+                            style="width: 100%; margin-top: 0.5rem;">
+                            <i class="bi bi-plus-lg"></i>
+                            添加 {{ nodeType === 'hysteria2' ? 'Hysteria2' : nodeType === 'anytls' ? 'AnyTLS' : 'Shadowsocks' }} 节点
+                        </button>
+                    </div>
+                </div>
 
                 <!-- 日志查看 - 全宽底部 -->
                 <div class="layout-full" v-if="status.running">
@@ -1686,7 +1868,9 @@
                 const loadingAction = ref('');
                 const toasts = ref([]);
                 const newSubUrl = ref('');
-                const newNode = ref({ tag: '', server: '', server_port: 443, password: '', sni: '' });
+                const newNode = ref({ tag: '', server: '', server_port: 443, password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' });
+                const showNodeModal = ref(false);
+                const nodeType = ref('hysteria2');
 
                 // Clash API 状态
                 const proxies = ref({});
@@ -1714,6 +1898,19 @@
                 // 版本更新状态
                 const versionInfo = ref({ current: '', latest: null, has_update: false });
                 const upgrading = ref(false);
+
+                // 连通性测试状态
+                const connectivitySites = [
+                    { name: 'Google', url: 'https://www.google.com' },
+                    { name: 'GitHub', url: 'https://github.com' },
+                    { name: 'YouTube', url: 'https://www.youtube.com' },
+                    { name: 'Twitter', url: 'https://x.com' },
+                    { name: 'Telegram', url: 'https://telegram.org' },
+                    { name: 'OpenAI', url: 'https://openai.com' },
+                ];
+                const connectivityResults = ref({});
+                const testingConnectivity = ref(false);
+                const currentTestingSite = ref(null);
 
                 let statusInterval = null;
                 let toastId = 0;
@@ -2183,6 +2380,7 @@
                     try {
                         await apiCall('subs', 'POST', { url: newSubUrl.value }, 'addSub');
                         showToast('订阅已添加', 'success');
+                        delays.value = {};
                         newSubUrl.value = '';
                         await fetchSubs();
                     } catch (e) { }
@@ -2192,6 +2390,7 @@
                     try {
                         await apiCall('subs', 'DELETE', { url }, 'deleteSub');
                         showToast('订阅已删除', 'success');
+                        delays.value = {};
                         await fetchSubs();
                     } catch (e) { }
                 };
@@ -2204,6 +2403,7 @@
                     try {
                         await apiCall('subs/refresh', 'POST', null, 'refreshSubs');
                         showToast('订阅已更新', 'success');
+                        delays.value = {};
                         await fetchSubs();
                     } catch (e) { }
                 };
@@ -2212,11 +2412,25 @@
                 const addNode = async () => {
                     if (!canAddNode.value) return;
                     try {
-                        const nodeData = { ...newNode.value };
-                        if (!nodeData.sni) delete nodeData.sni;
+                        const nodeData = {
+                            node_type: nodeType.value,
+                            tag: newNode.value.tag.trim(),
+                            server: newNode.value.server.trim(),
+                            server_port: newNode.value.server_port,
+                            password: newNode.value.password.trim(),
+                        };
+                        // Add type-specific fields
+                        if (nodeType.value === 'ss') {
+                            nodeData.cipher = newNode.value.cipher;
+                        } else {
+                            const sni = newNode.value.sni?.trim();
+                            if (sni) nodeData.sni = sni;
+                        }
                         await apiCall('nodes', 'POST', nodeData, 'addNode');
                         showToast('节点已添加', 'success');
-                        newNode.value = { tag: '', server: '', server_port: 443, password: '', sni: '' };
+                        delays.value = {};
+                        newNode.value = { tag: '', server: '', server_port: 443, password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' };
+                        showNodeModal.value = false;
                         await fetchNodes();
                     } catch (e) { }
                 };
@@ -2225,6 +2439,7 @@
                     try {
                         await apiCall('nodes', 'DELETE', { tag }, 'deleteNode');
                         showToast('节点已删除', 'success');
+                        delays.value = {};
                         await fetchNodes();
                     } catch (e) { }
                 };
@@ -2242,6 +2457,73 @@
 	                        console.error('获取版本失败:', e);
 	                    }
 	                };
+
+                // 连通性测试 - 测试单个站点
+                const testSingleSite = async (site) => {
+                    if (currentTestingSite.value) return;
+                    currentTestingSite.value = site.name;
+                    try {
+                        const res = await fetch('/api/connectivity', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('miao_token')}` },
+                            body: JSON.stringify({ url: site.url })
+                        });
+                        const data = await res.json();
+                        if (data.success && data.data) {
+                            connectivityResults.value[site.name] = data.data;
+                        } else {
+                            connectivityResults.value[site.name] = { success: false };
+                        }
+                    } catch (e) {
+                        connectivityResults.value[site.name] = { success: false };
+                    }
+                    currentTestingSite.value = null;
+                };
+
+                // 连通性测试 - 测试所有站点
+                const testConnectivity = async () => {
+                    testingConnectivity.value = true;
+                    connectivityResults.value = {};
+
+                    for (const site of connectivitySites) {
+                        currentTestingSite.value = site.name;
+                        try {
+                            const res = await fetch('/api/connectivity', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('miao_token')}` },
+                                body: JSON.stringify({ url: site.url })
+                            });
+                            const data = await res.json();
+                            if (data.success && data.data) {
+                                connectivityResults.value[site.name] = data.data;
+                            } else {
+                                connectivityResults.value[site.name] = { success: false };
+                            }
+                        } catch (e) {
+                            connectivityResults.value[site.name] = { success: false };
+                        }
+                    }
+
+                    currentTestingSite.value = null;
+                    testingConnectivity.value = false;
+                };
+
+                const getConnectivityClass = (siteName) => {
+                    const result = connectivityResults.value[siteName];
+                    if (!result) return '';
+                    if (!result.success) return 'timeout';
+                    const ms = result.latency_ms;
+                    if (ms < 300) return 'fast';
+                    if (ms < 800) return 'medium';
+                    return 'slow';
+                };
+
+                const formatConnectivityDelay = (siteName) => {
+                    const result = connectivityResults.value[siteName];
+                    if (!result) return '-';
+                    if (!result.success) return '超时';
+                    return `${result.latency_ms}ms`;
+                };
 
                 // 处理更新按钮点击
                 const handleUpdateClick = () => {
@@ -2337,7 +2619,7 @@
 	                    handleLogin, handleLogout,
                     // 状态
                     status, subs, nodes, loading, loadingAction, toasts,
-                    newSubUrl, newNode, canAddNode,
+                    newSubUrl, newNode, canAddNode, showNodeModal, nodeType,
                     proxies, delays, traffic, testingGroup, selectorGroups,
                     // 日志相关
                     logs, logContainer, logAutoScroll, showLogs, clearLogs,
@@ -2347,6 +2629,10 @@
                     getFilteredNodes, hasFastestNode, selectFastest,
                     // 版本更新
                     versionInfo, upgrading, handleUpdateClick,
+                    // 连通性测试
+                    connectivitySites, connectivityResults, testingConnectivity,
+                    currentTestingSite, testConnectivity, testSingleSite,
+                    getConnectivityClass, formatConnectivityDelay,
                     // 其他
                     showToast, getToastIcon,
                     startService, stopService, toggleService,

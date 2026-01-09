@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
 use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
+use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -144,6 +144,17 @@ struct Tls {
 }
 
 #[derive(Serialize, Deserialize)]
+struct AnyTls {
+    #[serde(rename = "type")]
+    outbound_type: String,
+    tag: String,
+    server: String,
+    server_port: u16,
+    password: String,
+    tls: Tls,
+}
+
+#[derive(Serialize, Deserialize)]
 struct Shadowsocks {
     #[serde(rename = "type")]
     outbound_type: String,
@@ -234,7 +245,13 @@ struct StatusData {
     uptime_secs: Option<u64>,
 }
 
-
+#[derive(Serialize, Clone)]
+struct ConnectivityResult {
+    name: String,
+    url: String,
+    latency_ms: Option<u64>,
+    success: bool,
+}
 
 // Request types for subscription and node management
 #[derive(Deserialize)]
@@ -244,12 +261,15 @@ struct SubRequest {
 
 #[derive(Deserialize)]
 struct NodeRequest {
+    node_type: Option<String>,
     tag: String,
     server: String,
     server_port: u16,
     password: String,
     #[serde(default)]
     sni: Option<String>,
+    #[serde(default)]
+    cipher: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -395,6 +415,44 @@ async fn start_service(
 async fn stop_service() -> Json<ApiResponse<()>> {
     stop_sing_internal().await;
     Json(ApiResponse::success_no_data("sing-box stopped"))
+}
+
+/// POST /api/connectivity - Test connectivity to a single site
+#[derive(Deserialize)]
+struct ConnectivityRequest {
+    url: String,
+}
+
+async fn test_connectivity(
+    Json(req): Json<ConnectivityRequest>,
+) -> Json<ApiResponse<ConnectivityResult>> {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(ApiResponse::error(format!("Failed to create client: {}", e)));
+        }
+    };
+
+    let start = Instant::now();
+    let result = match client.head(&req.url).send().await {
+        Ok(_) => ConnectivityResult {
+            name: String::new(),
+            url: req.url,
+            latency_ms: Some(start.elapsed().as_millis() as u64),
+            success: true,
+        },
+        Err(_) => ConnectivityResult {
+            name: String::new(),
+            url: req.url,
+            latency_ms: None,
+            success: false,
+        },
+    };
+
+    Json(ApiResponse::success("Test completed", result))
 }
 
 // ============================================================================
@@ -1183,7 +1241,7 @@ async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<N
     Json(ApiResponse::success("Nodes loaded", nodes))
 }
 
-/// POST /api/nodes - Add a Hysteria2 node
+/// POST /api/nodes - Add a node (Hysteria2/AnyTLS/Shadowsocks)
 async fn add_node(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NodeRequest>,
@@ -1204,23 +1262,54 @@ async fn add_node(
             }
         }
 
-        // Build Hysteria2 node
-        let node = Hysteria2 {
-            outbound_type: "hysteria2".to_string(),
-            tag: req.tag,
-            server: req.server,
-            server_port: req.server_port,
-            password: req.password,
-            up_mbps: 40,
-            down_mbps: 350,
-            tls: Tls {
-                enabled: true,
-                server_name: req.sni,
-                insecure: true,
-            },
-        };
-
-        let node_json = serde_json::to_string(&node).map_err(|e| {
+        // Build node based on type
+        let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
+        let node_json = match node_type {
+            "anytls" => {
+                let node = AnyTls {
+                    outbound_type: "anytls".to_string(),
+                    tag: req.tag,
+                    server: req.server,
+                    server_port: req.server_port,
+                    password: req.password,
+                    tls: Tls {
+                        enabled: true,
+                        server_name: req.sni,
+                        insecure: true,
+                    },
+                };
+                serde_json::to_string(&node)
+            }
+            "ss" => {
+                let node = Shadowsocks {
+                    outbound_type: "shadowsocks".to_string(),
+                    tag: req.tag,
+                    server: req.server,
+                    server_port: req.server_port,
+                    method: req.cipher.unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string()),
+                    password: req.password,
+                };
+                serde_json::to_string(&node)
+            }
+            _ => {
+                // Default to Hysteria2
+                let node = Hysteria2 {
+                    outbound_type: "hysteria2".to_string(),
+                    tag: req.tag,
+                    server: req.server,
+                    server_port: req.server_port,
+                    password: req.password,
+                    up_mbps: 40,
+                    down_mbps: 350,
+                    tls: Tls {
+                        enabled: true,
+                        server_name: req.sni,
+                        insecure: true,
+                    },
+                };
+                serde_json::to_string(&node)
+            }
+        }.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiResponse::error(format!("Failed to serialize node: {}", e))),
@@ -1637,13 +1726,15 @@ async fn gen_config(
     let mut final_node_names: Vec<String> = vec![];
 
     for sub in &config.subs {
+        println!("Fetching subscription: {}", sub);
         match fetch_sub(sub).await {
             Ok((node_names, outbounds)) => {
+                println!("  -> Success: fetched {} nodes", node_names.len());
                 final_node_names.extend(node_names);
                 final_outbounds.extend(outbounds);
             }
             Err(e) => {
-                eprintln!("Failed to fetch subscription from {}: {}", sub, e);
+                eprintln!("  -> Failed to fetch subscription: {}", e);
             }
         }
     }
@@ -1673,13 +1764,13 @@ async fn gen_config(
     let config_output_loc = format!("{}/config.json", sing_box_home);
     tokio::fs::write(
         &config_output_loc,
-        serde_json::to_string_pretty(&sing_box_config)?,
+        serde_json::to_string(&sing_box_config)?,
     )
     .await?;
 
     println!(
         "Generated config: {}",
-        serde_json::to_string_pretty(&sing_box_config).unwrap()
+        serde_json::to_string(&sing_box_config).unwrap()
     );
     Ok(())
 }
@@ -1798,6 +1889,36 @@ async fn fetch_sub(
                 };
                 node_names.push(name.to_string());
                 outbounds.push(serde_json::to_value(hysteria2)?);
+            }
+            "anytls" => {
+                let anytls = AnyTls {
+                    outbound_type: "anytls".to_string(),
+                    tag: name.to_string(),
+                    server: node
+                        .get("server")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
+                    password: node
+                        .get("password")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    tls: Tls {
+                        enabled: true,
+                        server_name: node
+                            .get("sni")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string()),
+                        insecure: node
+                            .get("skip-cert-verify")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    },
+                };
+                node_names.push(name.to_string());
+                outbounds.push(serde_json::to_value(anytls)?);
             }
             _ => {}
         }
@@ -2025,6 +2146,13 @@ async fn auth_middleware(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Check for root privileges
+    if !Uid::effective().is_root() {
+        eprintln!("Error: This application must be run as root.");
+        std::process::exit(1);
+    }
+
+    println!("Reading configuration...");
     let (config, setup_required) = match tokio::fs::read_to_string("config.yaml").await {
         Ok(text) => (serde_yaml::from_str::<Config>(&text)?, false),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
@@ -2052,6 +2180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if !setup_required {
         // Generate initial config, retrying until success
+        println!("Generating initial config...");
         loop {
             match gen_config(&config, &sing_box_home).await {
                 Ok(_) => break,
@@ -2066,6 +2195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
 
         // Check OpenWrt dependencies
+        println!("Checking dependencies...");
         if let Err(e) = check_and_install_openwrt_dependencies().await {
             eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
         }
@@ -2098,6 +2228,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
+        // Connectivity test
+        .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
         // Clash API proxy (protected HTTP)
