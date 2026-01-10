@@ -326,6 +326,13 @@ async fn serve_index() -> Html<&'static str> {
     Html(include_str!("../public/index.html"))
 }
 
+async fn serve_icon() -> impl axum::response::IntoResponse {
+    (
+        [("content-type", "image/svg+xml")],
+        include_str!("../public/icon.svg"),
+    )
+}
+
 /// POST /api/login - User login
 async fn login(
     State(state): State<Arc<AppState>>,
@@ -2276,6 +2283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = Router::new()
         .route("/", get(serve_index))           // 首页可访问（前端会检查）
+        .route("/icon.svg", get(serve_icon))    // 网站图标
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/init", post(setup_init))
         .route("/api/login", post(login))       // 登录接口
