@@ -2090,13 +2090,9 @@
                         document.title = '✗ Miao 控制面板';
                         return;
                     }
-                    if (trafficData?.up !== undefined && trafficData?.down !== undefined) {
-                        const up = formatSpeed(trafficData.up);
-                        const down = formatSpeed(trafficData.down);
-                        document.title = `↑${up} ↓${down} - Miao`;
-                    } else {
-                        document.title = '✓ Miao 控制面板';
-                    }
+                    const up = formatSpeed(trafficData?.up || 0);
+                    const down = formatSpeed(trafficData?.down || 0);
+                    document.title = `↑${up} ↓${down} - Miao`;
                 };
 
                 // 节点搜索和排序
