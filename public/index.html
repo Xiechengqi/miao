@@ -1654,7 +1654,7 @@
                         </div>
 
                         <div class="add-form">
-                            <button class="btn-custom btn-add" @click="showNodeModal = true" :disabled="loading"
+                            <button class="btn-custom btn-add" @click="openNodeModal" :disabled="loading"
                                 style="width: 100%;">
                                 <i class="bi bi-plus-lg"></i>
                                 添加节点
@@ -1679,11 +1679,13 @@
                         <!-- Tab 切换 -->
                         <div class="tab-container">
                             <button class="tab-btn" :class="{ active: nodeType === 'hysteria2' }"
-                                @click="nodeType = 'hysteria2'">Hysteria2</button>
+                                @click="setNodeType('hysteria2')">Hysteria2</button>
                             <button class="tab-btn" :class="{ active: nodeType === 'anytls' }"
-                                @click="nodeType = 'anytls'">AnyTLS</button>
+                                @click="setNodeType('anytls')">AnyTLS</button>
                             <button class="tab-btn" :class="{ active: nodeType === 'ss' }"
-                                @click="nodeType = 'ss'">Shadowsocks</button>
+                                @click="setNodeType('ss')">Shadowsocks</button>
+                            <button class="tab-btn" :class="{ active: nodeType === 'ssh' }"
+                                @click="setNodeType('ssh')">SSH</button>
                         </div>
 
                         <!-- 通用字段 -->
@@ -1701,7 +1703,7 @@
                             </div>
                             <div class="form-group" style="max-width: 120px;">
                                 <label class="form-label">端口</label>
-                                <input type="number" class="form-input" v-model.number="newNode.server_port"
+                                <input type="number" class="form-input" v-model.number="newNode.server_port" @input="portTouched = true"
                                     placeholder="443">
                             </div>
                         </div>
@@ -1722,6 +1724,10 @@
                         </div>
 
                         <div class="form-row">
+                            <div class="form-group" v-if="nodeType === 'ssh'">
+                                <label class="form-label">用户名</label>
+                                <input type="text" class="form-input" v-model="newNode.user" placeholder="例如: root">
+                            </div>
                             <div class="form-group">
                                 <label class="form-label">密码</label>
                                 <input type="text" class="form-input" v-model="newNode.password" placeholder="密码">
@@ -1729,7 +1735,7 @@
                         </div>
 
                         <!-- Hysteria2/AnyTLS 的 SNI 字段 -->
-                        <div class="form-row" v-if="nodeType !== 'ss'">
+                        <div class="form-row" v-if="nodeType === 'hysteria2' || nodeType === 'anytls'">
                             <div class="form-group">
                                 <label class="form-label">SNI (可选)</label>
                                 <input type="text" class="form-input" v-model="newNode.sni" placeholder="留空使用服务器地址">
@@ -1739,7 +1745,7 @@
                         <button class="btn-custom btn-add" @click="addNode" :disabled="loading || !canAddNode"
                             style="width: 100%; margin-top: 0.5rem;">
                             <i class="bi bi-plus-lg"></i>
-                            添加 {{ nodeType === 'hysteria2' ? 'Hysteria2' : nodeType === 'anytls' ? 'AnyTLS' : 'Shadowsocks' }} 节点
+                            添加 {{ nodeType === 'hysteria2' ? 'Hysteria2' : nodeType === 'anytls' ? 'AnyTLS' : nodeType === 'ss' ? 'Shadowsocks' : 'SSH' }} 节点
                         </button>
                     </div>
                 </div>
@@ -1860,9 +1866,10 @@
 	                const loading = ref(false);
 	                const loadingAction = ref('');
 	                const toasts = ref([]);
-	                const newNode = ref({ tag: '', server: '', server_port: 443, password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' });
+	                const newNode = ref({ tag: '', server: '', server_port: 443, user: '', password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' });
 	                const showNodeModal = ref(false);
 	                const nodeType = ref('hysteria2');
+                    const portTouched = ref(false);
 
                 // Clash API 状态
                 const proxies = ref({});
@@ -1914,6 +1921,9 @@
 
                 // 计算属性
                 const canAddNode = computed(() => {
+                    if (nodeType.value === 'ssh') {
+                        return newNode.value.tag && newNode.value.server && newNode.value.server_port && newNode.value.password;
+                    }
                     return newNode.value.tag && newNode.value.server && newNode.value.server_port && newNode.value.password;
                 });
 
@@ -1921,12 +1931,24 @@
                 const selectorGroups = computed(() => {
                     const groups = {};
                     for (const [name, proxy] of Object.entries(proxies.value)) {
-                        if (proxy.type === 'Selector') {
+                        if (proxy.type === 'Selector' && !name.startsWith('_')) {
                             groups[name] = proxy;
                         }
                     }
                     return groups;
                 });
+
+                const setNodeType = (t) => {
+                    nodeType.value = t;
+                    if (t === 'ssh' && !portTouched.value && newNode.value.server_port === 443) newNode.value.server_port = 22;
+                    if (t !== 'ssh' && !portTouched.value && newNode.value.server_port === 22) newNode.value.server_port = 443;
+                    if (t === 'ssh' && !newNode.value.user) newNode.value.user = 'root';
+                };
+
+                const openNodeModal = () => {
+                    portTouched.value = false;
+                    showNodeModal.value = true;
+                };
 
 	                // 认证函数
 	                // 检查是否已登录
@@ -2392,6 +2414,8 @@
                         // Add type-specific fields
                         if (nodeType.value === 'ss') {
                             nodeData.cipher = newNode.value.cipher;
+                        } else if (nodeType.value === 'ssh') {
+                            nodeData.user = newNode.value.user.trim();
                         } else {
                             const sni = newNode.value.sni?.trim();
                             if (sni) nodeData.sni = sni;
@@ -2399,7 +2423,8 @@
                         await apiCall('nodes', 'POST', nodeData, 'addNode');
                         showToast('节点已添加', 'success');
                         delays.value = {};
-                        newNode.value = { tag: '', server: '', server_port: 443, password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' };
+                        newNode.value = { tag: '', server: '', server_port: nodeType.value === 'ssh' ? 22 : 443, user: '', password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' };
+                        portTouched.value = false;
                         showNodeModal.value = false;
                         await fetchNodes();
                     } catch (e) { }
@@ -2590,7 +2615,8 @@
 	                    // 状态
 	                    status, subDir, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 	                    reloadSubFiles,
-	                    newNode, canAddNode, showNodeModal, nodeType,
+	                    newNode, canAddNode, showNodeModal, nodeType, setNodeType,
+                        portTouched, openNodeModal,
 	                    proxies, delays, traffic, testingGroup, selectorGroups,
 	                    // 日志相关
 	                    logs, logContainer, logAutoScroll, showLogs, clearLogs,

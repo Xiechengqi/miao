@@ -111,6 +111,7 @@ struct AppState {
     sub_dir: PathBuf,
     sub_files: Mutex<Vec<SubFileStatus>>,
     sub_dir_error: Mutex<Option<String>>,
+    node_type_by_tag: Mutex<HashMap<String, String>>,
     setup_required: AtomicBool,
 }
 
@@ -284,6 +285,8 @@ struct NodeRequest {
     tag: String,
     server: String,
     server_port: u16,
+    #[serde(default)]
+    user: Option<String>,
     password: String,
     #[serde(default)]
     sni: Option<String>,
@@ -425,7 +428,8 @@ async fn start_service(
     match start_sing_internal(&state.sing_box_home).await {
         Ok(_) => {
             let config = state.config.lock().await;
-            let _ = apply_saved_selections(&config).await;
+            let node_type_by_tag = state.node_type_by_tag.lock().await;
+            let _ = apply_saved_selections(&config, Some(&*node_type_by_tag)).await;
             Ok(Json(ApiResponse::success_no_data(
                 "sing-box started successfully",
             )))
@@ -576,27 +580,77 @@ async fn clash_switch_proxy(
     Json(req): Json<ClashSwitchRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     let client = reqwest::Client::new();
-    let resp = client
-        .put(format!(
-            "{}/proxies/{}",
-            CLASH_HTTP_BASE,
-            percent_encoding::utf8_percent_encode(&group, percent_encoding::NON_ALPHANUMERIC)
-        ))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(format!("Clash API request failed: {}", e)))))?;
+    let clash_switch = |group: &str, name: &str| async {
+        let resp = client
+            .put(format!(
+                "{}/proxies/{}",
+                CLASH_HTTP_BASE,
+                percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+            ))
+            .json(&ClashSwitchRequest {
+                name: name.to_string(),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("Clash API request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(ApiResponse::error(format!("Clash API returned {}", resp.status()))),
-        ));
+        if !resp.status().is_success() {
+            return Err(format!("Clash API returned {}", resp.status()));
+        }
+        Ok::<(), String>(())
+    };
+
+    let previous_proxy_selection = if group == "proxy" {
+        let config = state.config.lock().await;
+        config.selections.get("proxy").cloned()
+    } else {
+        None
+    };
+
+    clash_switch(&group, &req.name)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(e))))?;
+
+    let mut dns_selection: Option<String> = None;
+    if group == "proxy" {
+        let is_ssh = {
+            let node_type_by_tag = state.node_type_by_tag.lock().await;
+            node_type_by_tag
+                .get(&req.name)
+                .map(|t| t == "ssh")
+                .unwrap_or(false)
+        };
+        let target = if is_ssh { "direct" } else { "proxy" };
+        match clash_switch("_dns", target).await {
+            Ok(()) => {
+                dns_selection = Some(target.to_string());
+            }
+            Err(e) => {
+                if is_ssh {
+                    if let Some(previous) = previous_proxy_selection {
+                        if let Err(rollback_err) = clash_switch("proxy", &previous).await {
+                            eprintln!("Failed to rollback proxy selector: {}", rollback_err);
+                        }
+                    }
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(ApiResponse::error(format!(
+                            "Switched proxy to SSH, but failed to switch DNS selector to direct: {}",
+                            e
+                        ))),
+                    ));
+                }
+                eprintln!("Failed to switch _dns selector: {}", e);
+            }
+        }
     }
 
     {
         let mut config = state.config.lock().await;
         config.selections.insert(group, req.name);
+        if let Some(dns_selection) = dns_selection {
+            config.selections.insert("_dns".to_string(), dns_selection);
+        }
         if let Err(e) = save_config(&config).await {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1192,6 +1246,25 @@ async fn add_node(
         // Build node based on type
         let node_type = req.node_type.as_deref().unwrap_or("hysteria2");
         let node_json = match node_type {
+            "ssh" => {
+                let mut node = serde_json::Map::new();
+                node.insert("type".to_string(), serde_json::Value::String("ssh".to_string()));
+                node.insert("tag".to_string(), serde_json::Value::String(req.tag));
+                node.insert("server".to_string(), serde_json::Value::String(req.server));
+                node.insert(
+                    "server_port".to_string(),
+                    serde_json::Value::Number(
+                        u64::from(if req.server_port == 0 { 22 } else { req.server_port }).into(),
+                    ),
+                );
+                if let Some(user) = req.user {
+                    if !user.is_empty() {
+                        node.insert("user".to_string(), serde_json::Value::String(user));
+                    }
+                }
+                node.insert("password".to_string(), serde_json::Value::String(req.password));
+                serde_json::to_string(&serde_json::Value::Object(node))
+            }
             "anytls" => {
                 let node = AnyTls {
                     outbound_type: "anytls".to_string(),
@@ -1329,14 +1402,77 @@ async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + 
     Ok(())
 }
 
-async fn apply_saved_selections(config: &Config) -> Result<(), String> {
+fn build_node_type_map(config: &Config, subs: &LoadedSubscriptions) -> HashMap<String, String> {
+    let mut node_type_by_tag = HashMap::new();
+
+    for node_str in &config.nodes {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+            let Some(tag) = v.get("tag").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            let Some(typ) = v.get("type").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            node_type_by_tag.insert(tag.to_string(), typ.to_string());
+        }
+    }
+
+    for outbound in &subs.outbounds {
+        let Some(tag) = outbound.get("tag").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let Some(typ) = outbound.get("type").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        node_type_by_tag.insert(tag.to_string(), typ.to_string());
+    }
+
+    node_type_by_tag
+}
+
+async fn apply_saved_selections(
+    config: &Config,
+    node_type_by_tag: Option<&HashMap<String, String>>,
+) -> Result<(), String> {
     if config.selections.is_empty() {
         return Ok(());
     }
 
     let client = reqwest::Client::new();
 
-    for (group, name) in &config.selections {
+    let mut ordered: Vec<(String, String)> = Vec::with_capacity(config.selections.len());
+
+    let proxy_selection = config.selections.get("proxy").cloned();
+    let proxy_is_ssh = proxy_selection
+        .as_ref()
+        .and_then(|name| node_type_by_tag.and_then(|m| m.get(name)))
+        .map(|t| t == "ssh")
+        .unwrap_or(false);
+
+    let desired_dns_selection = if proxy_is_ssh {
+        "direct".to_string()
+    } else {
+        config
+            .selections
+            .get("_dns")
+            .cloned()
+            .unwrap_or_else(|| "proxy".to_string())
+    };
+
+    if proxy_selection.is_some() || config.selections.contains_key("_dns") {
+        ordered.push(("_dns".to_string(), desired_dns_selection));
+    }
+    if let Some(proxy) = proxy_selection {
+        ordered.push(("proxy".to_string(), proxy));
+    }
+    for (group, name) in config.selections.iter() {
+        if group == "proxy" || group == "_dns" {
+            continue;
+        }
+        ordered.push((group.clone(), name.clone()));
+    }
+
+    for (group, name) in ordered.into_iter() {
         let mut last_err: Option<String> = None;
 
         for attempt in 1..=10 {
@@ -1344,7 +1480,7 @@ async fn apply_saved_selections(config: &Config) -> Result<(), String> {
                 .put(format!(
                     "{}/proxies/{}",
                     CLASH_HTTP_BASE,
-                    percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+                    percent_encoding::utf8_percent_encode(&group, percent_encoding::NON_ALPHANUMERIC)
                 ))
                 .json(&ClashSwitchRequest { name: name.clone() })
                 .send()
@@ -1390,6 +1526,10 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
         let mut sub_dir_error = state.sub_dir_error.lock().await;
         *sub_dir_error = loaded.dir_error.clone();
     }
+    {
+        let mut node_type_by_tag = state.node_type_by_tag.lock().await;
+        *node_type_by_tag = build_node_type_map(&config_clone, &loaded);
+    }
 
     gen_config(&config_clone, &state.sing_box_home, &loaded)
         .await
@@ -1403,7 +1543,8 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
     start_sing_internal(&state.sing_box_home)
         .await
         .map_err(|e| format!("Failed to restart sing-box: {}", e))?;
-    let _ = apply_saved_selections(&config_clone).await;
+    let node_type_by_tag = state.node_type_by_tag.lock().await;
+    let _ = apply_saved_selections(&config_clone, Some(&*node_type_by_tag)).await;
     println!("sing-box restarted successfully");
     Ok(())
 }
@@ -1697,8 +1838,9 @@ async fn gen_config(
     .await?;
 
     println!(
-        "Generated config: {}",
-        serde_json::to_string(&sing_box_config).unwrap()
+        "Generated sing-box config with {} outbounds at {}",
+        sing_box_config["outbounds"].as_array().map(|a| a.len()).unwrap_or(0),
+        config_output_loc
     );
     Ok(())
 }
@@ -1714,8 +1856,8 @@ fn get_config_template() -> serde_json::Value {
             "strategy": "prefer_ipv4",
             "independent_cache": true,
             "servers": [
-                {"tag": "cloudflare", "address": "1.1.1.1", "detour": "proxy"},
-                {"tag": "google", "address": "8.8.8.8", "detour": "proxy"},
+                {"tag": "cloudflare", "address": "1.1.1.1", "detour": "_dns"},
+                {"tag": "google", "address": "8.8.8.8", "detour": "_dns"},
                 {"tag": "dns-direct", "address": "223.5.5.5", "detour": "direct"},
                 {"tag": "alidns", "address": "https://dns.alidns.com/dns-query", "address_resolver": "dns-direct", "detour": "direct"},
                 {"tag": "tencent", "address": "https://doh.pub/dns-query", "address_resolver": "dns-direct", "detour": "direct"},
@@ -1727,6 +1869,7 @@ fn get_config_template() -> serde_json::Value {
         ],
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
+            {"type": "selector", "tag": "_dns", "outbounds": ["proxy", "direct"]},
             {"type": "direct", "tag": "direct"}
         ],
         "route": {
@@ -2205,6 +2348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Loading subscription files from: {}", sub_dir.display());
     let loaded_subs = load_subscription_dir(&sub_dir).await;
+    let node_type_by_tag = build_node_type_map(&config, &loaded_subs);
 
     if !setup_required {
         // Generate initial config
@@ -2220,7 +2364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // Start sing-box
                 match start_sing_internal(&sing_box_home).await {
                     Ok(_) => {
-                        let _ = apply_saved_selections(&config).await;
+                        let _ = apply_saved_selections(&config, Some(&node_type_by_tag)).await;
                         println!("sing-box started successfully")
                     }
                     Err(e) => eprintln!("Failed to start sing-box: {}", e),
@@ -2245,6 +2389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sub_dir: sub_dir.clone(),
         sub_files: Mutex::new(loaded_subs.files.clone()),
         sub_dir_error: Mutex::new(loaded_subs.dir_error.clone()),
+        node_type_by_tag: Mutex::new(node_type_by_tag),
         setup_required: AtomicBool::new(setup_required),
     });
 
