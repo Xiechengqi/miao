@@ -1969,6 +1969,19 @@
 	                    };
 	                };
 
+                    const parseApiResponse = async (response) => {
+                        const contentType = response.headers.get('content-type') || '';
+                        const text = await response.text();
+                        if (!contentType.includes('application/json')) {
+                            throw new Error(`服务返回非 JSON 响应 (${response.status})`);
+                        }
+                        try {
+                            return JSON.parse(text);
+                        } catch (e) {
+                            throw new Error(`解析响应失败 (${response.status})`);
+                        }
+                    };
+
 	                const apiFetch = async (path, options = {}, { handle401 = true } = {}) => {
 	                    const headers = authHeaders(options.headers || {});
 	                    const response = await fetch(path, { ...options, headers });
@@ -1981,7 +1994,7 @@
 	                        throw new Error('Unauthorized');
 	                    }
 
-	                    const data = await response.json();
+	                    const data = await parseApiResponse(response);
 	                    if (!response.ok || !data.success) {
 	                        throw new Error(data.message || '请求失败');
 	                    }
@@ -2317,7 +2330,7 @@
 	                            throw new Error('Unauthorized');
 	                        }
 
-	                        const data = await response.json();
+	                        const data = await parseApiResponse(response);
 	                        if (!response.ok || !data.success) throw new Error(data.message || '请求失败');
 	                        return data;
 	                    } catch (error) {
