@@ -2515,7 +2515,7 @@
                             server_port: newNode.value.server_port,
                             timeout_ms: 3000,
                         };
-                        const data = await apiCall('nodes/test', 'POST', body, 'testNode');
+                        const data = await apiCall('node-test', 'POST', body, 'testNode');
                         showToast(`连接成功 (${data.data.latency_ms}ms)`, 'success');
                     } catch (e) { }
                 };
@@ -2528,7 +2528,7 @@
                             showToast(d > 0 ? `延迟 ${d}ms` : '测试超时', d > 0 ? 'success' : 'error');
                             return;
                         }
-                        const data = await apiCall('nodes/test', 'POST', { server: node.server, server_port: node.server_port, timeout_ms: 3000 }, 'testNode');
+                        const data = await apiCall('node-test', 'POST', { server: node.server, server_port: node.server_port, timeout_ms: 3000 }, 'testNode');
                         showToast(`连接成功 (${data.data.latency_ms}ms)`, 'success');
                     } catch (e) { }
                 };

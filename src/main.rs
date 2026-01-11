@@ -1686,7 +1686,7 @@ async fn delete_node(
     Ok(Json(ApiResponse::success_no_data("Node deleted, restarting...")))
 }
 
-/// POST /api/nodes/test - Test a node connectivity (TCP connect only)
+/// POST /api/node-test - Test a node connectivity (TCP connect only)
 async fn test_node(
     Json(req): Json<NodeTestRequest>,
 ) -> Result<Json<ApiResponse<NodeTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
@@ -2762,9 +2762,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))
         .route("/api/nodes", delete(delete_node))
-        .route("/api/nodes/test", post(test_node))
-        .route("/api/nodes/{tag}", get(get_node))
-        .route("/api/nodes/{tag}", put(update_node))
+        // Use a standalone endpoint to avoid colliding with node tags (e.g. tag == "test")
+        .route("/api/node-test", post(test_node))
+        .route("/api/nodes/{tag}", get(get_node).put(update_node))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
