@@ -2053,8 +2053,8 @@ async fn check_doh(candidate: &DohCandidate, timeout: Duration) -> Result<(), St
 }
 
 async fn is_sing_running() -> bool {
-    let lock = SING_PROCESS.lock().await;
-    if let Some(proc) = lock.as_ref() {
+    let mut lock = SING_PROCESS.lock().await;
+    if let Some(proc) = lock.as_mut() {
         proc.child.try_wait().ok().flatten().is_none()
     } else {
         false
