@@ -521,6 +521,44 @@
             flex-shrink: 0;
         }
 
+        .node-type-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            line-height: 1.2;
+            margin-left: 0.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(255, 255, 255, 0.06);
+            color: rgba(255, 255, 255, 0.8);
+            flex-shrink: 0;
+        }
+
+        .node-type-badge.ssh {
+            border-color: rgba(95, 158, 160, 0.35);
+            color: rgba(95, 158, 160, 1);
+            background: rgba(95, 158, 160, 0.15);
+        }
+
+        .node-type-badge.ss {
+            border-color: rgba(165, 94, 234, 0.35);
+            color: rgba(165, 94, 234, 1);
+            background: rgba(165, 94, 234, 0.14);
+        }
+
+        .node-type-badge.anytls {
+            border-color: rgba(0, 217, 165, 0.35);
+            color: rgba(0, 217, 165, 1);
+            background: rgba(0, 217, 165, 0.12);
+        }
+
+        .node-type-badge.hysteria2 {
+            border-color: rgba(255, 165, 2, 0.35);
+            color: rgba(255, 165, 2, 1);
+            background: rgba(255, 165, 2, 0.12);
+        }
+
         .list-item-text {
             flex: 1;
             overflow: hidden;
@@ -1689,6 +1727,9 @@
                             <div style="flex: 1;">
                                 <div class="list-item-text" style="white-space: normal;">
                                     <strong>{{ node.tag }}</strong>
+                                    <span :class="['node-type-badge', getNodeTypeClass(node.node_type)]">
+                                        {{ formatNodeType(node.node_type) }}
+                                    </span>
                                 </div>
                                 <div class="node-info">
                                     {{ node.server }}:{{ node.server_port }}
@@ -1749,13 +1790,13 @@
 
                         <!-- Tab 切换 -->
                         <div class="tab-container">
-                            <button class="tab-btn" :class="{ active: nodeType === 'hysteria2' }"
+                            <button v-if="!editingTag || nodeType === 'hysteria2'" class="tab-btn" :class="{ active: nodeType === 'hysteria2' }"
                                 @click="setNodeType('hysteria2')">Hysteria2</button>
-                            <button class="tab-btn" :class="{ active: nodeType === 'anytls' }"
+                            <button v-if="!editingTag || nodeType === 'anytls'" class="tab-btn" :class="{ active: nodeType === 'anytls' }"
                                 @click="setNodeType('anytls')">AnyTLS</button>
-                            <button class="tab-btn" :class="{ active: nodeType === 'ss' }"
+                            <button v-if="!editingTag || nodeType === 'ss'" class="tab-btn" :class="{ active: nodeType === 'ss' }"
                                 @click="setNodeType('ss')">Shadowsocks</button>
-                            <button class="tab-btn" :class="{ active: nodeType === 'ssh' }"
+                            <button v-if="!editingTag || nodeType === 'ssh'" class="tab-btn" :class="{ active: nodeType === 'ssh' }"
                                 @click="setNodeType('ssh')">SSH</button>
                         </div>
 
@@ -2031,6 +2072,7 @@
                 });
 
                 const setNodeType = (t) => {
+                    if (editingTag.value) return;
                     nodeType.value = t;
                     if (t === 'ssh' && !portTouched.value && newNode.value.server_port === 443) newNode.value.server_port = 22;
                     if (t !== 'ssh' && !portTouched.value && newNode.value.server_port === 22) newNode.value.server_port = 443;
@@ -2555,7 +2597,7 @@
                         if (!d) throw new Error('请求失败');
                         editingTag.value = tag;
                         portTouched.value = false;
-                        setNodeType(d.node_type === 'shadowsocks' ? 'ss' : d.node_type);
+                        nodeType.value = d.node_type === 'shadowsocks' ? 'ss' : d.node_type;
                         newNode.value = {
                             tag: d.tag || '',
                             server: d.server || '',
@@ -2594,6 +2636,22 @@
                         const data = await apiCall('node-test', 'POST', { server: node.server, server_port: node.server_port, timeout_ms: 3000 }, 'testNode');
                         showToast(`连接成功 (${data.data.latency_ms}ms)`, 'success');
                     } catch (e) { }
+                };
+
+                const formatNodeType = (t) => {
+                    if (t === 'hysteria2') return 'Hysteria2';
+                    if (t === 'anytls') return 'AnyTLS';
+                    if (t === 'shadowsocks') return 'SS';
+                    if (t === 'ssh') return 'SSH';
+                    return t || '-';
+                };
+
+                const getNodeTypeClass = (t) => {
+                    if (t === 'hysteria2') return 'hysteria2';
+                    if (t === 'anytls') return 'anytls';
+                    if (t === 'shadowsocks') return 'ss';
+                    if (t === 'ssh') return 'ssh';
+                    return '';
                 };
 
                 const deleteNode = async (tag) => {
@@ -2801,6 +2859,7 @@
                     showToast, getToastIcon,
                     startService, stopService, toggleService,
 	                    submitNode, openEditNode, testNodeFromModal, testManualNode, deleteNode, confirmDeleteNode,
+                        formatNodeType, getNodeTypeClass,
                     switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
                     formatUptime
                 };

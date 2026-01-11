@@ -321,6 +321,7 @@ struct DeleteNodeRequest {
 
 #[derive(Serialize)]
 struct NodeInfo {
+    node_type: String,
     tag: String,
     server: String,
     server_port: u16,
@@ -1262,6 +1263,7 @@ async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<N
         .iter()
         .filter_map(|s| {
             serde_json::from_str::<serde_json::Value>(s).ok().map(|v| NodeInfo {
+                node_type: v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
                 tag: v.get("tag").and_then(|t| t.as_str()).unwrap_or("").to_string(),
                 server: v.get("server").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                 server_port: v.get("server_port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
