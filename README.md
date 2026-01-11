@@ -74,3 +74,9 @@ sudo ./miao --sub-dir ./sub
 | `nodes` | 手动配置的节点 (JSON 格式) | - |
 
 > 默认规则会让所有 `tcp/22`（SSH）直连，避免代理出口对 22 端口的限制导致 SSH 断连。
+
+## DNS 说明（DoH 优先 + 自动切换）
+
+默认使用多个 DoH 远程 DNS（Cloudflare/Google/Quad9）并在后端定时探测可用性，必要时会自动切换 `dns.final` 并重启 sing-box 使其生效。
+
+可在 `config.yaml` 中通过 `dns_active` / `dns_candidates` / `dns_check_interval_ms` 等字段调整策略（见 `config.yaml.example`）。

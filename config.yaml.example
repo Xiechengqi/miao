@@ -25,3 +25,19 @@
 # Manual nodes in JSON format (optional)
 nodes:
   # - '{"type":"hysteria2","tag":"my-node","server":"example.com","server_port":443,"password":"xxx"}'
+
+# DNS auto failover (optional)
+# Active DNS server tag used in sing-box `dns.final`.
+# dns_active: doh-cf
+#
+# Candidate tags for health checks / failover. The last one should be a direct fallback.
+# dns_candidates:
+#   - doh-cf
+#   - doh-google
+#   - doh-quad9
+#   - dns-direct
+#
+# Health check interval and thresholds (milliseconds).
+# dns_check_interval_ms: 30000
+# dns_fail_threshold: 3
+# dns_cooldown_ms: 300000

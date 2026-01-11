@@ -25,6 +25,7 @@ use std::time::Instant;
 use tokio_tungstenite::connect_async;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+use base64::Engine;
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -52,9 +53,20 @@ struct Config {
     selections: HashMap<String, String>, // selector group -> node name
     #[serde(default)]
     nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dns_active: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dns_candidates: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dns_check_interval_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dns_fail_threshold: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dns_cooldown_ms: Option<u64>,
 }
 
 const DEFAULT_PORT: u16 = 6161;
+const DEFAULT_DNS_ACTIVE: &str = "doh-cf";
 
 // JWT 密钥（生产环境应使用环境变量）
 const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
@@ -1775,6 +1787,205 @@ fn build_node_type_map(config: &Config, subs: &LoadedSubscriptions) -> HashMap<S
     node_type_by_tag
 }
 
+#[derive(Clone)]
+struct DohCandidate {
+    tag: &'static str,
+    host: &'static str,
+    ip: &'static str,
+    path: &'static str,
+}
+
+fn default_dns_candidates() -> Vec<String> {
+    vec![
+        "doh-cf".to_string(),
+        "doh-google".to_string(),
+        "doh-quad9".to_string(),
+        "dns-direct".to_string(),
+    ]
+}
+
+fn doh_candidates_by_tag() -> HashMap<&'static str, DohCandidate> {
+    HashMap::from([
+        (
+            "doh-cf",
+            DohCandidate {
+                tag: "doh-cf",
+                host: "dns.cloudflare.com",
+                ip: "1.1.1.1",
+                path: "/dns-query",
+            },
+        ),
+        (
+            "doh-google",
+            DohCandidate {
+                tag: "doh-google",
+                host: "dns.google",
+                ip: "8.8.8.8",
+                path: "/dns-query",
+            },
+        ),
+        (
+            "doh-quad9",
+            DohCandidate {
+                tag: "doh-quad9",
+                host: "dns.quad9.net",
+                ip: "9.9.9.9",
+                path: "/dns-query",
+            },
+        ),
+    ])
+}
+
+fn build_dns_query_base64url(domain: &str) -> String {
+    // Minimal DNS query message for A record.
+    let mut msg: Vec<u8> = Vec::with_capacity(64);
+    msg.extend_from_slice(&0u16.to_be_bytes()); // id
+    msg.extend_from_slice(&0x0100u16.to_be_bytes()); // recursion desired
+    msg.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+    msg.extend_from_slice(&0u16.to_be_bytes()); // ancount
+    msg.extend_from_slice(&0u16.to_be_bytes()); // nscount
+    msg.extend_from_slice(&0u16.to_be_bytes()); // arcount
+    for label in domain.trim_end_matches('.').split('.') {
+        msg.push(label.len().min(63) as u8);
+        msg.extend_from_slice(&label.as_bytes()[..label.len().min(63)]);
+    }
+    msg.push(0); // root
+    msg.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+    msg.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(msg)
+}
+
+async fn check_doh(candidate: &DohCandidate, timeout: Duration) -> Result<(), String> {
+    let dns = build_dns_query_base64url("example.com");
+    let url = format!("https://{}{}?dns={}", candidate.host, candidate.path, dns);
+    let socket_addr = format!("{}:443", candidate.ip);
+    let addr = socket_addr
+        .parse()
+        .map_err(|e| format!("invalid socket address {}: {}", socket_addr, e))?;
+
+    let client = reqwest::Client::builder()
+        .resolve(candidate.host, addr)
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("build reqwest client: {}", e))?;
+
+    let resp = client
+        .get(url)
+        .header("accept", "application/dns-message")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+async fn is_sing_running() -> bool {
+    let lock = SING_PROCESS.lock().await;
+    if let Some(proc) = lock.as_ref() {
+        proc.child.try_wait().ok().flatten().is_none()
+    } else {
+        false
+    }
+}
+
+async fn dns_health_monitor(state: Arc<AppState>) {
+    let mut failures: HashMap<String, u32> = HashMap::new();
+    let mut cooldown_until: HashMap<String, Instant> = HashMap::new();
+
+    let candidate_map = doh_candidates_by_tag();
+
+    loop {
+        let (candidates, interval_ms, fail_threshold, cooldown_ms, active) = {
+            let config = state.config.lock().await;
+            (
+                config
+                    .dns_candidates
+                    .clone()
+                    .unwrap_or_else(default_dns_candidates),
+                config.dns_check_interval_ms.unwrap_or(30_000),
+                config.dns_fail_threshold.unwrap_or(3),
+                config.dns_cooldown_ms.unwrap_or(300_000),
+                config
+                    .dns_active
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
+            )
+        };
+
+        // Only one check per interval; keep it lightweight.
+        let timeout = Duration::from_millis(2_500);
+        let now = Instant::now();
+
+        let mut healthy: HashMap<String, bool> = HashMap::new();
+        for tag in candidates.iter() {
+            if let Some(until) = cooldown_until.get(tag) {
+                if *until > now {
+                    healthy.insert(tag.clone(), false);
+                    continue;
+                }
+            }
+
+            if let Some(c) = candidate_map.get(tag.as_str()) {
+                match check_doh(c, timeout).await {
+                    Ok(()) => {
+                        failures.insert(tag.clone(), 0);
+                        healthy.insert(tag.clone(), true);
+                    }
+                    Err(_e) => {
+                        let n = failures.get(tag).copied().unwrap_or(0) + 1;
+                        failures.insert(tag.clone(), n);
+                        if n >= fail_threshold {
+                            cooldown_until.insert(
+                                tag.clone(),
+                                Instant::now() + Duration::from_millis(cooldown_ms),
+                            );
+                        }
+                        healthy.insert(tag.clone(), false);
+                    }
+                }
+            } else if tag == "dns-direct" {
+                // Always keep a direct fallback candidate available.
+                healthy.insert(tag.clone(), true);
+            } else {
+                healthy.insert(tag.clone(), false);
+            }
+        }
+
+        let mut desired = active.clone();
+        if !healthy.get(&active).copied().unwrap_or(false) {
+            for tag in candidates.iter() {
+                if healthy.get(tag).copied().unwrap_or(false) {
+                    desired = tag.clone();
+                    break;
+                }
+            }
+        }
+
+        if desired != active {
+            {
+                let mut config = state.config.lock().await;
+                config.dns_active = Some(desired.clone());
+                if let Err(e) = save_config(&config).await {
+                    eprintln!("Failed to save config while switching DNS: {}", e);
+                }
+            }
+            if is_sing_running().await {
+                if let Err(e) = regenerate_and_restart(state.clone()).await {
+                    eprintln!("DNS switch triggered restart failed: {}", e);
+                } else {
+                    println!("Switched DNS active server: {}", desired);
+                }
+            }
+        }
+
+        sleep(Duration::from_millis(interval_ms)).await;
+    }
+}
+
 async fn apply_saved_selections(
     config: &Config,
     node_type_by_tag: Option<&HashMap<String, String>>,
@@ -2161,6 +2372,14 @@ async fn gen_config(
     }
 
     let mut sing_box_config = get_config_template();
+    if let Some(dns) = sing_box_config.get_mut("dns") {
+        let active = config
+            .dns_active
+            .as_deref()
+            .unwrap_or(DEFAULT_DNS_ACTIVE)
+            .to_string();
+        dns["final"] = serde_json::Value::String(active);
+    }
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
         if let Some(arr) = outbounds.as_array_mut() {
             arr.extend(
@@ -2197,16 +2416,45 @@ fn get_config_template() -> serde_json::Value {
         "log": {"disabled": false, "timestamp": true, "level": "info"},
         "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262", "access_control_allow_origin": ["*"]}},
         "dns": {
-            "final": "cloudflare",
+            "final": DEFAULT_DNS_ACTIVE,
             "strategy": "prefer_ipv4",
             "independent_cache": true,
             "servers": [
-                {"tag": "cloudflare", "address": "1.1.1.1", "detour": "_dns"},
-                {"tag": "google", "address": "8.8.8.8", "detour": "_dns"},
-                {"tag": "dns-direct", "address": "223.5.5.5", "detour": "direct"},
-                {"tag": "alidns", "address": "https://dns.alidns.com/dns-query", "address_resolver": "dns-direct", "detour": "direct"},
-                {"tag": "tencent", "address": "https://doh.pub/dns-query", "address_resolver": "dns-direct", "detour": "direct"},
-                {"tag": "114", "address": "114.114.114.114", "detour": "direct"}
+                {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53, "detour": "direct"},
+                {"type": "udp", "tag": "114", "server": "114.114.114.114", "server_port": 53, "detour": "direct"},
+                {
+                    "type": "https",
+                    "tag": "doh-cf",
+                    "server": "1.1.1.1",
+                    "server_port": 443,
+                    "path": "/dns-query",
+                    "headers": {"Host": "dns.cloudflare.com"},
+                    "tls": {"enabled": true, "server_name": "dns.cloudflare.com", "insecure": false},
+                    "detour": "_dns",
+                    "connect_timeout": "2s"
+                },
+                {
+                    "type": "https",
+                    "tag": "doh-google",
+                    "server": "8.8.8.8",
+                    "server_port": 443,
+                    "path": "/dns-query",
+                    "headers": {"Host": "dns.google"},
+                    "tls": {"enabled": true, "server_name": "dns.google", "insecure": false},
+                    "detour": "_dns",
+                    "connect_timeout": "2s"
+                },
+                {
+                    "type": "https",
+                    "tag": "doh-quad9",
+                    "server": "9.9.9.9",
+                    "server_port": 443,
+                    "path": "/dns-query",
+                    "headers": {"Host": "dns.quad9.net"},
+                    "tls": {"enabled": true, "server_name": "dns.quad9.net", "insecure": false},
+                    "detour": "_dns",
+                    "connect_timeout": "2s"
+                }
             ]
         },
         "inbounds": [
@@ -2220,7 +2468,7 @@ fn get_config_template() -> serde_json::Value {
         "route": {
             "final": "proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": "alidns",
+            "default_domain_resolver": "dns-direct",
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
@@ -2676,6 +2924,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 password: None,
                 selections: HashMap::new(),
                 nodes: vec![],
+                dns_active: None,
+                dns_candidates: None,
+                dns_check_interval_ms: None,
+                dns_fail_threshold: None,
+                dns_cooldown_ms: None,
             },
             true,
         ),
@@ -2737,6 +2990,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         node_type_by_tag: Mutex::new(node_type_by_tag),
         setup_required: AtomicBool::new(setup_required),
     });
+
+    // DNS health monitor (best-effort). It updates config.dns_active and restarts sing-box when needed.
+    {
+        let state_clone = app_state.clone();
+        tokio::spawn(async move { dns_health_monitor(state_clone).await });
+    }
 
 
 
