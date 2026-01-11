@@ -2617,8 +2617,8 @@ fn get_config_template() -> serde_json::Value {
             "strategy": "prefer_ipv4",
             "independent_cache": true,
             "servers": [
-                {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53, "detour": "direct"},
-                {"type": "udp", "tag": "114", "server": "114.114.114.114", "server_port": 53, "detour": "direct"},
+                {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53},
+                {"type": "udp", "tag": "114", "server": "114.114.114.114", "server_port": 53},
                 {
                     "type": "https",
                     "tag": "doh-cf",
