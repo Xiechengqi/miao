@@ -574,31 +574,36 @@ async fn clash_get_proxies() -> Result<Json<ApiResponse<serde_json::Value>>, (St
     Ok(Json(ApiResponse::success("Clash proxies", json)))
 }
 
+async fn clash_switch_selector(
+    client: &reqwest::Client,
+    group: &str,
+    name: &str,
+) -> Result<(), String> {
+    let resp = client
+        .put(format!(
+            "{}/proxies/{}",
+            CLASH_HTTP_BASE,
+            percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .json(&ClashSwitchRequest {
+            name: name.to_string(),
+        })
+        .send()
+        .await
+        .map_err(|e| format!("Clash API request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Clash API returned {}", resp.status()));
+    }
+    Ok(())
+}
+
 async fn clash_switch_proxy(
     State(state): State<Arc<AppState>>,
     Path(group): Path<String>,
     Json(req): Json<ClashSwitchRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     let client = reqwest::Client::new();
-    let clash_switch = |group: &str, name: &str| async {
-        let resp = client
-            .put(format!(
-                "{}/proxies/{}",
-                CLASH_HTTP_BASE,
-                percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
-            ))
-            .json(&ClashSwitchRequest {
-                name: name.to_string(),
-            })
-            .send()
-            .await
-            .map_err(|e| format!("Clash API request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("Clash API returned {}", resp.status()));
-        }
-        Ok::<(), String>(())
-    };
 
     let previous_proxy_selection = if group == "proxy" {
         let config = state.config.lock().await;
@@ -607,7 +612,7 @@ async fn clash_switch_proxy(
         None
     };
 
-    clash_switch(&group, &req.name)
+    clash_switch_selector(&client, &group, &req.name)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(e))))?;
 
@@ -621,14 +626,16 @@ async fn clash_switch_proxy(
                 .unwrap_or(false)
         };
         let target = if is_ssh { "direct" } else { "proxy" };
-        match clash_switch("_dns", target).await {
+        match clash_switch_selector(&client, "_dns", target).await {
             Ok(()) => {
                 dns_selection = Some(target.to_string());
             }
             Err(e) => {
                 if is_ssh {
                     if let Some(previous) = previous_proxy_selection {
-                        if let Err(rollback_err) = clash_switch("proxy", &previous).await {
+                        if let Err(rollback_err) =
+                            clash_switch_selector(&client, "proxy", &previous).await
+                        {
                             eprintln!("Failed to rollback proxy selector: {}", rollback_err);
                         }
                     }
