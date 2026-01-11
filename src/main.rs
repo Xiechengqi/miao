@@ -124,6 +124,7 @@ struct AppState {
     sub_files: Mutex<Vec<SubFileStatus>>,
     sub_dir_error: Mutex<Option<String>>,
     node_type_by_tag: Mutex<HashMap<String, String>>,
+    dns_monitor: Mutex<DnsMonitorState>,
     setup_required: AtomicBool,
 }
 
@@ -1735,6 +1736,134 @@ async fn test_node(
     }
 }
 
+async fn get_dns_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let (active, candidates, interval_ms, fail_threshold, cooldown_ms) = {
+        let config = state.config.lock().await;
+        (
+            config
+                .dns_active
+                .clone()
+                .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
+            config
+                .dns_candidates
+                .clone()
+                .unwrap_or_else(default_dns_candidates),
+            config.dns_check_interval_ms.unwrap_or(30_000),
+            config.dns_fail_threshold.unwrap_or(3),
+            config.dns_cooldown_ms.unwrap_or(300_000),
+        )
+    };
+
+    let now = Instant::now();
+    let monitor = state.dns_monitor.lock().await;
+    let last_check_secs_ago = monitor
+        .last_check_at
+        .map(|t| now.saturating_duration_since(t).as_secs());
+
+    let mut health: HashMap<String, DnsHealthPublic> = HashMap::new();
+    for tag in candidates.iter() {
+        let entry = monitor.health.get(tag).cloned().unwrap_or_default();
+        let cooldown_remaining_secs = entry
+            .cooldown_until
+            .and_then(|t| t.checked_duration_since(now).map(|d| d.as_secs()))
+            .unwrap_or(0);
+        let last_checked_secs_ago = entry
+            .last_checked_at
+            .map(|t| now.saturating_duration_since(t).as_secs());
+        health.insert(
+            tag.clone(),
+            DnsHealthPublic {
+                ok: entry.ok,
+                failures: entry.failures,
+                cooldown_remaining_secs,
+                last_error: entry.last_error,
+                last_checked_secs_ago,
+            },
+        );
+    }
+
+    Ok(Json(ApiResponse::success(
+        "DNS status",
+        DnsStatusResponse {
+            active,
+            candidates,
+            interval_ms,
+            fail_threshold,
+            cooldown_ms,
+            health,
+            last_check_secs_ago,
+        },
+    )))
+}
+
+async fn check_dns_now(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let (candidates, fail_threshold, cooldown_ms) = {
+        let config = state.config.lock().await;
+        (
+            config
+                .dns_candidates
+                .clone()
+                .unwrap_or_else(default_dns_candidates),
+            config.dns_fail_threshold.unwrap_or(3),
+            config.dns_cooldown_ms.unwrap_or(300_000),
+        )
+    };
+    let _ = run_dns_checks(
+        &state,
+        &candidates,
+        fail_threshold,
+        cooldown_ms,
+        Duration::from_millis(2_500),
+    )
+    .await;
+    get_dns_status(State(state)).await
+}
+
+async fn switch_dns_active(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DnsSwitchRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let candidates = {
+        let config = state.config.lock().await;
+        config
+            .dns_candidates
+            .clone()
+            .unwrap_or_else(default_dns_candidates)
+    };
+    if !candidates.iter().any(|c| c == &req.tag) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Unknown DNS tag")),
+        ));
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        config.dns_active = Some(req.tag.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    if is_sing_running().await {
+        regenerate_and_restart(state.clone()).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+            )
+        })?;
+    }
+
+    Ok(Json(ApiResponse::success_no_data("DNS switched")))
+}
+
 // ============================================================================
 // Internal Functions
 // ============================================================================
@@ -1793,6 +1922,46 @@ struct DohCandidate {
     host: &'static str,
     ip: &'static str,
     path: &'static str,
+}
+
+#[derive(Clone, Default)]
+struct DnsMonitorState {
+    health: HashMap<String, DnsHealthEntry>,
+    last_check_at: Option<Instant>,
+}
+
+#[derive(Clone, Default)]
+struct DnsHealthEntry {
+    ok: bool,
+    failures: u32,
+    cooldown_until: Option<Instant>,
+    last_error: Option<String>,
+    last_checked_at: Option<Instant>,
+}
+
+#[derive(Serialize)]
+struct DnsStatusResponse {
+    active: String,
+    candidates: Vec<String>,
+    interval_ms: u64,
+    fail_threshold: u32,
+    cooldown_ms: u64,
+    health: HashMap<String, DnsHealthPublic>,
+    last_check_secs_ago: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct DnsHealthPublic {
+    ok: bool,
+    failures: u32,
+    cooldown_remaining_secs: u64,
+    last_error: Option<String>,
+    last_checked_secs_ago: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DnsSwitchRequest {
+    tag: String,
 }
 
 fn default_dns_candidates() -> Vec<String> {
@@ -1892,12 +2061,70 @@ async fn is_sing_running() -> bool {
     }
 }
 
-async fn dns_health_monitor(state: Arc<AppState>) {
-    let mut failures: HashMap<String, u32> = HashMap::new();
-    let mut cooldown_until: HashMap<String, Instant> = HashMap::new();
-
+async fn run_dns_checks(
+    state: &Arc<AppState>,
+    candidates: &[String],
+    fail_threshold: u32,
+    cooldown_ms: u64,
+    timeout: Duration,
+) -> HashMap<String, bool> {
     let candidate_map = doh_candidates_by_tag();
+    let now = Instant::now();
 
+    let mut healthy: HashMap<String, bool> = HashMap::new();
+    let mut monitor = state.dns_monitor.lock().await;
+    monitor.last_check_at = Some(now);
+
+    for tag in candidates.iter() {
+        let entry = monitor.health.entry(tag.clone()).or_default();
+        entry.last_checked_at = Some(now);
+
+        if let Some(until) = entry.cooldown_until {
+            if until > now {
+                entry.ok = false;
+                healthy.insert(tag.clone(), false);
+                continue;
+            }
+        }
+
+        if tag == "dns-direct" {
+            entry.ok = true;
+            entry.failures = 0;
+            entry.last_error = None;
+            healthy.insert(tag.clone(), true);
+            continue;
+        }
+
+        if let Some(c) = candidate_map.get(tag.as_str()) {
+            match check_doh(c, timeout).await {
+                Ok(()) => {
+                    entry.ok = true;
+                    entry.failures = 0;
+                    entry.cooldown_until = None;
+                    entry.last_error = None;
+                    healthy.insert(tag.clone(), true);
+                }
+                Err(e) => {
+                    entry.ok = false;
+                    entry.failures = entry.failures.saturating_add(1);
+                    entry.last_error = Some(e);
+                    if entry.failures >= fail_threshold {
+                        entry.cooldown_until = Some(Instant::now() + Duration::from_millis(cooldown_ms));
+                    }
+                    healthy.insert(tag.clone(), false);
+                }
+            }
+        } else {
+            entry.ok = false;
+            entry.last_error = Some("Unknown DNS candidate".to_string());
+            healthy.insert(tag.clone(), false);
+        }
+    }
+
+    healthy
+}
+
+async fn dns_health_monitor(state: Arc<AppState>) {
     loop {
         let (candidates, interval_ms, fail_threshold, cooldown_ms, active) = {
             let config = state.config.lock().await;
@@ -1916,44 +2143,14 @@ async fn dns_health_monitor(state: Arc<AppState>) {
             )
         };
 
-        // Only one check per interval; keep it lightweight.
-        let timeout = Duration::from_millis(2_500);
-        let now = Instant::now();
-
-        let mut healthy: HashMap<String, bool> = HashMap::new();
-        for tag in candidates.iter() {
-            if let Some(until) = cooldown_until.get(tag) {
-                if *until > now {
-                    healthy.insert(tag.clone(), false);
-                    continue;
-                }
-            }
-
-            if let Some(c) = candidate_map.get(tag.as_str()) {
-                match check_doh(c, timeout).await {
-                    Ok(()) => {
-                        failures.insert(tag.clone(), 0);
-                        healthy.insert(tag.clone(), true);
-                    }
-                    Err(_e) => {
-                        let n = failures.get(tag).copied().unwrap_or(0) + 1;
-                        failures.insert(tag.clone(), n);
-                        if n >= fail_threshold {
-                            cooldown_until.insert(
-                                tag.clone(),
-                                Instant::now() + Duration::from_millis(cooldown_ms),
-                            );
-                        }
-                        healthy.insert(tag.clone(), false);
-                    }
-                }
-            } else if tag == "dns-direct" {
-                // Always keep a direct fallback candidate available.
-                healthy.insert(tag.clone(), true);
-            } else {
-                healthy.insert(tag.clone(), false);
-            }
-        }
+        let healthy = run_dns_checks(
+            &state,
+            &candidates,
+            fail_threshold,
+            cooldown_ms,
+            Duration::from_millis(2_500),
+        )
+        .await;
 
         let mut desired = active.clone();
         if !healthy.get(&active).copied().unwrap_or(false) {
@@ -2988,6 +3185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sub_files: Mutex::new(loaded_subs.files.clone()),
         sub_dir_error: Mutex::new(loaded_subs.dir_error.clone()),
         node_type_by_tag: Mutex::new(node_type_by_tag),
+        dns_monitor: Mutex::new(DnsMonitorState::default()),
         setup_required: AtomicBool::new(setup_required),
     });
 
@@ -3026,6 +3224,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Use a standalone endpoint to avoid colliding with node tags (e.g. tag == "test")
         .route("/api/node-test", post(test_node))
         .route("/api/nodes/{tag}", get(get_node).put(update_node))
+        .route("/api/dns/status", get(get_dns_status))
+        .route("/api/dns/check", post(check_dns_now))
+        .route("/api/dns/switch", post(switch_dns_active))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
