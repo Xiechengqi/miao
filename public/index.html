@@ -1647,6 +1647,14 @@
                                     <span v-if="node.sni"> (SNI: {{ node.sni }})</span>
                                 </div>
                             </div>
+                            <button class="btn-custom btn-sm-custom" @click="testManualNode(node)"
+                                :disabled="loading" title="测试节点">
+                                <i class="bi bi-speedometer2"></i>
+                            </button>
+                            <button class="btn-custom btn-sm-custom" @click="openEditNode(node.tag)"
+                                :disabled="loading" title="编辑节点">
+                                <i class="bi bi-pencil-square"></i>
+                            </button>
                             <button class="btn-custom btn-delete btn-sm-custom" @click="confirmDeleteNode(node.tag)"
                                 :disabled="loading">
                                 <i class="bi bi-trash"></i>
@@ -1670,7 +1678,7 @@
                     <div class="modal-content">
                         <div class="modal-title">
                             <i class="bi bi-plus-circle"></i>
-                            添加节点
+                            {{ editingTag ? '编辑节点' : '添加节点' }}
                             <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="showNodeModal = false">
                                 <i class="bi bi-x-lg"></i>
                             </button>
@@ -1730,7 +1738,8 @@
                             </div>
                             <div class="form-group">
                                 <label class="form-label">密码</label>
-                                <input type="text" class="form-input" v-model="newNode.password" placeholder="密码">
+                                <input type="text" class="form-input" v-model="newNode.password"
+                                    :placeholder="editingTag ? '留空保持不变' : '密码'">
                             </div>
                         </div>
 
@@ -1742,11 +1751,19 @@
                             </div>
                         </div>
 
-                        <button class="btn-custom btn-add" @click="addNode" :disabled="loading || !canAddNode"
-                            style="width: 100%; margin-top: 0.5rem;">
-                            <i class="bi bi-plus-lg"></i>
-                            添加 {{ nodeType === 'hysteria2' ? 'Hysteria2' : nodeType === 'anytls' ? 'AnyTLS' : nodeType === 'ss' ? 'Shadowsocks' : 'SSH' }} 节点
-                        </button>
+                        <div class="form-row" style="gap: 0.5rem;">
+                            <button class="btn-custom btn-secondary-custom" @click="testNodeFromModal"
+                                :disabled="loading || !canTestNode" style="flex: 1;">
+                                <i class="bi bi-wifi"></i>
+                                测试
+                            </button>
+                            <button class="btn-custom btn-add" @click="submitNode" :disabled="loading || !canSubmitNode"
+                                style="flex: 1;">
+                                <i class="bi" :class="editingTag ? 'bi-check-lg' : 'bi-plus-lg'"></i>
+                                {{ editingTag ? '保存' : '添加' }}
+                                {{ nodeType === 'hysteria2' ? 'Hysteria2' : nodeType === 'anytls' ? 'AnyTLS' : nodeType === 'ss' ? 'Shadowsocks' : 'SSH' }}
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -1870,6 +1887,7 @@
 	                const showNodeModal = ref(false);
 	                const nodeType = ref('hysteria2');
                     const portTouched = ref(false);
+                    const editingTag = ref(null);
 
                 // Clash API 状态
                 const proxies = ref({});
@@ -1927,6 +1945,17 @@
                     return newNode.value.tag && newNode.value.server && newNode.value.server_port && newNode.value.password;
                 });
 
+                const canTestNode = computed(() => {
+                    return newNode.value.server && newNode.value.server_port;
+                });
+
+                const canSubmitNode = computed(() => {
+                    if (editingTag.value) {
+                        return newNode.value.tag && newNode.value.server && newNode.value.server_port;
+                    }
+                    return canAddNode.value;
+                });
+
                 // 过滤只显示 selector 类型的代理组
                 const selectorGroups = computed(() => {
                     const groups = {};
@@ -1947,6 +1976,7 @@
 
                 const openNodeModal = () => {
                     portTouched.value = false;
+                    editingTag.value = null;
                     showNodeModal.value = true;
                 };
 
@@ -2414,16 +2444,18 @@
 	                };
 
                 // 节点管理
-                const addNode = async () => {
-                    if (!canAddNode.value) return;
+                const submitNode = async () => {
+                    if (!canSubmitNode.value) return;
                     try {
                         const nodeData = {
                             node_type: nodeType.value,
                             tag: newNode.value.tag.trim(),
                             server: newNode.value.server.trim(),
                             server_port: newNode.value.server_port,
-                            password: newNode.value.password.trim(),
                         };
+                        if (!editingTag.value || newNode.value.password.trim()) {
+                            nodeData.password = newNode.value.password.trim();
+                        }
                         // Add type-specific fields
                         if (nodeType.value === 'ss') {
                             nodeData.cipher = newNode.value.cipher;
@@ -2433,13 +2465,71 @@
                             const sni = newNode.value.sni?.trim();
                             if (sni) nodeData.sni = sni;
                         }
-                        await apiCall('nodes', 'POST', nodeData, 'addNode');
-                        showToast('节点已添加', 'success');
+                        if (editingTag.value) {
+                            await apiFetch(`/api/nodes/${encodeURIComponent(editingTag.value)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(nodeData)
+                            });
+                            showToast('节点已更新', 'success');
+                        } else {
+                            await apiCall('nodes', 'POST', nodeData, 'addNode');
+                            showToast('节点已添加', 'success');
+                        }
                         delays.value = {};
                         newNode.value = { tag: '', server: '', server_port: nodeType.value === 'ssh' ? 22 : 443, user: '', password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' };
                         portTouched.value = false;
                         showNodeModal.value = false;
+                        editingTag.value = null;
                         await fetchNodes();
+                    } catch (e) { }
+                };
+
+                const openEditNode = async (tag) => {
+                    try {
+                        const data = await apiFetch(`/api/nodes/${encodeURIComponent(tag)}`);
+                        const d = data.data;
+                        if (!d) throw new Error('请求失败');
+                        editingTag.value = tag;
+                        portTouched.value = false;
+                        setNodeType(d.node_type === 'shadowsocks' ? 'ss' : d.node_type);
+                        newNode.value = {
+                            tag: d.tag || '',
+                            server: d.server || '',
+                            server_port: d.server_port || (d.node_type === 'ssh' ? 22 : 443),
+                            user: d.user || 'root',
+                            password: '',
+                            sni: d.sni || '',
+                            cipher: d.cipher || '2022-blake3-aes-128-gcm',
+                        };
+                        showNodeModal.value = true;
+                    } catch (e) {
+                        showToast(e.message || '打开编辑失败', 'error');
+                    }
+                };
+
+                const testNodeFromModal = async () => {
+                    try {
+                        const body = {
+                            server: newNode.value.server.trim(),
+                            server_port: newNode.value.server_port,
+                            timeout_ms: 3000,
+                        };
+                        const data = await apiCall('nodes/test', 'POST', body, 'testNode');
+                        showToast(`连接成功 (${data.data.latency_ms}ms)`, 'success');
+                    } catch (e) { }
+                };
+
+                const testManualNode = async (node) => {
+                    try {
+                        if (status.value.running) {
+                            await testDelay(node.tag);
+                            const d = delays.value[node.tag];
+                            showToast(d > 0 ? `延迟 ${d}ms` : '测试超时', d > 0 ? 'success' : 'error');
+                            return;
+                        }
+                        const data = await apiCall('nodes/test', 'POST', { server: node.server, server_port: node.server_port, timeout_ms: 3000 }, 'testNode');
+                        showToast(`连接成功 (${data.data.latency_ms}ms)`, 'success');
                     } catch (e) { }
                 };
 
@@ -2628,8 +2718,9 @@
 	                    // 状态
 	                    status, subDir, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 	                    reloadSubFiles,
-	                    newNode, canAddNode, showNodeModal, nodeType, setNodeType,
+	                    newNode, canAddNode, canTestNode, canSubmitNode, showNodeModal, nodeType, setNodeType,
                         portTouched, openNodeModal,
+                        editingTag,
 	                    proxies, delays, traffic, testingGroup, selectorGroups,
 	                    // 日志相关
 	                    logs, logContainer, logAutoScroll, showLogs, clearLogs,
@@ -2646,7 +2737,7 @@
                     // 其他
                     showToast, getToastIcon,
                     startService, stopService, toggleService,
-	                    addNode, deleteNode, confirmDeleteNode,
+	                    submitNode, openEditNode, testNodeFromModal, testManualNode, deleteNode, confirmDeleteNode,
                     switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
                     formatUptime
                 };

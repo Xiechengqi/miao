@@ -295,6 +295,26 @@ struct NodeRequest {
 }
 
 #[derive(Deserialize)]
+struct NodeUpdateRequest {
+    #[serde(default)]
+    node_type: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    server_port: Option<u16>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    sni: Option<String>,
+    #[serde(default)]
+    cipher: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct DeleteNodeRequest {
     tag: String,
 }
@@ -306,6 +326,33 @@ struct NodeInfo {
     server_port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     sni: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NodeDetailResponse {
+    node_type: String,
+    tag: String,
+    server: String,
+    server_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sni: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cipher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NodeTestRequest {
+    server: String,
+    server_port: u16,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct NodeTestResponse {
+    latency_ms: u128,
 }
 
 // ============================================================================
@@ -1230,6 +1277,65 @@ async fn get_nodes(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<N
     Json(ApiResponse::success("Nodes loaded", nodes))
 }
 
+/// GET /api/nodes/{tag} - Get a manual node detail (without password)
+async fn get_node(
+    State(state): State<Arc<AppState>>,
+    Path(tag): Path<String>,
+) -> Result<Json<ApiResponse<NodeDetailResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let config = state.config.lock().await;
+    for node_str in &config.nodes {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) else {
+            continue;
+        };
+        if v.get("tag").and_then(|t| t.as_str()) != Some(tag.as_str()) {
+            continue;
+        }
+
+        let node_type = v
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let server = v
+            .get("server")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let server_port = v
+            .get("server_port")
+            .and_then(|p| p.as_u64())
+            .unwrap_or(0) as u16;
+        let sni = v
+            .get("tls")
+            .and_then(|t| t.get("server_name"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let cipher = v
+            .get("method")
+            .and_then(|m| m.as_str())
+            .map(|m| m.to_string());
+        let user = v
+            .get("user")
+            .and_then(|u| u.as_str())
+            .map(|u| u.to_string());
+
+        return Ok(Json(ApiResponse::success(
+            "Node detail",
+            NodeDetailResponse {
+                node_type,
+                tag,
+                server,
+                server_port,
+                sni,
+                cipher,
+                user,
+            },
+        )));
+    }
+
+    Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Node not found"))))
+}
+
 /// POST /api/nodes - Add a node (Hysteria2/AnyTLS/Shadowsocks)
 async fn add_node(
     State(state): State<Arc<AppState>>,
@@ -1343,6 +1449,201 @@ async fn add_node(
     Ok(Json(ApiResponse::success_no_data("Node added, restarting...")))
 }
 
+/// PUT /api/nodes/{tag} - Update a manual node by tag (password optional)
+async fn update_node(
+    State(state): State<Arc<AppState>>,
+    Path(original_tag): Path<String>,
+    Json(req): Json<NodeUpdateRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+
+        let mut found_index: Option<usize> = None;
+        let mut existing: Option<serde_json::Value> = None;
+        for (idx, node_str) in config.nodes.iter().enumerate() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+                if v.get("tag").and_then(|t| t.as_str()) == Some(original_tag.as_str()) {
+                    found_index = Some(idx);
+                    existing = Some(v);
+                    break;
+                }
+            }
+        }
+        let Some(found_index) = found_index else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Node not found"))));
+        };
+        let existing = existing.unwrap_or(serde_json::Value::Null);
+
+        let existing_type = existing
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("hysteria2");
+        let node_type = req.node_type.as_deref().unwrap_or(existing_type);
+
+        let new_tag = req
+            .tag
+            .clone()
+            .unwrap_or_else(|| original_tag.clone());
+        if new_tag != original_tag {
+            for (idx, node_str) in config.nodes.iter().enumerate() {
+                if idx == found_index {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(node_str) {
+                    if v.get("tag").and_then(|t| t.as_str()) == Some(new_tag.as_str()) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiResponse::error("Node with this tag already exists")),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let server = req
+            .server
+            .clone()
+            .or_else(|| {
+                existing
+                    .get("server")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        let server_port = req
+            .server_port
+            .or_else(|| existing.get("server_port").and_then(|p| p.as_u64()).map(|p| p as u16))
+            .unwrap_or(0);
+
+        let password = req.password.clone().and_then(|p| {
+            if p.is_empty() {
+                None
+            } else {
+                Some(p)
+            }
+        });
+
+        let existing_password = existing
+            .get("password")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+        let password = password.unwrap_or(existing_password);
+
+        let node_json = match node_type {
+            "ssh" => {
+                let mut node = serde_json::Map::new();
+                node.insert("type".to_string(), serde_json::Value::String("ssh".to_string()));
+                node.insert("tag".to_string(), serde_json::Value::String(new_tag));
+                node.insert("server".to_string(), serde_json::Value::String(server));
+                node.insert(
+                    "server_port".to_string(),
+                    serde_json::Value::Number(u64::from(if server_port == 0 { 22 } else { server_port }).into()),
+                );
+                let user = req.user.clone().and_then(|u| if u.is_empty() { None } else { Some(u) }).or_else(|| {
+                    existing.get("user").and_then(|u| u.as_str()).map(|u| u.to_string())
+                });
+                if let Some(user) = user {
+                    node.insert("user".to_string(), serde_json::Value::String(user));
+                }
+                node.insert("password".to_string(), serde_json::Value::String(password));
+                serde_json::to_string(&serde_json::Value::Object(node))
+            }
+            "anytls" => {
+                let sni = req
+                    .sni
+                    .clone()
+                    .or_else(|| {
+                        existing
+                            .get("tls")
+                            .and_then(|t| t.get("server_name"))
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                    });
+                let node = AnyTls {
+                    outbound_type: "anytls".to_string(),
+                    tag: new_tag,
+                    server,
+                    server_port,
+                    password,
+                    tls: Tls {
+                        enabled: true,
+                        server_name: sni,
+                        insecure: true,
+                    },
+                };
+                serde_json::to_string(&node)
+            }
+            "ss" => {
+                let method = req
+                    .cipher
+                    .clone()
+                    .or_else(|| existing.get("method").and_then(|m| m.as_str()).map(|m| m.to_string()))
+                    .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string());
+                let node = Shadowsocks {
+                    outbound_type: "shadowsocks".to_string(),
+                    tag: new_tag,
+                    server,
+                    server_port,
+                    method,
+                    password,
+                };
+                serde_json::to_string(&node)
+            }
+            _ => {
+                let sni = req
+                    .sni
+                    .clone()
+                    .or_else(|| {
+                        existing
+                            .get("tls")
+                            .and_then(|t| t.get("server_name"))
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                    });
+                let node = Hysteria2 {
+                    outbound_type: "hysteria2".to_string(),
+                    tag: new_tag,
+                    server,
+                    server_port,
+                    password,
+                    up_mbps: existing.get("up_mbps").and_then(|v| v.as_u64()).unwrap_or(40) as u32,
+                    down_mbps: existing.get("down_mbps").and_then(|v| v.as_u64()).unwrap_or(350) as u32,
+                    tls: Tls {
+                        enabled: true,
+                        server_name: sni,
+                        insecure: true,
+                    },
+                };
+                serde_json::to_string(&node)
+            }
+        }
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to serialize node: {}", e))),
+            )
+        })?;
+
+        config.nodes[found_index] = node_json;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = regenerate_and_restart(state_clone).await {
+            eprintln!("Background regenerate failed: {}", e);
+        }
+    });
+
+    Ok(Json(ApiResponse::success_no_data("Node updated, restarting...")))
+}
+
 /// DELETE /api/nodes - Delete a node by tag
 async fn delete_node(
     State(state): State<Arc<AppState>>,
@@ -1383,6 +1684,41 @@ async fn delete_node(
     });
 
     Ok(Json(ApiResponse::success_no_data("Node deleted, restarting...")))
+}
+
+/// POST /api/nodes/test - Test a node connectivity (TCP connect only)
+async fn test_node(
+    Json(req): Json<NodeTestRequest>,
+) -> Result<Json<ApiResponse<NodeTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let timeout_ms = req.timeout_ms.unwrap_or(3000);
+    let addr = format!("{}:{}", req.server, req.server_port);
+
+    let started = Instant::now();
+    let connect = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await;
+
+    match connect {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Ok(Json(ApiResponse::success(
+                "Connected",
+                NodeTestResponse {
+                    latency_ms: started.elapsed().as_millis(),
+                },
+            )))
+        }
+        Ok(Err(e)) => Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ApiResponse::error(format!("Connect failed: {}", e))),
+        )),
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(ApiResponse::error("Connect timeout")),
+        )),
+    }
 }
 
 // ============================================================================
@@ -2426,6 +2762,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))
         .route("/api/nodes", delete(delete_node))
+        .route("/api/nodes/test", post(test_node))
+        .route("/api/nodes/{tag}", get(get_node))
+        .route("/api/nodes/{tag}", put(update_node))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
