@@ -2600,28 +2600,22 @@ async fn dns_health_monitor(state: Arc<AppState>) {
     }
 }
 
-async fn fetch_ip_info_via_3030(timeout: Duration) -> Result<IpCheckResponse, String> {
+async fn check_proxy_health_via_3030(timeout: Duration) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .build()
         .map_err(|e| format!("build reqwest client: {}", e))?;
 
     let resp = client
-        .get("http://3.0.3.0")
+        .get("https://3.0.3.0/ips")
         .send()
         .await
         .map_err(|e| format!("request failed: {}", e))?;
 
-    if !resp.status().is_success() {
+    if resp.status() != StatusCode::OK {
         return Err(format!("HTTP {}", resp.status()));
     }
-
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("read body failed: {}", e))?;
-
-    serde_json::from_str::<IpCheckResponse>(&text).map_err(|e| format!("parse JSON failed: {}", e))
+    Ok(())
 }
 
 fn proxy_should_failover(
@@ -2736,16 +2730,8 @@ async fn proxy_health_monitor(state: Arc<AppState>) {
 
         let timeout = Duration::from_millis(timeout_ms);
         let check_now = Instant::now();
-        let (ok, ip, location, err) = match fetch_ip_info_via_3030(timeout).await {
-            Ok(info) => {
-                let ip = Some(info.ip.clone());
-                let location = Some(info.location.clone());
-                if is_mainland_china(&info.location) {
-                    (false, ip, location, Some("Traffic appears to be using direct connection".to_string()))
-                } else {
-                    (true, ip, location, None)
-                }
-            }
+        let (ok, ip, location, err) = match check_proxy_health_via_3030(timeout).await {
+            Ok(()) => (true, None, None, None),
             Err(e) => (false, None, None, Some(e)),
         };
         record_proxy_check_result(&state, &active, check_now, ok, ip, location, err, window_size).await;
@@ -2785,16 +2771,8 @@ async fn proxy_health_monitor(state: Arc<AppState>) {
             sleep(Duration::from_millis(500)).await;
 
             let check_now = Instant::now();
-            let (ok, ip, location, err) = match fetch_ip_info_via_3030(timeout).await {
-                Ok(info) => {
-                    let ip = Some(info.ip.clone());
-                    let location = Some(info.location.clone());
-                    if is_mainland_china(&info.location) {
-                        (false, ip, location, Some("Traffic appears to be using direct connection".to_string()))
-                    } else {
-                        (true, ip, location, None)
-                    }
-                }
+            let (ok, ip, location, err) = match check_proxy_health_via_3030(timeout).await {
+                Ok(()) => (true, None, None, None),
                 Err(e) => (false, None, None, Some(e)),
             };
             record_proxy_check_result(&state, &candidate, check_now, ok, ip, location, err, window_size).await;
@@ -3065,40 +3043,13 @@ async fn start_sing_internal(
     for attempt in 1..=3 {
         println!("Connectivity check attempt {}/3...", attempt);
 
-        match client.get("http://3.0.3.0").send().await {
-            Ok(res) if res.status().is_success() => {
-                match res.text().await {
-                    Ok(text) => {
-                        // Try to parse JSON response
-                        if let Ok(info) = serde_json::from_str::<IpCheckResponse>(&text) {
-                            if is_mainland_china(&info.location) {
-                                println!("⚠️  Warning: Traffic appears to be using direct connection");
-                                println!("   Current IP: {}", info.ip);
-                                println!("   Location: {}", info.location);
-                                println!("   This may indicate proxy is not working properly.");
-                            } else {
-                                println!("✅ Connectivity check passed!");
-                                println!("   Current IP: {}", info.ip);
-                                println!("   Location: {}", info.location);
-                            }
-                        } else {
-                            println!("✅ Network is reachable (could not parse response)");
-                        }
-                        // Always return Ok, don't kill sing-box
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("✅ Network is reachable (could not read body: {})", e);
-                        return Ok(());
-                    }
-                }
+        match client.get("https://3.0.3.0/ips").send().await {
+            Ok(res) if res.status() == StatusCode::OK => {
+                println!("✅ Connectivity check passed!");
+                return Ok(());
             }
-            Ok(res) => {
-                println!("Connectivity check: unexpected status {}", res.status());
-            }
-            Err(e) => {
-                println!("Connectivity check failed: {}", e);
-            }
+            Ok(res) => println!("Connectivity check: unexpected status {}", res.status()),
+            Err(e) => println!("Connectivity check failed: {}", e),
         }
 
         if attempt < 3 {

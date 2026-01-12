@@ -45,7 +45,7 @@ nodes:
 
 # Proxy multi-select & auto failover (optional)
 # Selected candidate nodes (ordered by priority). When there are 2+ candidates,
-# miao will periodically check http://3.0.3.0 and fail over on repeated failures.
+# miao will periodically check https://3.0.3.0/ips and fail over on repeated failures.
 # proxy_pool:
 #   - "节点A"
 #   - "节点B"
