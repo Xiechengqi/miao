@@ -2115,6 +2115,106 @@
 	                let logsWs = null;
 	                let logId = 0;
 
+	                // localStorage 工具函数
+	                const STORAGE_KEYS = {
+	                    TOKEN: 'miao_token',
+	                    CONNECTIVITY: 'miao_connectivity',
+	                    DELAYS: 'miao_delays',
+	                };
+	                const CACHE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 小时
+
+	                // 保存连通性测试结果
+	                const saveConnectivityResults = () => {
+	                    try {
+	                        const data = {
+	                            version: 1,
+	                            timestamp: Date.now(),
+	                            results: connectivityResults.value
+	                        };
+	                        localStorage.setItem(STORAGE_KEYS.CONNECTIVITY, JSON.stringify(data));
+	                    } catch (e) {
+	                        console.warn('Failed to save connectivity results:', e);
+	                    }
+	                };
+
+	                // 加载连通性测试结果
+	                const loadConnectivityResults = () => {
+	                    try {
+	                        const raw = localStorage.getItem(STORAGE_KEYS.CONNECTIVITY);
+	                        if (!raw) return false;
+
+	                        const data = JSON.parse(raw);
+
+	                        if (data.version !== 1) {
+	                            localStorage.removeItem(STORAGE_KEYS.CONNECTIVITY);
+	                            return false;
+	                        }
+
+	                        if (Date.now() - data.timestamp > CACHE_EXPIRY_MS) {
+	                            localStorage.removeItem(STORAGE_KEYS.CONNECTIVITY);
+	                            return false;
+	                        }
+
+	                        connectivityResults.value = data.results || {};
+	                        return true;
+	                    } catch (e) {
+	                        console.warn('Failed to load connectivity results:', e);
+	                        localStorage.removeItem(STORAGE_KEYS.CONNECTIVITY);
+	                        return false;
+	                    }
+	                };
+
+	                // 保存节点测速结果
+	                const saveDelays = () => {
+	                    try {
+	                        const data = {
+	                            version: 1,
+	                            timestamp: Date.now(),
+	                            delays: delays.value
+	                        };
+	                        localStorage.setItem(STORAGE_KEYS.DELAYS, JSON.stringify(data));
+	                    } catch (e) {
+	                        console.warn('Failed to save delays:', e);
+	                    }
+	                };
+
+	                // 加载节点测速结果
+	                const loadDelays = () => {
+	                    try {
+	                        const raw = localStorage.getItem(STORAGE_KEYS.DELAYS);
+	                        if (!raw) return false;
+
+	                        const data = JSON.parse(raw);
+
+	                        if (data.version !== 1) {
+	                            localStorage.removeItem(STORAGE_KEYS.DELAYS);
+	                            return false;
+	                        }
+
+	                        if (Date.now() - data.timestamp > CACHE_EXPIRY_MS) {
+	                            localStorage.removeItem(STORAGE_KEYS.DELAYS);
+	                            return false;
+	                        }
+
+	                        delays.value = data.delays || {};
+	                        return true;
+	                    } catch (e) {
+	                        console.warn('Failed to load delays:', e);
+	                        localStorage.removeItem(STORAGE_KEYS.DELAYS);
+	                        return false;
+	                    }
+	                };
+
+	                // 清除所有测速缓存
+	                const clearTestCache = () => {
+	                    try {
+	                        localStorage.removeItem(STORAGE_KEYS.CONNECTIVITY);
+	                        localStorage.removeItem(STORAGE_KEYS.DELAYS);
+	                    } catch (e) {
+	                        console.warn('Failed to clear test cache:', e);
+	                    }
+	                };
+
 	                // Clash API 已通过后端转发（/api/clash/*），避免浏览器直连 6262 绕过认证
 
                 // 计算属性
@@ -2290,6 +2390,7 @@
 	                // 登出处理
 	                const handleLogout = () => {
 	                    localStorage.removeItem('miao_token');
+	                    clearTestCache();
 	                    authenticated.value = false;
 	                    if (statusInterval) {
 	                        clearInterval(statusInterval);
@@ -2477,8 +2578,10 @@
 	                    try {
 	                        const resp = await apiFetch(`/api/clash/proxies/${encodeURIComponent(nodeName)}/delay?timeout=5000&url=http://www.gstatic.com/generate_204`);
 	                        delays.value[nodeName] = resp.data?.delay > 0 ? resp.data.delay : -1;
+	                        saveDelays();
 	                    } catch (e) {
 	                        delays.value[nodeName] = -1;
+	                        saveDelays();
 	                    }
 	                };
 
@@ -2650,6 +2753,7 @@
                     try {
                         await apiCall('service/stop', 'POST', null, 'stop');
                         delays.value = {};
+                        saveDelays();
                         traffic.value = {};
                         if (trafficWs) { trafficWs.close(); trafficWs = null; }
                         if (logsWs) { logsWs.close(); logsWs = null; }
@@ -2673,6 +2777,7 @@
 	                        await apiCall('sub-files/reload', 'POST', null, 'reloadSubFiles');
 	                        showToast('订阅文件已重载', 'success');
 	                        delays.value = {};
+	                        saveDelays();
 	                        await fetchSubFiles();
 	                    } catch (e) { }
 	                };
@@ -2711,6 +2816,7 @@
                             showToast('节点已添加', 'success');
                         }
                         delays.value = {};
+                        saveDelays();
                         newNode.value = { tag: '', server: '', server_port: nodeType.value === 'ssh' ? 22 : 443, user: '', password: '', sni: '', cipher: '2022-blake3-aes-128-gcm' };
                         portTouched.value = false;
                         showNodeModal.value = false;
@@ -2788,6 +2894,7 @@
                         await apiCall('nodes', 'DELETE', { tag }, 'deleteNode');
                         showToast('节点已删除', 'success');
                         delays.value = {};
+                        saveDelays();
                         await fetchNodes();
                     } catch (e) { }
                 };
@@ -2819,11 +2926,14 @@
                         const data = await res.json();
                         if (data.success && data.data) {
                             connectivityResults.value[site.name] = data.data;
+                            saveConnectivityResults();
                         } else {
                             connectivityResults.value[site.name] = { success: false };
+                            saveConnectivityResults();
                         }
                     } catch (e) {
                         connectivityResults.value[site.name] = { success: false };
+                        saveConnectivityResults();
                     }
                     currentTestingSite.value = null;
                 };
@@ -2854,6 +2964,7 @@
 
                     currentTestingSite.value = null;
                     testingConnectivity.value = false;
+                    saveConnectivityResults();
                 };
 
                 const getConnectivityClass = (siteName) => {
@@ -2926,6 +3037,10 @@
 
                 // 初始化应用数据
                 const initApp = async () => {
+                    // 加载缓存的测速数据
+                    loadConnectivityResults();
+                    loadDelays();
+
                     await fetchStatus();
                     await fetchDnsStatus();
                     await fetchSubFiles();
