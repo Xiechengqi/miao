@@ -41,7 +41,8 @@ password: admin
 
 订阅文件：
 
-- 默认从 `./sub` 目录加载（可通过启动参数 `--sub-dir <path>` 指定）
+- 默认从 `./sub` 目录加载（可通过启动参数 `--sub <path>` 指定）
+- `--sub <git_url>` 支持从 Git 仓库克隆到 `./sub`（启动时 clone；面板“重载”会先 `git pull` 同步一次）
 - 目录下的普通文件会按文件名字典序加载，重复条目按“后加载覆盖前加载”
 - 文件格式与之前的订阅链接解析格式一致（sing-box JSON / Clash YAML / SS URL 列表等）；解析失败会跳过该文件
 
@@ -58,7 +59,7 @@ nodes:
 ### 3. 运行
 
 ```bash
-sudo ./miao --sub-dir ./sub
+sudo ./miao --sub ./sub
 ```
 
 访问 `http://localhost:6161` 打开管理面板。

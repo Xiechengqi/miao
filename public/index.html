@@ -1530,7 +1530,7 @@
 		                        </button>
 		                    </form>
 		                    <p style="margin-top: 1rem; opacity: 0.9; font-size: 0.95rem;">
-		                        初始化完成后，将订阅文件放入 <code>sub/</code> 目录（或启动参数指定的目录），再在面板中点击“重载”。
+		                        初始化完成后，将订阅文件放入 <code>sub/</code> 目录（或启动参数 <code>--sub &lt;PATH&gt;</code> 指定的目录），再在面板中点击“重载”。也可使用 <code>--sub &lt;GIT_URL&gt;</code>，启动会克隆到 <code>sub/</code>，重载会先执行一次 <code>git pull</code> 同步。
 		                    </p>
 		                    <p v-if="setupError" class="login-error">{{ setupError }}</p>
 		                </div>
@@ -1785,6 +1785,15 @@
 
 	                        <div class="node-info" style="margin-bottom: 0.75rem;">
 	                            目录：<code>{{ subDir }}</code>
+	                        </div>
+	                        <div v-if="subSource" class="node-info" style="margin-bottom: 0.75rem;">
+	                            来源：
+	                            <span v-if="subSource.type === 'git'">
+	                                Git <code>{{ subSource.url }}</code>（重载会 <code>git pull</code>）
+	                            </span>
+	                            <span v-else>
+	                                路径 <code>{{ subSource.value }}</code>
+	                            </span>
 	                        </div>
 	                        <div v-if="subDirError" class="empty-state" style="padding: 0.75rem; margin-bottom: 0.75rem;">
 	                            <i class="bi bi-exclamation-triangle" style="font-size: 1.5rem; display: block; margin-bottom: 0.5rem;"></i>
@@ -2090,6 +2099,7 @@
 	                    const switchingDns = ref(false);
 	                    const proxyStatus = ref(null);
 		                const subDir = ref('');
+		                const subSource = ref(null);
 		                const subDirError = ref('');
 		                const subFiles = ref([]);
 	                const nodes = ref([]);
@@ -2837,6 +2847,7 @@
 		                        const data = await apiFetch('/api/sub-files');
 		                        if (data.data) {
 		                            subDir.value = data.data.sub_dir || '';
+		                            subSource.value = data.data.sub_source || null;
 		                            subFiles.value = data.data.files || [];
 		                            subDirError.value = data.data.error || '';
 		                        }
@@ -3198,7 +3209,7 @@
 		                    authenticated, loginPassword, loggingIn, loginError,
 	                    handleLogin, handleLogout,
 	                // 状态
-		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subDirError, subFiles, nodes, loading, loadingAction, toasts,
+		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 		                    proxyStatus,
 		                    reloadSubFiles,
 	                    newNode, canAddNode, canTestNode, canSubmitNode, showNodeModal, nodeType, setNodeType,

@@ -138,12 +138,26 @@ struct AppState {
     config: Mutex<Config>,
     sing_box_home: String,
     sub_dir: PathBuf,
+    sub_source: SubSource,
     sub_files: Mutex<Vec<SubFileStatus>>,
     sub_dir_error: Mutex<Option<String>>,
     node_type_by_tag: Mutex<HashMap<String, String>>,
     dns_monitor: Mutex<DnsMonitorState>,
     proxy_monitor: Mutex<ProxyMonitorState>,
     setup_required: AtomicBool,
+}
+
+#[derive(Clone)]
+enum SubSource {
+    Path { value: String },
+    Git { url: String },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum SubSourceResponse {
+    Path { value: String },
+    Git { url: String, workdir: String },
 }
 
 #[derive(Deserialize, Debug)]
@@ -298,6 +312,7 @@ struct SubFileStatus {
 #[derive(Serialize)]
 struct SubFilesResponse {
     sub_dir: String,
+    sub_source: SubSourceResponse,
     files: Vec<SubFileStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -1248,10 +1263,20 @@ async fn try_restart_systemd(unit: &str) -> Result<(), String> {
 async fn get_sub_files(State(state): State<Arc<AppState>>) -> Json<ApiResponse<SubFilesResponse>> {
     let files = state.sub_files.lock().await.clone();
     let error = state.sub_dir_error.lock().await.clone();
+    let sub_source = match &state.sub_source {
+        SubSource::Path { value } => SubSourceResponse::Path {
+            value: value.clone(),
+        },
+        SubSource::Git { url } => SubSourceResponse::Git {
+            url: url.clone(),
+            workdir: "sub".to_string(),
+        },
+    };
     Json(ApiResponse::success(
         "Subscription files loaded",
         SubFilesResponse {
             sub_dir: state.sub_dir.display().to_string(),
+            sub_source,
             files,
             error,
         },
@@ -2871,6 +2896,31 @@ async fn apply_saved_selections(
 /// Regenerate sing-box config and restart the service
 async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
     let config_clone = { state.config.lock().await.clone() };
+
+    if let SubSource::Git { .. } = &state.sub_source {
+        let out = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg("sub")
+            .arg("pull")
+            .arg("--ff-only")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git pull: {}", e))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(format!(
+                "Git sync failed (git pull --ff-only): {}",
+                if detail.is_empty() {
+                    out.status.to_string()
+                } else {
+                    detail
+                }
+            ));
+        }
+    }
+
     let loaded = load_subscription_dir(&state.sub_dir).await;
     {
         let mut sub_files = state.sub_files.lock().await;
@@ -3664,6 +3714,68 @@ async fn auth_middleware(
     Err(StatusCode::UNAUTHORIZED)
 }
 
+fn looks_like_git_url(value: &str) -> bool {
+    value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("ssh://")
+        || (value.starts_with("git@") && value.contains(':'))
+}
+
+async fn remove_path_if_exists(path: &StdPath) -> Result<(), String> {
+    let md = match tokio::fs::symlink_metadata(path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("Failed to stat {}: {}", path.display(), e)),
+    };
+
+    if md.is_dir() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(|e| format!("Failed to remove dir {}: {}", path.display(), e))?;
+    } else {
+        tokio::fs::remove_file(path)
+            .await
+            .map_err(|e| format!("Failed to remove file {}: {}", path.display(), e))?;
+    }
+    Ok(())
+}
+
+async fn prepare_sub_dir_from_git(url: &str) -> Result<(), String> {
+    let tmp = StdPath::new(".sub");
+    let final_dir = StdPath::new("sub");
+
+    remove_path_if_exists(tmp).await?;
+
+    let out = tokio::process::Command::new("git")
+        .arg("clone")
+        .arg(url)
+        .arg(".sub")
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git clone: {}", e))?;
+
+    if !out.status.success() {
+        let _ = remove_path_if_exists(tmp).await;
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(format!(
+            "Git clone failed: {}",
+            if detail.is_empty() {
+                out.status.to_string()
+            } else {
+                detail
+            }
+        ));
+    }
+
+    remove_path_if_exists(final_dir).await?;
+    tokio::fs::rename(tmp, final_dir)
+        .await
+        .map_err(|e| format!("Failed to move .sub -> sub: {}", e))?;
+    Ok(())
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -3682,7 +3794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!(
             "Miao - sing-box 管理器\n\n\
 用法:\n  {program} [OPTIONS]\n\n\
-选项:\n  --sub-dir <PATH>   订阅文件目录（默认 ./sub）\n  -h, --help         显示帮助并退出\n\n\
+选项:\n  --sub <PATH|GIT_URL>   订阅文件目录或 Git 仓库（默认 ./sub）\n  -h, --help             显示帮助并退出\n\n\
 说明:\n  - 配置文件为当前目录下的 ./config.yaml\n  - 正常运行需要 root 权限（--help 例外）",
             program = program_name
         );
@@ -3697,13 +3809,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // CLI args
     let mut sub_dir = PathBuf::from("sub");
+    let mut sub_source = SubSource::Path {
+        value: "sub".to_string(),
+    };
     let mut args = rest_args.into_iter();
     while let Some(arg) = args.next() {
-        if let Some(v) = arg.strip_prefix("--sub-dir=") {
-            sub_dir = PathBuf::from(v);
-        } else if arg == "--sub-dir" {
-            if let Some(v) = args.next() {
+        if let Some(v) = arg.strip_prefix("--sub=") {
+            if looks_like_git_url(v) {
+                prepare_sub_dir_from_git(v)
+                    .await
+                    .map_err(|e| format!("Failed to prepare subscription dir from git: {}", e))?;
+                sub_dir = PathBuf::from("sub");
+                sub_source = SubSource::Git { url: v.to_string() };
+            } else {
                 sub_dir = PathBuf::from(v);
+                sub_source = SubSource::Path {
+                    value: v.to_string(),
+                };
+            }
+        } else if arg == "--sub" {
+            if let Some(v) = args.next() {
+                if looks_like_git_url(&v) {
+                    prepare_sub_dir_from_git(&v)
+                        .await
+                        .map_err(|e| format!("Failed to prepare subscription dir from git: {}", e))?;
+                    sub_dir = PathBuf::from("sub");
+                    sub_source = SubSource::Git { url: v };
+                } else {
+                    sub_dir = PathBuf::from(&v);
+                    sub_source = SubSource::Path { value: v };
+                }
             }
         }
     }
@@ -3787,6 +3922,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config: Mutex::new(config.clone()),
         sing_box_home: sing_box_home.clone(),
         sub_dir: sub_dir.clone(),
+        sub_source,
         sub_files: Mutex::new(loaded_subs.files.clone()),
         sub_dir_error: Mutex::new(loaded_subs.dir_error.clone()),
         node_type_by_tag: Mutex::new(node_type_by_tag),

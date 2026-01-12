@@ -19,7 +19,7 @@
 # and extract it to ./runtime directory
 # sing_box_home: /home/alice/pros/miao/sing-box
 
-# Subscription files are loaded from ./sub by default (or `--sub-dir <path>`).
+# Subscription files are loaded from ./sub by default (or `--sub <path>`).
 # Put subscription files in that directory and reload from the Web UI.
 
 # Manual nodes in JSON format (optional)
