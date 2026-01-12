@@ -39,7 +39,7 @@ nodes:
 #   # If you want to use UDP DNS (IP DNS), add tags like `dns-google-udp` / `dns-114-udp` here so they can be selected.
 #
 # Health check interval and thresholds (milliseconds).
-# dns_check_interval_ms: 30000
+# dns_check_interval_ms: 180000
 # dns_fail_threshold: 3
 # dns_cooldown_ms: 300000
 

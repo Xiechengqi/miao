@@ -1785,7 +1785,7 @@ async fn get_dns_status(
                 .dns_candidates
                 .clone()
                 .unwrap_or_else(default_dns_candidates),
-            config.dns_check_interval_ms.unwrap_or(30_000),
+            config.dns_check_interval_ms.unwrap_or(180_000),
             config.dns_fail_threshold.unwrap_or(3),
             config.dns_cooldown_ms.unwrap_or(300_000),
             config
@@ -1854,13 +1854,13 @@ async fn get_dns_status(
 async fn check_dns_now(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (raw_candidates, fail_threshold, cooldown_ms, proxy_selection) = {
+    let (stored_active, fail_threshold, cooldown_ms, proxy_selection) = {
         let config = state.config.lock().await;
         (
             config
-                .dns_candidates
+                .dns_active
                 .clone()
-                .unwrap_or_else(default_dns_candidates),
+                .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
             config.dns_fail_threshold.unwrap_or(3),
             config.dns_cooldown_ms.unwrap_or(300_000),
             config
@@ -1874,7 +1874,14 @@ async fn check_dns_now(
         let node_type_by_tag = state.node_type_by_tag.lock().await;
         proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
     };
-    let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
+    let active = if proxy_is_ssh {
+        "dns-direct".to_string()
+    } else if stored_active == "dns-direct" {
+        DEFAULT_DNS_ACTIVE.to_string()
+    } else {
+        stored_active
+    };
+    let candidates = vec![active];
     let _ = run_dns_checks(
         &state,
         &candidates,
@@ -2532,7 +2539,7 @@ async fn dns_health_monitor(state: Arc<AppState>) {
                     .dns_candidates
                     .clone()
                     .unwrap_or_else(default_dns_candidates),
-                config.dns_check_interval_ms.unwrap_or(30_000),
+                config.dns_check_interval_ms.unwrap_or(180_000),
                 config.dns_fail_threshold.unwrap_or(3),
                 config.dns_cooldown_ms.unwrap_or(300_000),
                 config
@@ -2582,23 +2589,40 @@ async fn dns_health_monitor(state: Arc<AppState>) {
             continue;
         }
 
-        let healthy = run_dns_checks(
+        let mut desired = active.clone();
+        let active_vec = vec![active.clone()];
+        let active_health = run_dns_checks(
             &state,
-            &candidates,
+            &active_vec,
             fail_threshold,
             cooldown_ms,
             Duration::from_millis(2_500),
         )
         .await;
 
-        let mut desired = active.clone();
-        if !healthy.get(&active).copied().unwrap_or(false) {
+        if !active_health.get(&active).copied().unwrap_or(false) {
+            // Only probe other candidates when the current active DNS is unhealthy.
             for tag in candidates.iter() {
-                if healthy.get(tag).copied().unwrap_or(false) {
-                    desired = tag.clone();
+                if tag == &active {
+                    continue;
+                }
+
+                let tag = tag.clone();
+                let tag_vec = vec![tag.clone()];
+                let tag_health = run_dns_checks(
+                    &state,
+                    &tag_vec,
+                    fail_threshold,
+                    cooldown_ms,
+                    Duration::from_millis(2_500),
+                )
+                .await;
+                if tag_health.get(&tag).copied().unwrap_or(false) {
+                    desired = tag;
                     break;
                 }
             }
+
             if desired == active {
                 // No candidate is healthy; keep Cloudflare for non-ssh (never fallback to dns-direct).
                 desired = DEFAULT_DNS_ACTIVE.to_string();
