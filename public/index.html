@@ -1932,12 +1932,12 @@
                                     <path d="M8.5 16a5 5 0 0 1 7 0" />
                                     <path d="M12 20h0" />
                                 </svg>
+                                <span>测试</span>
                             </button>
                             <button class="btn-custom btn-add" @click="submitNode" :disabled="loading || !canSubmitNode"
                                 style="flex: 1;">
                                 <i class="bi" :class="editingTag ? 'bi-check-lg' : 'bi-plus-lg'"></i>
                                 {{ editingTag ? '保存' : '添加' }}
-                                {{ nodeType === 'hysteria2' ? 'Hysteria2' : nodeType === 'anytls' ? 'AnyTLS' : nodeType === 'ss' ? 'Shadowsocks' : 'SSH' }}
                             </button>
                         </div>
                     </div>
