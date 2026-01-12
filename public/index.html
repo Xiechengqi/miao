@@ -761,6 +761,7 @@
             display: flex;
             flex-direction: column;
             gap: 0.25rem;
+            position: relative;
         }
 
         .proxy-node:hover {
@@ -771,6 +772,11 @@
         .proxy-node.active {
             background: rgba(0, 217, 165, 0.15);
             border-color: var(--accent-green);
+        }
+
+        .proxy-node.selected:not(.active) {
+            background: rgba(0, 123, 255, 0.08);
+            border-color: rgba(0, 123, 255, 0.7);
         }
 
         .proxy-node.disabled {
@@ -788,6 +794,26 @@
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+            padding-right: 1.2rem;
+        }
+
+        .proxy-node-badge {
+            position: absolute;
+            top: 6px;
+            right: 8px;
+            font-size: 0.7rem;
+            line-height: 1;
+            padding: 0.18rem 0.4rem;
+            border-radius: 10px;
+            background: rgba(0, 123, 255, 0.15);
+            border: 1px solid rgba(0, 123, 255, 0.35);
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+        .proxy-group-meta {
+            font-size: 0.75rem;
+            color: rgba(255, 255, 255, 0.6);
+            margin-left: 0.6rem;
         }
 
         .proxy-node-delay {
@@ -1677,11 +1703,14 @@
 
                         <div v-for="(group, groupName) in selectorGroups" :key="groupName" class="proxy-group">
                             <div class="proxy-group-header">
-                                <div class="proxy-group-name">
-                                    <i class="bi bi-collection"></i>
-                                    {{ groupName === 'proxy' ? '选中节点' : groupName }}
-                                    <span class="proxy-group-now">{{ group.now }}</span>
-                                </div>
+	                                <div class="proxy-group-name">
+	                                    <i class="bi bi-collection"></i>
+	                                    {{ groupName === 'proxy' ? '选中节点' : groupName }}
+	                                    <span class="proxy-group-now">{{ group.now }}</span>
+	                                    <span v-if="groupName === 'proxy' && proxyStatus" class="proxy-group-meta">
+	                                        {{ getProxyMonitorLabel() }}
+	                                    </span>
+	                                </div>
                                 <div class="proxy-controls">
                                     <button class="sort-btn" :class="{ active: sortByDelay }"
                                         @click="sortByDelay = !sortByDelay" title="按延迟排序">
@@ -1703,16 +1732,19 @@
                                     </button>
                                 </div>
                             </div>
-                            <div class="proxy-nodes">
-                                <div v-for="nodeName in getFilteredNodes(group.all)" :key="nodeName"
-                                    :class="['proxy-node', { active: nodeName === group.now, disabled: delays[nodeName] < 0 }]"
-                                    @click="delays[nodeName] < 0 ? null : switchProxy(groupName, nodeName)">
-                                    <div class="proxy-node-name" :title="nodeName">{{ nodeName }}</div>
-                                    <div :class="['proxy-node-delay', getDelayClass(delays[nodeName])]">
-                                        {{ formatDelay(delays[nodeName]) }}
-                                    </div>
-                                </div>
-                            </div>
+	                            <div class="proxy-nodes">
+	                                <div v-for="nodeName in getFilteredNodes(group.all)" :key="nodeName"
+	                                    :class="['proxy-node', { active: nodeName === group.now, disabled: delays[nodeName] < 0, selected: isNodeSelected(groupName, nodeName) }]"
+	                                    @click="delays[nodeName] < 0 ? null : handleProxyNodeClick($event, groupName, nodeName)">
+	                                    <span v-if="isNodeSelected(groupName, nodeName)" class="proxy-node-badge">
+	                                        {{ getNodeSelectIndex(groupName, nodeName) }}
+	                                    </span>
+	                                    <div class="proxy-node-name" :title="nodeName">{{ nodeName }}</div>
+	                                    <div :class="['proxy-node-delay', getDelayClass(delays[nodeName])]">
+	                                        {{ formatDelay(delays[nodeName]) }}
+	                                    </div>
+	                                </div>
+	                            </div>
                             <div v-if="proxySearch && getFilteredNodes(group.all).length === 0" class="empty-state"
                                 style="padding: 1rem;">
                                 没有匹配的节点
@@ -2050,15 +2082,16 @@
 	                const loggingIn = ref(false);
 	                const loginError = ref('');
 
-	                // 状态
-	                const status = ref({ running: false, pid: null, uptime_secs: null });
-                    const dnsStatus = ref(null);
-                    const dnsSelected = ref('');
-                    const checkingDns = ref(false);
-                    const switchingDns = ref(false);
-	                const subDir = ref('');
-	                const subDirError = ref('');
-	                const subFiles = ref([]);
+		                // 状态
+		                const status = ref({ running: false, pid: null, uptime_secs: null });
+	                    const dnsStatus = ref(null);
+	                    const dnsSelected = ref('');
+	                    const checkingDns = ref(false);
+	                    const switchingDns = ref(false);
+	                    const proxyStatus = ref(null);
+		                const subDir = ref('');
+		                const subDirError = ref('');
+		                const subFiles = ref([]);
 	                const nodes = ref([]);
 	                const loading = ref(false);
 	                const loadingAction = ref('');
@@ -2481,7 +2514,7 @@
                 };
 
                 // 选择最快节点
-                const selectFastest = async (groupName, nodes) => {
+	                const selectFastest = async (groupName, nodes) => {
                     let fastest = null;
                     let minDelay = Infinity;
 
@@ -2493,19 +2526,29 @@
                         }
                     }
 
-                    if (fastest) {
-                        await switchProxy(groupName, fastest);
-                        showToast(`已切换到最快节点: ${fastest} (${minDelay}ms)`, 'success');
-                    }
-                };
+	                    if (fastest) {
+	                        await switchProxy(groupName, fastest);
+	                        if (groupName === 'proxy') {
+	                            try { await updateProxyPool([fastest]); } catch (e) { }
+	                        }
+	                        showToast(`已切换到最快节点: ${fastest} (${minDelay}ms)`, 'success');
+	                    }
+	                };
 
 	                // Clash API 函数
-	                const fetchProxies = async () => {
-	                    try {
-	                        const resp = await apiFetch('/api/clash/proxies');
-	                        proxies.value = resp.data?.proxies || {};
-	                    } catch (e) { console.error('获取代理失败:', e); }
-	                };
+		                const fetchProxies = async () => {
+		                    try {
+		                        const resp = await apiFetch('/api/clash/proxies');
+		                        proxies.value = resp.data?.proxies || {};
+		                    } catch (e) { console.error('获取代理失败:', e); }
+		                };
+
+	                    const fetchProxyStatus = async () => {
+	                        try {
+	                            const data = await apiFetch('/api/proxy/status');
+	                            proxyStatus.value = data.data || null;
+	                        } catch (e) { console.error('获取代理自动切换状态失败:', e); }
+	                    };
 
                     const fetchDnsStatus = async () => {
                         try {
@@ -2557,13 +2600,81 @@
                         if (h.cooldown_remaining_secs) parts.push(`cooldown=${h.cooldown_remaining_secs}s`);
                         if (h.last_checked_secs_ago !== null && h.last_checked_secs_ago !== undefined) parts.push(`checked=${h.last_checked_secs_ago}s ago`);
                         if (h.last_error) parts.push(h.last_error);
-                        return parts.join(' | ');
-                    };
+	                        return parts.join(' | ');
+	                    };
 
-	                const switchProxy = async (groupName, nodeName) => {
-	                    try {
-	                        await apiFetch(`/api/clash/proxies/${encodeURIComponent(groupName)}`, {
+	                    const updateProxyPool = async (pool) => {
+	                        await apiFetch('/api/proxy/pool', {
 	                            method: 'PUT',
+	                            headers: { 'Content-Type': 'application/json' },
+	                            body: JSON.stringify({ pool })
+	                        });
+	                        await fetchProxyStatus();
+	                    };
+
+	                    const isNodeSelected = (groupName, nodeName) => {
+	                        if (groupName !== 'proxy') return false;
+	                        return (proxyStatus.value?.pool || []).includes(nodeName);
+	                    };
+
+	                    const getNodeSelectIndex = (groupName, nodeName) => {
+	                        if (groupName !== 'proxy') return null;
+	                        const idx = (proxyStatus.value?.pool || []).indexOf(nodeName);
+	                        return idx >= 0 ? idx + 1 : null;
+	                    };
+
+	                    const getProxyMonitorLabel = () => {
+	                        const s = proxyStatus.value;
+	                        if (!s) return '';
+	                        if (!s.enabled) return '自动切换关闭';
+	                        if (!s.pool || s.pool.length < 2) return 'Ctrl/⌘ 多选候选节点';
+	                        if (s.paused_remaining_secs > 0) return `自动切换暂停 ${s.paused_remaining_secs}s`;
+	                        const active = s.active || selectorGroups.value?.proxy?.now;
+	                        const h = active ? s.health?.[active] : null;
+	                        if (h && h.ok) return '自动切换运行中 · 当前 OK';
+	                        if (h && h.ok === false) return '自动切换运行中 · 当前 BAD';
+	                        return '自动切换运行中';
+	                    };
+
+	                    const handleProxyNodeClick = async (event, groupName, nodeName) => {
+	                        if (groupName !== 'proxy') {
+	                            await switchProxy(groupName, nodeName);
+	                            return;
+	                        }
+	                        const multi = !!(event && (event.ctrlKey || event.metaKey));
+	                        if (multi) {
+	                            const current = proxyStatus.value?.pool || [];
+	                            const next = [...current];
+	                            const idx = next.indexOf(nodeName);
+	                            if (idx >= 0) next.splice(idx, 1);
+	                            else next.push(nodeName);
+
+	                            if (next.length === 0) {
+	                                const keep = selectorGroups.value?.proxy?.now || nodeName;
+	                                next.push(keep);
+	                            }
+
+	                            try {
+	                                await updateProxyPool(next);
+	                                showToast(`候选节点已更新 (${next.length})`, 'success');
+	                            } catch (e) {
+	                                showToast('更新候选节点失败', 'error');
+	                            }
+	                            return;
+	                        }
+
+	                        try {
+	                            await switchProxy(groupName, nodeName);
+	                            await updateProxyPool([nodeName]);
+	                        } catch (e) {
+	                            // switchProxy already shows toast on failure
+	                        }
+	                    };
+
+		                const switchProxy = async (groupName, nodeName) => {
+		                    try {
+		                        await apiFetch(`/api/clash/proxies/${encodeURIComponent(groupName)}`, {
+		                            method: 'PUT',
 	                            headers: { 'Content-Type': 'application/json' },
 	                            body: JSON.stringify({ name: nodeName })
 	                        });
@@ -3043,20 +3154,24 @@
 
                     await fetchStatus();
                     await fetchDnsStatus();
-                    await fetchSubFiles();
-                    await fetchNodes();
-                    await fetchProxies();
-                    connectTrafficWs();
-                    connectLogsWs();
-                    checkVersion();
+	                    await fetchSubFiles();
+	                    await fetchNodes();
+	                    await fetchProxies();
+	                    await fetchProxyStatus();
+	                    connectTrafficWs();
+	                    connectLogsWs();
+	                    checkVersion();
 
                     // 定时刷新状态
                     statusInterval = setInterval(async () => {
-                        await fetchStatus();
-                        await fetchDnsStatus();
-                        if (status.value.running) await fetchProxies();
-                    }, 3000);
-                };
+	                        await fetchStatus();
+	                        await fetchDnsStatus();
+	                        if (status.value.running) {
+	                            await fetchProxies();
+	                            await fetchProxyStatus();
+	                        }
+	                    }, 3000);
+	                };
 
                 // 生命周期
 	                onMounted(async () => {
@@ -3083,12 +3198,13 @@
 		                    authenticated, loginPassword, loggingIn, loginError,
 	                    handleLogin, handleLogout,
 	                // 状态
-	                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subDirError, subFiles, nodes, loading, loadingAction, toasts,
-	                    reloadSubFiles,
+		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subDirError, subFiles, nodes, loading, loadingAction, toasts,
+		                    proxyStatus,
+		                    reloadSubFiles,
 	                    newNode, canAddNode, canTestNode, canSubmitNode, showNodeModal, nodeType, setNodeType,
                         portTouched, openNodeModal,
                         editingTag,
-	                    proxies, delays, traffic, testingGroup, selectorGroups,
+		                    proxies, delays, traffic, testingGroup, selectorGroups,
 	                    // 日志相关
 	                    logs, logContainer, logAutoScroll, showLogs, clearLogs,
 	                    // UI 相关
@@ -3106,10 +3222,11 @@
                     startService, stopService, toggleService,
 	                    submitNode, openEditNode, testNodeFromModal, testManualNode, deleteNode, confirmDeleteNode,
                         formatNodeType, getNodeTypeClass,
-                        fetchDnsStatus, checkDnsNow, switchDnsActive, getDnsBadgeClass, dnsHealthTitle,
-                    switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
-                    formatUptime
-                };
+	                    fetchDnsStatus, checkDnsNow, switchDnsActive, getDnsBadgeClass, dnsHealthTitle,
+	                    fetchProxyStatus, getProxyMonitorLabel, isNodeSelected, getNodeSelectIndex, handleProxyNodeClick,
+	                    switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
+	                    formatUptime
+	                };
             }
         }).mount('#app');
     </script>

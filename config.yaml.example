@@ -41,3 +41,18 @@ nodes:
 # dns_check_interval_ms: 30000
 # dns_fail_threshold: 3
 # dns_cooldown_ms: 300000
+
+# Proxy multi-select & auto failover (optional)
+# Selected candidate nodes (ordered by priority). When there are 2+ candidates,
+# miao will periodically check http://3.0.3.0 and fail over on repeated failures.
+# proxy_pool:
+#   - "节点A"
+#   - "节点B"
+#
+# proxy_monitor_enabled: true
+# proxy_check_interval_ms: 30000
+# proxy_check_timeout_ms: 3000
+# proxy_fail_threshold: 3
+# proxy_window_size: 10
+# proxy_window_fail_rate: 0.6
+# proxy_pause_ms: 60000

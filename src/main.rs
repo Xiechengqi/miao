@@ -15,7 +15,7 @@ use lazy_static::lazy_static;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path as StdPath, PathBuf};
@@ -63,6 +63,23 @@ struct Config {
     dns_fail_threshold: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dns_cooldown_ms: Option<u64>,
+    // Proxy multi-select & auto failover (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_pool: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_monitor_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_check_interval_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_check_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_fail_threshold: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_window_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_window_fail_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_pause_ms: Option<u64>,
 }
 
 const DEFAULT_PORT: u16 = 6161;
@@ -125,6 +142,7 @@ struct AppState {
     sub_dir_error: Mutex<Option<String>>,
     node_type_by_tag: Mutex<HashMap<String, String>>,
     dns_monitor: Mutex<DnsMonitorState>,
+    proxy_monitor: Mutex<ProxyMonitorState>,
     setup_required: AtomicBool,
 }
 
@@ -716,69 +734,9 @@ async fn clash_switch_proxy(
     Path(group): Path<String>,
     Json(req): Json<ClashSwitchRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let client = reqwest::Client::new();
-
-    let previous_proxy_selection = if group == "proxy" {
-        let config = state.config.lock().await;
-        config.selections.get("proxy").cloned()
-    } else {
-        None
-    };
-
-    clash_switch_selector(&client, &group, &req.name)
+    switch_selector_and_save(&state, &group, &req.name)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, Json(ApiResponse::error(e))))?;
-
-    let mut dns_selection: Option<String> = None;
-    if group == "proxy" {
-        let is_ssh = {
-            let node_type_by_tag = state.node_type_by_tag.lock().await;
-            node_type_by_tag
-                .get(&req.name)
-                .map(|t| t == "ssh")
-                .unwrap_or(false)
-        };
-        let target = if is_ssh { "direct" } else { "proxy" };
-        match clash_switch_selector_resilient(&client, "_dns", target).await {
-            Ok(()) => {
-                dns_selection = Some(target.to_string());
-            }
-            Err(e) => {
-                if is_ssh {
-                    if let Some(previous) = previous_proxy_selection {
-                        if let Err(rollback_err) =
-                            clash_switch_selector(&client, "proxy", &previous).await
-                        {
-                            eprintln!("Failed to rollback proxy selector: {}", rollback_err);
-                        }
-                    }
-                    return Err((
-                        StatusCode::BAD_GATEWAY,
-                        Json(ApiResponse::error(format!(
-                            "Switched proxy to SSH, but failed to switch DNS selector to direct: {}",
-                            e
-                        ))),
-                    ));
-                }
-                eprintln!("Failed to switch _dns selector: {}", e);
-            }
-        }
-    }
-
-    {
-        let mut config = state.config.lock().await;
-        config.selections.insert(group, req.name);
-        if let Some(dns_selection) = dns_selection {
-            config.selections.insert("_dns".to_string(), dns_selection);
-        }
-        if let Err(e) = save_config(&config).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-    }
-
     Ok(Json(ApiResponse::success_no_data("Switched")))
 }
 
@@ -1916,6 +1874,118 @@ async fn switch_dns_active(
     Ok(Json(ApiResponse::success_no_data("DNS switched")))
 }
 
+async fn get_proxy_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<ProxyStatusResponse>> {
+    let (enabled, pool, active, interval_ms, timeout_ms, fail_threshold, window_size, window_fail_rate, pause_ms) = {
+        let config = state.config.lock().await;
+        (
+            config.proxy_monitor_enabled.unwrap_or(true),
+            config.proxy_pool.clone().unwrap_or_default(),
+            config.selections.get("proxy").cloned(),
+            config.proxy_check_interval_ms.unwrap_or(30_000),
+            config.proxy_check_timeout_ms.unwrap_or(3_000),
+            config.proxy_fail_threshold.unwrap_or(3),
+            config.proxy_window_size.unwrap_or(10),
+            config.proxy_window_fail_rate.unwrap_or(0.6),
+            config.proxy_pause_ms.unwrap_or(60_000),
+        )
+    };
+
+    let now = Instant::now();
+    let monitor = state.proxy_monitor.lock().await;
+    let last_check_secs_ago = monitor
+        .last_check_at
+        .map(|t| now.saturating_duration_since(t).as_secs());
+    let paused_remaining_secs = monitor
+        .paused_until
+        .and_then(|t| t.checked_duration_since(now).map(|d| d.as_secs()))
+        .unwrap_or(0);
+
+    let mut health: HashMap<String, ProxyHealthPublic> = HashMap::new();
+    for tag in pool.iter() {
+        let entry = monitor.health.get(tag).cloned().unwrap_or_default();
+        let last_checked_secs_ago = entry
+            .last_checked_at
+            .map(|t| now.saturating_duration_since(t).as_secs());
+        let window_size_seen = entry.window.len();
+        let window_fails = entry.window.iter().filter(|v| !**v).count() as u32;
+        health.insert(
+            tag.clone(),
+            ProxyHealthPublic {
+                ok: entry.ok,
+                consecutive_failures: entry.consecutive_failures,
+                window_fails,
+                window_size: window_size_seen,
+                last_error: entry.last_error,
+                last_ip: entry.last_ip,
+                last_location: entry.last_location,
+                last_checked_secs_ago,
+            },
+        );
+    }
+
+    Json(ApiResponse::success(
+        "Proxy status",
+        ProxyStatusResponse {
+            enabled,
+            pool,
+            active,
+            interval_ms,
+            timeout_ms,
+            fail_threshold,
+            window_size,
+            window_fail_rate,
+            pause_ms,
+            paused_remaining_secs,
+            health,
+            last_check_secs_ago,
+        },
+    ))
+}
+
+async fn update_proxy_pool(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ProxyPoolUpdateRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let pool = normalize_pool(&req.pool, 64);
+    {
+        let mut config = state.config.lock().await;
+        config.proxy_pool = if pool.is_empty() { None } else { Some(pool.clone()) };
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    {
+        let mut monitor = state.proxy_monitor.lock().await;
+        monitor.paused_until = None;
+        if pool.is_empty() {
+            monitor.health.clear();
+        } else {
+            monitor.health.retain(|k, _| pool.iter().any(|n| n == k));
+        }
+    }
+
+    if !pool.is_empty() && is_sing_running().await {
+        let current_selected = { state.config.lock().await.selections.get("proxy").cloned() };
+        let should_align = current_selected
+            .as_ref()
+            .map(|cur| !pool.iter().any(|n| n == cur))
+            .unwrap_or(true);
+        if should_align {
+            if let Err(e) = switch_selector_and_save(&state, "proxy", &pool[0]).await {
+                eprintln!("Failed to align active proxy after pool update: {}", e);
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Proxy pool updated")))
+}
+
 // ============================================================================
 // Internal Functions
 // ============================================================================
@@ -1937,6 +2007,88 @@ fn is_mainland_china(location: &str) -> bool {
 async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let yaml = serde_yaml::to_string(config)?;
     tokio::fs::write("config.yaml", yaml).await?;
+    Ok(())
+}
+
+fn normalize_pool(input: &[String], max_len: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for raw in input.iter() {
+        if out.len() >= max_len {
+            break;
+        }
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+async fn switch_selector_and_save(
+    state: &Arc<AppState>,
+    group: &str,
+    desired: &str,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+
+    let previous_proxy_selection = if group == "proxy" {
+        let config = state.config.lock().await;
+        config.selections.get("proxy").cloned()
+    } else {
+        None
+    };
+
+    clash_switch_selector_resilient(&client, group, desired).await?;
+
+    let mut dns_selection: Option<String> = None;
+    if group == "proxy" {
+        let is_ssh = {
+            let node_type_by_tag = state.node_type_by_tag.lock().await;
+            node_type_by_tag
+                .get(desired)
+                .map(|t| t == "ssh")
+                .unwrap_or(false)
+        };
+        let target = if is_ssh { "direct" } else { "proxy" };
+        match clash_switch_selector_resilient(&client, "_dns", target).await {
+            Ok(()) => {
+                dns_selection = Some(target.to_string());
+            }
+            Err(e) => {
+                if is_ssh {
+                    if let Some(previous) = previous_proxy_selection {
+                        if let Err(rollback_err) = clash_switch_selector(&client, "proxy", &previous).await
+                        {
+                            eprintln!("Failed to rollback proxy selector: {}", rollback_err);
+                        }
+                    }
+                    return Err(format!(
+                        "Switched proxy to SSH, but failed to switch DNS selector to direct: {}",
+                        e
+                    ));
+                }
+                eprintln!("Failed to switch _dns selector: {}", e);
+            }
+        }
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        config
+            .selections
+            .insert(group.to_string(), desired.to_string());
+        if let Some(dns_selection) = dns_selection {
+            config.selections.insert("_dns".to_string(), dns_selection);
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err(format!("Failed to save config: {}", e));
+        }
+    }
+
     Ok(())
 }
 
@@ -1991,6 +2143,24 @@ struct DnsHealthEntry {
     last_checked_at: Option<Instant>,
 }
 
+#[derive(Clone, Default)]
+struct ProxyMonitorState {
+    health: HashMap<String, ProxyHealthEntry>,
+    last_check_at: Option<Instant>,
+    paused_until: Option<Instant>,
+}
+
+#[derive(Clone, Default)]
+struct ProxyHealthEntry {
+    ok: bool,
+    consecutive_failures: u32,
+    window: VecDeque<bool>,
+    last_error: Option<String>,
+    last_checked_at: Option<Instant>,
+    last_ip: Option<String>,
+    last_location: Option<String>,
+}
+
 #[derive(Serialize)]
 struct DnsStatusResponse {
     active: String,
@@ -2009,6 +2179,39 @@ struct DnsHealthPublic {
     cooldown_remaining_secs: u64,
     last_error: Option<String>,
     last_checked_secs_ago: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ProxyStatusResponse {
+    enabled: bool,
+    pool: Vec<String>,
+    active: Option<String>,
+    interval_ms: u64,
+    timeout_ms: u64,
+    fail_threshold: u32,
+    window_size: usize,
+    window_fail_rate: f64,
+    pause_ms: u64,
+    paused_remaining_secs: u64,
+    health: HashMap<String, ProxyHealthPublic>,
+    last_check_secs_ago: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ProxyHealthPublic {
+    ok: bool,
+    consecutive_failures: u32,
+    window_fails: u32,
+    window_size: usize,
+    last_error: Option<String>,
+    last_ip: Option<String>,
+    last_location: Option<String>,
+    last_checked_secs_ago: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ProxyPoolUpdateRequest {
+    pool: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -2235,19 +2438,238 @@ async fn dns_health_monitor(state: Arc<AppState>) {
     }
 }
 
+async fn fetch_ip_info_via_3030(timeout: Duration) -> Result<IpCheckResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("build reqwest client: {}", e))?;
+
+    let resp = client
+        .get("http://3.0.3.0")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("read body failed: {}", e))?;
+
+    serde_json::from_str::<IpCheckResponse>(&text).map_err(|e| format!("parse JSON failed: {}", e))
+}
+
+fn proxy_should_failover(
+    entry: &ProxyHealthEntry,
+    fail_threshold: u32,
+    window_size: usize,
+    window_fail_rate: f64,
+) -> bool {
+    if entry.consecutive_failures >= fail_threshold {
+        return true;
+    }
+    if window_size > 0 && entry.window.len() >= window_size {
+        let fails = entry.window.iter().filter(|v| !**v).count() as f64;
+        let rate = fails / (entry.window.len() as f64);
+        return rate >= window_fail_rate;
+    }
+    false
+}
+
+async fn record_proxy_check_result(
+    state: &Arc<AppState>,
+    node: &str,
+    now: Instant,
+    ok: bool,
+    ip: Option<String>,
+    location: Option<String>,
+    error: Option<String>,
+    window_size: usize,
+) {
+    let mut monitor = state.proxy_monitor.lock().await;
+    monitor.last_check_at = Some(now);
+    let entry = monitor.health.entry(node.to_string()).or_default();
+    entry.last_checked_at = Some(now);
+    entry.ok = ok;
+    entry.last_ip = ip;
+    entry.last_location = location;
+    entry.last_error = error;
+    if ok {
+        entry.consecutive_failures = 0;
+    } else {
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+    }
+    entry.window.push_back(ok);
+    while window_size > 0 && entry.window.len() > window_size {
+        entry.window.pop_front();
+    }
+}
+
+async fn proxy_health_monitor(state: Arc<AppState>) {
+    loop {
+        let (enabled, pool, interval_ms, timeout_ms, fail_threshold, window_size, window_fail_rate, pause_ms) = {
+            let config = state.config.lock().await;
+            let raw_pool = config.proxy_pool.clone().unwrap_or_default();
+            (
+                config.proxy_monitor_enabled.unwrap_or(true),
+                normalize_pool(&raw_pool, 64),
+                config.proxy_check_interval_ms.unwrap_or(30_000),
+                config.proxy_check_timeout_ms.unwrap_or(3_000),
+                config.proxy_fail_threshold.unwrap_or(3),
+                config.proxy_window_size.unwrap_or(10),
+                config.proxy_window_fail_rate.unwrap_or(0.6),
+                config.proxy_pause_ms.unwrap_or(60_000),
+            )
+        };
+
+        if !enabled || pool.len() < 2 || !is_sing_running().await {
+            sleep(Duration::from_millis(interval_ms)).await;
+            continue;
+        }
+
+        let now = Instant::now();
+        {
+            let mut monitor = state.proxy_monitor.lock().await;
+            if let Some(until) = monitor.paused_until {
+                if until > now {
+                    sleep(Duration::from_millis(interval_ms)).await;
+                    continue;
+                }
+                monitor.paused_until = None;
+            }
+        }
+
+        // Best-effort: prune pool by current selector choices (e.g. subscription changed)
+        let pool = {
+            let client = reqwest::Client::new();
+            if let Ok(choices) = clash_get_selector_choices(&client, "proxy").await {
+                let choices_set: HashSet<String> = choices.into_iter().collect();
+                let pruned: Vec<String> = pool
+                    .iter()
+                    .cloned()
+                    .filter(|n| choices_set.contains(n))
+                    .collect();
+                if pruned.len() >= 2 { pruned } else { pool }
+            } else {
+                pool
+            }
+        };
+
+        let active = { state.config.lock().await.selections.get("proxy").cloned() };
+        let active = match active {
+            Some(a) if pool.iter().any(|n| n == &a) => a,
+            _ => {
+                let desired = pool[0].clone();
+                if let Err(e) = switch_selector_and_save(&state, "proxy", &desired).await {
+                    eprintln!("Proxy monitor: failed to set initial active proxy: {}", e);
+                    sleep(Duration::from_millis(interval_ms)).await;
+                    continue;
+                }
+                desired
+            }
+        };
+
+        let timeout = Duration::from_millis(timeout_ms);
+        let check_now = Instant::now();
+        let (ok, ip, location, err) = match fetch_ip_info_via_3030(timeout).await {
+            Ok(info) => {
+                let ip = Some(info.ip.clone());
+                let location = Some(info.location.clone());
+                if is_mainland_china(&info.location) {
+                    (false, ip, location, Some("Traffic appears to be using direct connection".to_string()))
+                } else {
+                    (true, ip, location, None)
+                }
+            }
+            Err(e) => (false, None, None, Some(e)),
+        };
+        record_proxy_check_result(&state, &active, check_now, ok, ip, location, err, window_size).await;
+
+        let should_failover = {
+            let monitor = state.proxy_monitor.lock().await;
+            let entry = monitor.health.get(&active).cloned().unwrap_or_default();
+            proxy_should_failover(&entry, fail_threshold, window_size, window_fail_rate)
+        };
+
+        if !should_failover {
+            sleep(Duration::from_millis(interval_ms)).await;
+            continue;
+        }
+
+        let start_idx = pool.iter().position(|n| n == &active).unwrap_or(0);
+        let mut switched_ok = false;
+        for offset in 1..pool.len() {
+            let idx = (start_idx + offset) % pool.len();
+            let candidate = pool[idx].clone();
+
+            if let Err(e) = switch_selector_and_save(&state, "proxy", &candidate).await {
+                record_proxy_check_result(
+                    &state,
+                    &candidate,
+                    Instant::now(),
+                    false,
+                    None,
+                    None,
+                    Some(format!("switch failed: {}", e)),
+                    window_size,
+                )
+                .await;
+                continue;
+            }
+
+            sleep(Duration::from_millis(500)).await;
+
+            let check_now = Instant::now();
+            let (ok, ip, location, err) = match fetch_ip_info_via_3030(timeout).await {
+                Ok(info) => {
+                    let ip = Some(info.ip.clone());
+                    let location = Some(info.location.clone());
+                    if is_mainland_china(&info.location) {
+                        (false, ip, location, Some("Traffic appears to be using direct connection".to_string()))
+                    } else {
+                        (true, ip, location, None)
+                    }
+                }
+                Err(e) => (false, None, None, Some(e)),
+            };
+            record_proxy_check_result(&state, &candidate, check_now, ok, ip, location, err, window_size).await;
+
+            if ok {
+                switched_ok = true;
+                break;
+            }
+        }
+
+        if !switched_ok {
+            eprintln!("Proxy monitor: all candidates failed; pausing");
+            let mut monitor = state.proxy_monitor.lock().await;
+            monitor.paused_until = Some(Instant::now() + Duration::from_millis(pause_ms));
+        }
+
+        sleep(Duration::from_millis(interval_ms)).await;
+    }
+}
+
 async fn apply_saved_selections(
     config: &Config,
     node_type_by_tag: Option<&HashMap<String, String>>,
 ) -> Result<(), String> {
-    if config.selections.is_empty() {
+    let proxy_selection = config
+        .selections
+        .get("proxy")
+        .cloned()
+        .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned()));
+    let has_any = !config.selections.is_empty() || proxy_selection.is_some();
+    if !has_any {
         return Ok(());
     }
 
     let client = reqwest::Client::new();
 
-    let mut ordered: Vec<(String, String)> = Vec::with_capacity(config.selections.len());
-
-    let proxy_selection = config.selections.get("proxy").cloned();
+    let mut ordered: Vec<(String, String)> = Vec::with_capacity(config.selections.len() + 1);
     let proxy_is_ssh = proxy_selection
         .as_ref()
         .and_then(|name| node_type_by_tag.and_then(|m| m.get(name)))
@@ -3165,6 +3587,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 dns_check_interval_ms: None,
                 dns_fail_threshold: None,
                 dns_cooldown_ms: None,
+                proxy_pool: None,
+                proxy_monitor_enabled: None,
+                proxy_check_interval_ms: None,
+                proxy_check_timeout_ms: None,
+                proxy_fail_threshold: None,
+                proxy_window_size: None,
+                proxy_window_fail_rate: None,
+                proxy_pause_ms: None,
             },
             true,
         ),
@@ -3225,6 +3655,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sub_dir_error: Mutex::new(loaded_subs.dir_error.clone()),
         node_type_by_tag: Mutex::new(node_type_by_tag),
         dns_monitor: Mutex::new(DnsMonitorState::default()),
+        proxy_monitor: Mutex::new(ProxyMonitorState::default()),
         setup_required: AtomicBool::new(setup_required),
     });
 
@@ -3232,6 +3663,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     {
         let state_clone = app_state.clone();
         tokio::spawn(async move { dns_health_monitor(state_clone).await });
+    }
+
+    // Proxy health monitor (best-effort). It periodically checks current proxy via 3.0.3.0 and fails over within proxy_pool.
+    {
+        let state_clone = app_state.clone();
+        tokio::spawn(async move { proxy_health_monitor(state_clone).await });
     }
 
 
@@ -3253,6 +3690,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
         .route("/api/clash/proxies/{node}/delay", get(clash_test_delay))
         .route("/api/selections", get(get_selections))
+        .route("/api/proxy/status", get(get_proxy_status))
+        .route("/api/proxy/pool", put(update_proxy_pool))
         // Subscription file management
         .route("/api/sub-files", get(get_sub_files))
         .route("/api/sub-files/reload", post(reload_sub_files))
