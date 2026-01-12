@@ -659,6 +659,58 @@ async fn clash_switch_selector(
     Ok(())
 }
 
+async fn clash_get_selector_choices(
+    client: &reqwest::Client,
+    group: &str,
+) -> Result<Vec<String>, String> {
+    let resp = client
+        .get(format!(
+            "{}/proxies/{}",
+            CLASH_HTTP_BASE,
+            percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Clash API request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Clash API returned {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Clash API parse failed: {}", e))?;
+
+    let mut choices = Vec::new();
+    if let Some(all) = json.get("all").and_then(|v| v.as_array()) {
+        for item in all {
+            if let Some(s) = item.as_str() {
+                choices.push(s.to_string());
+            }
+        }
+    }
+    Ok(choices)
+}
+
+async fn clash_switch_selector_resilient(
+    client: &reqwest::Client,
+    group: &str,
+    desired: &str,
+) -> Result<(), String> {
+    if clash_switch_selector(client, group, desired).await.is_ok() {
+        return Ok(());
+    }
+    let choices = clash_get_selector_choices(client, group).await?;
+    if let Some(actual) = choices
+        .into_iter()
+        .find(|c| c.eq_ignore_ascii_case(desired))
+    {
+        return clash_switch_selector(client, group, &actual).await;
+    }
+    Err(format!("No matching choice for {}", desired))
+}
+
 async fn clash_switch_proxy(
     State(state): State<Arc<AppState>>,
     Path(group): Path<String>,
@@ -687,7 +739,7 @@ async fn clash_switch_proxy(
                 .unwrap_or(false)
         };
         let target = if is_ssh { "direct" } else { "proxy" };
-        match clash_switch_selector(&client, "_dns", target).await {
+        match clash_switch_selector_resilient(&client, "_dns", target).await {
             Ok(()) => {
                 dns_selection = Some(target.to_string());
             }
@@ -2229,29 +2281,16 @@ async fn apply_saved_selections(
         let mut last_err: Option<String> = None;
 
         for attempt in 1..=10 {
-            let resp = client
-                .put(format!(
-                    "{}/proxies/{}",
-                    CLASH_HTTP_BASE,
-                    percent_encoding::utf8_percent_encode(&group, percent_encoding::NON_ALPHANUMERIC)
-                ))
-                .json(&ClashSwitchRequest { name: name.clone() })
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status().is_success() => {
+            match clash_switch_selector_resilient(&client, &group, &name).await {
+                Ok(()) => {
                     println!("Restored selection: {} -> {}", group, name);
                     last_err = None;
                     break;
                 }
-                Ok(r) => {
-                    last_err = Some(format!("Clash API returned {}", r.status()));
-                }
                 Err(e) => {
-                    last_err = Some(e.to_string());
+                    last_err = Some(e);
                 }
-            }
+            };
 
             // Clash API may not be ready right after sing-box starts
             if attempt < 10 {
