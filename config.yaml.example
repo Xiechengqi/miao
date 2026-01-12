@@ -51,7 +51,7 @@ nodes:
 #   - "节点B"
 #
 # proxy_monitor_enabled: true
-# proxy_check_interval_ms: 30000
+# proxy_check_interval_ms: 180000
 # proxy_check_timeout_ms: 3000
 # proxy_fail_threshold: 3
 # proxy_window_size: 10

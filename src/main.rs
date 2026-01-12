@@ -1924,7 +1924,7 @@ async fn get_proxy_status(
             config.proxy_monitor_enabled.unwrap_or(true),
             config.proxy_pool.clone().unwrap_or_default(),
             config.selections.get("proxy").cloned(),
-            config.proxy_check_interval_ms.unwrap_or(30_000),
+            config.proxy_check_interval_ms.unwrap_or(180_000),
             config.proxy_check_timeout_ms.unwrap_or(3_000),
             config.proxy_fail_threshold.unwrap_or(3),
             config.proxy_window_size.unwrap_or(10),
@@ -2672,7 +2672,7 @@ async fn proxy_health_monitor(state: Arc<AppState>) {
             (
                 config.proxy_monitor_enabled.unwrap_or(true),
                 normalize_pool(&raw_pool, 64),
-                config.proxy_check_interval_ms.unwrap_or(30_000),
+                config.proxy_check_interval_ms.unwrap_or(180_000),
                 config.proxy_check_timeout_ms.unwrap_or(3_000),
                 config.proxy_fail_threshold.unwrap_or(3),
                 config.proxy_window_size.unwrap_or(10),
