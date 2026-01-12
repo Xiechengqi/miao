@@ -2357,17 +2357,12 @@ fn udp_dns_candidates_by_tag() -> HashMap<&'static str, UdpDnsCandidate> {
 }
 
 async fn check_udp_dns(candidate: &UdpDnsCandidate, timeout: Duration) -> Result<(), String> {
-    let addr = format!("{}:{}", candidate.ip, candidate.port);
-    let socket_addr = addr
-        .parse()
-        .map_err(|e| format!("invalid socket address {}: {}", addr, e))?;
-
     let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("bind UDP socket failed: {}", e))?;
 
     let msg = build_dns_query_bytes("example.com");
-    tokio::time::timeout(timeout, sock.send_to(&msg, socket_addr))
+    tokio::time::timeout(timeout, sock.send_to(&msg, (candidate.ip, candidate.port)))
         .await
         .map_err(|_| "UDP send timeout".to_string())?
         .map_err(|e| format!("UDP send failed: {}", e))?;
