@@ -30,12 +30,13 @@ nodes:
 # Active DNS server tag used in sing-box `dns.final`.
 # dns_active: doh-cf
 #
-# Candidate tags for health checks / failover. The last one should be a direct fallback.
+# Candidate tags for health checks / failover.
+# For non-ssh nodes, miao will fallback to `doh-cf` when all candidates fail (it won't auto-switch to `dns-direct`).
 # dns_candidates:
 #   - doh-cf
 #   - doh-google
-#   - doh-quad9
-#   - dns-direct
+#   # Note: `dns-direct` will only be used automatically when the active `proxy` node type is `ssh`.
+#   # If you want to use UDP DNS (IP DNS), add tags like `dns-google-udp` / `dns-114-udp` here so they can be selected.
 #
 # Health check interval and thresholds (milliseconds).
 # dns_check_interval_ms: 30000

@@ -1749,7 +1749,7 @@ async fn test_node(
 async fn get_dns_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (active, candidates, interval_ms, fail_threshold, cooldown_ms) = {
+    let (stored_active, raw_candidates, interval_ms, fail_threshold, cooldown_ms, proxy_selection) = {
         let config = state.config.lock().await;
         (
             config
@@ -1763,7 +1763,25 @@ async fn get_dns_status(
             config.dns_check_interval_ms.unwrap_or(30_000),
             config.dns_fail_threshold.unwrap_or(3),
             config.dns_cooldown_ms.unwrap_or(300_000),
+            config
+                .selections
+                .get("proxy")
+                .cloned()
+                .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
         )
+    };
+
+    let proxy_is_ssh = {
+        let node_type_by_tag = state.node_type_by_tag.lock().await;
+        proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
+    };
+    let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
+    let active = if proxy_is_ssh {
+        "dns-direct".to_string()
+    } else if stored_active == "dns-direct" {
+        DEFAULT_DNS_ACTIVE.to_string()
+    } else {
+        stored_active
     };
 
     let now = Instant::now();
@@ -1811,7 +1829,7 @@ async fn get_dns_status(
 async fn check_dns_now(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (candidates, fail_threshold, cooldown_ms) = {
+    let (raw_candidates, fail_threshold, cooldown_ms, proxy_selection) = {
         let config = state.config.lock().await;
         (
             config
@@ -1820,8 +1838,18 @@ async fn check_dns_now(
                 .unwrap_or_else(default_dns_candidates),
             config.dns_fail_threshold.unwrap_or(3),
             config.dns_cooldown_ms.unwrap_or(300_000),
+            config
+                .selections
+                .get("proxy")
+                .cloned()
+                .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
         )
     };
+    let proxy_is_ssh = {
+        let node_type_by_tag = state.node_type_by_tag.lock().await;
+        proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
+    };
+    let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
     let _ = run_dns_checks(
         &state,
         &candidates,
@@ -1837,13 +1865,26 @@ async fn switch_dns_active(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DnsSwitchRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let candidates = {
+    let (raw_candidates, proxy_selection) = {
         let config = state.config.lock().await;
-        config
+        (
+            config
             .dns_candidates
             .clone()
-            .unwrap_or_else(default_dns_candidates)
+            .unwrap_or_else(default_dns_candidates),
+            config
+                .selections
+                .get("proxy")
+                .cloned()
+                .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
+        )
     };
+    let proxy_is_ssh = {
+        let node_type_by_tag = state.node_type_by_tag.lock().await;
+        proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
+    };
+    let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
+
     if !candidates.iter().any(|c| c == &req.tag) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -2223,8 +2264,6 @@ fn default_dns_candidates() -> Vec<String> {
     vec![
         "doh-cf".to_string(),
         "doh-google".to_string(),
-        "doh-quad9".to_string(),
-        "dns-direct".to_string(),
     ]
 }
 
@@ -2248,19 +2287,10 @@ fn doh_candidates_by_tag() -> HashMap<&'static str, DohCandidate> {
                 path: "/dns-query",
             },
         ),
-        (
-            "doh-quad9",
-            DohCandidate {
-                tag: "doh-quad9",
-                host: "dns.quad9.net",
-                ip: "9.9.9.9",
-                path: "/dns-query",
-            },
-        ),
     ])
 }
 
-fn build_dns_query_base64url(domain: &str) -> String {
+fn build_dns_query_bytes(domain: &str) -> Vec<u8> {
     // Minimal DNS query message for A record.
     let mut msg: Vec<u8> = Vec::with_capacity(64);
     msg.extend_from_slice(&0u16.to_be_bytes()); // id
@@ -2276,8 +2306,11 @@ fn build_dns_query_base64url(domain: &str) -> String {
     msg.push(0); // root
     msg.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
     msg.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+    msg
+}
 
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(msg)
+fn build_dns_query_base64url(domain: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(build_dns_query_bytes(domain))
 }
 
 async fn check_doh(candidate: &DohCandidate, timeout: Duration) -> Result<(), String> {
@@ -2307,6 +2340,50 @@ async fn check_doh(candidate: &DohCandidate, timeout: Duration) -> Result<(), St
     Ok(())
 }
 
+#[derive(Clone)]
+struct UdpDnsCandidate {
+    ip: &'static str,
+    port: u16,
+}
+
+fn udp_dns_candidates_by_tag() -> HashMap<&'static str, UdpDnsCandidate> {
+    HashMap::from([
+        // Keep tags stable with sing-box template in get_config_template().
+        ("dns-direct", UdpDnsCandidate { ip: "223.5.5.5", port: 53 }),
+        ("114", UdpDnsCandidate { ip: "114.114.114.114", port: 53 }),
+        ("dns-114-udp", UdpDnsCandidate { ip: "114.114.114.114", port: 53 }),
+        ("dns-google-udp", UdpDnsCandidate { ip: "8.8.8.8", port: 53 }),
+    ])
+}
+
+async fn check_udp_dns(candidate: &UdpDnsCandidate, timeout: Duration) -> Result<(), String> {
+    let addr = format!("{}:{}", candidate.ip, candidate.port);
+    let socket_addr = addr
+        .parse()
+        .map_err(|e| format!("invalid socket address {}: {}", addr, e))?;
+
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("bind UDP socket failed: {}", e))?;
+
+    let msg = build_dns_query_bytes("example.com");
+    tokio::time::timeout(timeout, sock.send_to(&msg, socket_addr))
+        .await
+        .map_err(|_| "UDP send timeout".to_string())?
+        .map_err(|e| format!("UDP send failed: {}", e))?;
+
+    let mut buf = [0u8; 512];
+    let (n, _) = tokio::time::timeout(timeout, sock.recv_from(&mut buf))
+        .await
+        .map_err(|_| "UDP recv timeout".to_string())?
+        .map_err(|e| format!("UDP recv failed: {}", e))?;
+
+    if n < 12 {
+        return Err("short DNS response".to_string());
+    }
+    Ok(())
+}
+
 async fn is_sing_running() -> bool {
     let mut lock = SING_PROCESS.lock().await;
     if let Some(proc) = lock.as_mut() {
@@ -2324,6 +2401,7 @@ async fn run_dns_checks(
     timeout: Duration,
 ) -> HashMap<String, bool> {
     let candidate_map = doh_candidates_by_tag();
+    let udp_candidate_map = udp_dns_candidates_by_tag();
     let now = Instant::now();
 
     let mut healthy: HashMap<String, bool> = HashMap::new();
@@ -2342,16 +2420,27 @@ async fn run_dns_checks(
             }
         }
 
-        if tag == "dns-direct" {
-            entry.ok = true;
-            entry.failures = 0;
-            entry.last_error = None;
-            healthy.insert(tag.clone(), true);
-            continue;
-        }
-
         if let Some(c) = candidate_map.get(tag.as_str()) {
             match check_doh(c, timeout).await {
+                Ok(()) => {
+                    entry.ok = true;
+                    entry.failures = 0;
+                    entry.cooldown_until = None;
+                    entry.last_error = None;
+                    healthy.insert(tag.clone(), true);
+                }
+                Err(e) => {
+                    entry.ok = false;
+                    entry.failures = entry.failures.saturating_add(1);
+                    entry.last_error = Some(e);
+                    if entry.failures >= fail_threshold {
+                        entry.cooldown_until = Some(Instant::now() + Duration::from_millis(cooldown_ms));
+                    }
+                    healthy.insert(tag.clone(), false);
+                }
+            }
+        } else if let Some(c) = udp_candidate_map.get(tag.as_str()) {
+            match check_udp_dns(c, timeout).await {
                 Ok(()) => {
                     entry.ok = true;
                     entry.failures = 0;
@@ -2379,9 +2468,43 @@ async fn run_dns_checks(
     healthy
 }
 
+fn proxy_is_ssh(
+    proxy_selection: Option<&String>,
+    node_type_by_tag: &HashMap<String, String>,
+) -> bool {
+    proxy_selection
+        .and_then(|name| node_type_by_tag.get(name))
+        .map(|t| t == "ssh")
+        .unwrap_or(false)
+}
+
+fn normalize_dns_candidates(raw: Vec<String>, proxy_is_ssh: bool) -> Vec<String> {
+    if proxy_is_ssh {
+        return vec!["dns-direct".to_string()];
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(raw.len() + 1);
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for tag in raw.into_iter() {
+        if tag == "dns-direct" {
+            continue;
+        }
+        if seen.insert(tag.clone()) {
+            out.push(tag);
+        }
+    }
+
+    // Always keep Cloudflare as the ultimate fallback for non-ssh.
+    if !seen.contains(DEFAULT_DNS_ACTIVE) {
+        out.push(DEFAULT_DNS_ACTIVE.to_string());
+    }
+    out
+}
+
 async fn dns_health_monitor(state: Arc<AppState>) {
     loop {
-        let (candidates, interval_ms, fail_threshold, cooldown_ms, active) = {
+        let (raw_candidates, interval_ms, fail_threshold, cooldown_ms, stored_active, proxy_selection) = {
             let config = state.config.lock().await;
             (
                 config
@@ -2395,8 +2518,48 @@ async fn dns_health_monitor(state: Arc<AppState>) {
                     .dns_active
                     .clone()
                     .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
+                config
+                    .selections
+                    .get("proxy")
+                    .cloned()
+                    .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
             )
         };
+
+        let proxy_is_ssh = {
+            let node_type_by_tag = state.node_type_by_tag.lock().await;
+            proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
+        };
+
+        let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
+        let active = if proxy_is_ssh {
+            "dns-direct".to_string()
+        } else if stored_active == "dns-direct" {
+            DEFAULT_DNS_ACTIVE.to_string()
+        } else {
+            stored_active.clone()
+        };
+
+        if proxy_is_ssh {
+            if stored_active != "dns-direct" {
+                {
+                    let mut config = state.config.lock().await;
+                    config.dns_active = Some("dns-direct".to_string());
+                    if let Err(e) = save_config(&config).await {
+                        eprintln!("Failed to save config while enforcing ssh DNS: {}", e);
+                    }
+                }
+                if is_sing_running().await {
+                    if let Err(e) = regenerate_and_restart(state.clone()).await {
+                        eprintln!("SSH DNS enforcement restart failed: {}", e);
+                    } else {
+                        println!("Switched DNS active server (ssh): dns-direct");
+                    }
+                }
+            }
+            sleep(Duration::from_millis(interval_ms)).await;
+            continue;
+        }
 
         let healthy = run_dns_checks(
             &state,
@@ -2415,9 +2578,13 @@ async fn dns_health_monitor(state: Arc<AppState>) {
                     break;
                 }
             }
+            if desired == active {
+                // No candidate is healthy; keep Cloudflare for non-ssh (never fallback to dns-direct).
+                desired = DEFAULT_DNS_ACTIVE.to_string();
+            }
         }
 
-        if desired != active {
+        if desired != stored_active {
             {
                 let mut config = state.config.lock().await;
                 config.dns_active = Some(desired.clone());
@@ -3031,11 +3198,24 @@ async fn gen_config(
 
     let mut sing_box_config = get_config_template();
     if let Some(dns) = sing_box_config.get_mut("dns") {
-        let active = config
-            .dns_active
-            .as_deref()
-            .unwrap_or(DEFAULT_DNS_ACTIVE)
-            .to_string();
+        let node_type_by_tag = build_node_type_map(config, subs);
+        let proxy_selection = config
+            .selections
+            .get("proxy")
+            .cloned()
+            .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned()));
+        let proxy_is_ssh = proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag);
+
+        let active = if proxy_is_ssh {
+            "dns-direct".to_string()
+        } else {
+            let configured = config.dns_active.as_deref().unwrap_or(DEFAULT_DNS_ACTIVE);
+            if configured == "dns-direct" {
+                DEFAULT_DNS_ACTIVE.to_string()
+            } else {
+                configured.to_string()
+            }
+        };
         dns["final"] = serde_json::Value::String(active);
     }
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
@@ -3080,6 +3260,8 @@ fn get_config_template() -> serde_json::Value {
             "servers": [
                 {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53},
                 {"type": "udp", "tag": "114", "server": "114.114.114.114", "server_port": 53},
+                {"type": "udp", "tag": "dns-114-udp", "server": "114.114.114.114", "server_port": 53},
+                {"type": "udp", "tag": "dns-google-udp", "server": "8.8.8.8", "server_port": 53},
                 {
                     "type": "https",
                     "tag": "doh-cf",
@@ -3099,17 +3281,6 @@ fn get_config_template() -> serde_json::Value {
                     "path": "/dns-query",
                     "headers": {"Host": "dns.google"},
                     "tls": {"enabled": true, "server_name": "dns.google", "insecure": false},
-                    "detour": "_dns",
-                    "connect_timeout": "2s"
-                },
-                {
-                    "type": "https",
-                    "tag": "doh-quad9",
-                    "server": "9.9.9.9",
-                    "server_port": 443,
-                    "path": "/dns-query",
-                    "headers": {"Host": "dns.quad9.net"},
-                    "tls": {"enabled": true, "server_name": "dns.quad9.net", "insecure": false},
                     "detour": "_dns",
                     "connect_timeout": "2s"
                 }
@@ -3553,6 +3724,25 @@ async fn auth_middleware(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // CLI args (pre-parse for help; help should not require root)
+    let mut raw_args = std::env::args();
+    let arg0 = raw_args.next().unwrap_or_else(|| "miao".to_string());
+    let program_name = std::path::Path::new(&arg0)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("miao");
+    let rest_args: Vec<String> = raw_args.collect();
+    if rest_args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "Miao - sing-box 管理器\n\n\
+用法:\n  {program} [OPTIONS]\n\n\
+选项:\n  --sub-dir <PATH>   订阅文件目录（默认 ./sub）\n  -h, --help         显示帮助并退出\n\n\
+说明:\n  - 配置文件为当前目录下的 ./config.yaml\n  - 正常运行需要 root 权限（--help 例外）",
+            program = program_name
+        );
+        return Ok(());
+    }
+
     // Check for root privileges
     if !Uid::effective().is_root() {
         eprintln!("Error: This application must be run as root.");
@@ -3561,7 +3751,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // CLI args
     let mut sub_dir = PathBuf::from("sub");
-    let mut args = std::env::args().skip(1);
+    let mut args = rest_args.into_iter();
     while let Some(arg) = args.next() {
         if let Some(v) = arg.strip_prefix("--sub-dir=") {
             sub_dir = PathBuf::from(v);
