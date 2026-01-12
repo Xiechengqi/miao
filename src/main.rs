@@ -2289,7 +2289,7 @@ fn default_dns_candidates() -> Vec<String> {
     vec![
         "doh-cf".to_string(),
         "doh-google".to_string(),
-        "dns-114-udp".to_string(),
+        "dns-cf-udp".to_string(),
         "dns-google-udp".to_string(),
     ]
 }
@@ -2377,8 +2377,7 @@ fn udp_dns_candidates_by_tag() -> HashMap<&'static str, UdpDnsCandidate> {
     HashMap::from([
         // Keep tags stable with sing-box template in get_config_template().
         ("dns-direct", UdpDnsCandidate { ip: "223.5.5.5", port: 53 }),
-        ("114", UdpDnsCandidate { ip: "114.114.114.114", port: 53 }),
-        ("dns-114-udp", UdpDnsCandidate { ip: "114.114.114.114", port: 53 }),
+        ("dns-cf-udp", UdpDnsCandidate { ip: "1.1.1.1", port: 53 }),
         ("dns-google-udp", UdpDnsCandidate { ip: "8.8.8.8", port: 53 }),
     ])
 }
@@ -3257,8 +3256,7 @@ fn get_config_template() -> serde_json::Value {
             "independent_cache": true,
             "servers": [
                 {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53},
-                {"type": "udp", "tag": "114", "server": "114.114.114.114", "server_port": 53},
-                {"type": "udp", "tag": "dns-114-udp", "server": "114.114.114.114", "server_port": 53},
+                {"type": "udp", "tag": "dns-cf-udp", "server": "1.1.1.1", "server_port": 53},
                 {"type": "udp", "tag": "dns-google-udp", "server": "8.8.8.8", "server_port": 53},
                 {
                     "type": "https",
