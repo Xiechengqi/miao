@@ -2289,6 +2289,8 @@ fn default_dns_candidates() -> Vec<String> {
     vec![
         "doh-cf".to_string(),
         "doh-google".to_string(),
+        "dns-114-udp".to_string(),
+        "dns-google-udp".to_string(),
     ]
 }
 
