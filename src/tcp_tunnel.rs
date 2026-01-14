@@ -60,6 +60,24 @@ struct TunnelHandle {
     join: tokio::task::JoinHandle<()>,
 }
 
+fn runtime_config_equal(a: &TcpTunnelConfig, b: &TcpTunnelConfig) -> bool {
+    a.enabled == b.enabled
+        && a.local_addr == b.local_addr
+        && a.local_port == b.local_port
+        && a.remote_bind_addr == b.remote_bind_addr
+        && a.remote_port == b.remote_port
+        && a.ssh_host == b.ssh_host
+        && a.ssh_port == b.ssh_port
+        && a.username == b.username
+        && a.auth == b.auth
+        && a.strict_host_key_checking == b.strict_host_key_checking
+        && a.host_key_fingerprint == b.host_key_fingerprint
+        && a.allow_public_bind == b.allow_public_bind
+        && a.connect_timeout_ms == b.connect_timeout_ms
+        && a.keepalive_interval_ms == b.keepalive_interval_ms
+        && a.reconnect_backoff_ms == b.reconnect_backoff_ms
+}
+
 impl TunnelManager {
     pub fn new() -> Self {
         Self {
@@ -93,24 +111,32 @@ impl TunnelManager {
         }
 
         for (id, cfg) in desired {
-            match guard.get(&id) {
-                None => {
+            if !guard.contains_key(&id) {
+                {
                     let handle = spawn_tunnel(cfg).await;
                     guard.insert(id, handle);
                 }
-                Some(existing) => {
-                    if existing.config != cfg {
-                        let old = guard.remove(&id).expect("exists");
-                        let _ = old.stop_tx.send(true);
-                        to_join.push(old.join);
-                        let handle = spawn_tunnel(cfg).await;
-                        guard.insert(id, handle);
-                    } else if !cfg.enabled {
-                        let _ = existing.stop_tx.send(true);
-                    } else {
-                        let _ = existing.stop_tx.send(false);
-                    }
-                }
+                continue;
+            }
+
+            let existing = guard.get_mut(&id).expect("exists");
+
+            // Avoid restarting the runtime for metadata-only changes (e.g. name).
+            // This also prevents UI hangs when a restart would wait on long-lived connections.
+            if !runtime_config_equal(&existing.config, &cfg) {
+                let old = guard.remove(&id).expect("exists");
+                let _ = old.stop_tx.send(true);
+                to_join.push(old.join);
+                let handle = spawn_tunnel(cfg).await;
+                guard.insert(id, handle);
+                continue;
+            }
+
+            existing.config = cfg.clone();
+            if !cfg.enabled {
+                let _ = existing.stop_tx.send(true);
+            } else {
+                let _ = existing.stop_tx.send(false);
             }
         }
 
