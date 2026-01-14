@@ -95,3 +95,25 @@ nodes:
 #     reconnect_backoff_ms:
 #       base_ms: 1000
 #       max_ms: 30000
+
+# Full tunnel sets (optional)
+# It scans local TCP LISTEN ports (tcp only) via `ss -plunt` (fallback `netstat -anltp`),
+# auto-creates per-port tunnels to the given SSH host (remote_port = local_port),
+# and deletes tunnels when the port disappears for longer than debounce_ms.
+#
+# tcp_tunnel_sets:
+#   - id: "s-xxx"
+#     name: "All ports to VPS"
+#     enabled: true
+#     remote_bind_addr: "0.0.0.0"
+#     ssh_host: "example.com"
+#     ssh_port: 22
+#     username: "root"
+#     auth:
+#       type: "password"
+#       password: "your-password"
+#     strict_host_key_checking: true
+#     host_key_fingerprint: "SHA256:xxxx"
+#     exclude_ports: [443, 6161]
+#     scan_interval_ms: 3000
+#     debounce_ms: 8000

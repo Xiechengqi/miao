@@ -1681,13 +1681,26 @@
                     <div class="card-header-custom">
                         <i class="bi bi-arrow-left-right"></i>
                         <span>TCP 穿透</span>
-                        <button class="btn-custom btn-add btn-sm-custom"
-                            @click="openTunnelModal(null)"
-                            :disabled="loading || !tcpTunnelsLoaded || !tcpTunnelsSupported"
-                            style="margin-left: auto;">
-                            <i class="bi bi-plus-lg"></i>
-                            添加
-                        </button>
+                        <div style="margin-left: auto; display: flex; gap: 0.6rem; align-items: center;">
+                            <div class="tab-container" style="margin: 0; padding: 2px; gap: 2px;">
+                                <button class="tab-btn" :class="{ active: tcpViewMode === 'single' }"
+                                    @click="tcpViewMode = 'single'">单穿透</button>
+                                <button class="tab-btn" :class="{ active: tcpViewMode === 'full' }"
+                                    @click="tcpViewMode = 'full'">全穿透</button>
+                            </div>
+                            <button class="btn-custom btn-secondary-custom btn-sm-custom"
+                                @click="toggleAllTcp"
+                                :disabled="loading || !tcpTunnelsLoaded || !tcpTunnelsSupported || displayedTcpItems.length === 0">
+                                <i class="bi" :class="allTcpEnabled ? 'bi-stop-circle' : 'bi-play-circle'"></i>
+                                {{ allTcpEnabled ? '全部停止' : '全部启动' }}
+                            </button>
+                            <button class="btn-custom btn-add btn-sm-custom"
+                                @click="tcpViewMode === 'single' ? openTunnelModal(null) : openFullSetModal()"
+                                :disabled="loading || !tcpTunnelsLoaded || !tcpTunnelsSupported">
+                                <i class="bi bi-plus-lg"></i>
+                                添加
+                            </button>
+                        </div>
                     </div>
 
                     <div v-if="!tcpTunnelsLoaded" class="empty-state">
@@ -1697,12 +1710,12 @@
                     <div v-else-if="!tcpTunnelsSupported" class="empty-state">
                         当前版本未启用 <code>tcp_tunnel</code> 特性
                     </div>
-                    <div v-else-if="tcpTunnels.length === 0" class="empty-state">
+                    <div v-else-if="displayedTcpItems.length === 0" class="empty-state">
                         <i class="bi bi-plug" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
                         暂无 TCP 穿透配置
                     </div>
                     <div v-else>
-                        <div v-for="t in tcpTunnels" :key="t.id" class="list-item">
+                        <div v-for="t in displayedTcpItems" :key="t.id" class="list-item">
                             <div style="flex: 1;">
                                 <div class="list-item-text" style="white-space: normal;">
                                     <strong>{{ t.name || t.id }}</strong>
@@ -1734,40 +1747,52 @@
                                 </div>
                             </div>
                             <div class="node-actions">
-                                <button class="btn-icon" @click="restartTunnel(t)" :disabled="loading"
-                                    title="重启" aria-label="重启">
-                                    <i class="bi bi-arrow-repeat"></i>
-                                </button>
-                                <button class="btn-icon" @click="toggleTunnel(t)" :disabled="loading"
-                                    :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
-                                    <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
-                                </button>
-                                <button class="btn-icon" @click="testTunnel(t)" :disabled="loading || t.mode === 'full'"
-                                    title="测试" aria-label="测试">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M3 12h4l3 8 4-16 3 8h4" />
-                                    </svg>
-                                </button>
-                                <button class="btn-icon" @click="openTunnelModal(t)" :disabled="loading || t.mode === 'full'"
-                                    title="编辑" aria-label="编辑">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M17 3a2.828 2.828 0 1 1 4 4L7 21H3v-4L17 3z" />
-                                    </svg>
-                                </button>
-                                <button class="btn-icon" @click="copyTunnel(t)" :disabled="loading || t.mode === 'full'"
-                                    title="复制" aria-label="复制">
-                                    <i class="bi bi-files"></i>
-                                </button>
-                                <button class="btn-icon btn-icon-danger" @click="confirmDeleteTunnel(t)" :disabled="loading || t.mode === 'full'"
-                                    title="删除" aria-label="删除">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M3 6h18" />
-                                        <path d="M8 6V4h8v2" />
-                                        <path d="M19 6l-1 14H6L5 6" />
-                                        <path d="M10 11v6" />
-                                        <path d="M14 11v6" />
-                                    </svg>
-                                </button>
+                                <template v-if="tcpViewMode === 'full'">
+                                    <button class="btn-icon" @click="restartTunnel(t)" :disabled="loading"
+                                        title="重启" aria-label="重启">
+                                        <i class="bi bi-arrow-repeat"></i>
+                                    </button>
+                                    <button class="btn-icon" @click="toggleTunnel(t)" :disabled="loading"
+                                        :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
+                                        <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                    </button>
+                                </template>
+                                <template v-else>
+                                    <button class="btn-icon" @click="restartTunnel(t)" :disabled="loading"
+                                        title="重启" aria-label="重启">
+                                        <i class="bi bi-arrow-repeat"></i>
+                                    </button>
+                                    <button class="btn-icon" @click="toggleTunnel(t)" :disabled="loading"
+                                        :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
+                                        <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                    </button>
+                                    <button class="btn-icon" @click="testTunnel(t)" :disabled="loading"
+                                        title="测试" aria-label="测试">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M3 12h4l3 8 4-16 3 8h4" />
+                                        </svg>
+                                    </button>
+                                    <button class="btn-icon" @click="openTunnelModal(t)" :disabled="loading"
+                                        title="编辑" aria-label="编辑">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7 21H3v-4L17 3z" />
+                                        </svg>
+                                    </button>
+                                    <button class="btn-icon" @click="copyTunnel(t)" :disabled="loading"
+                                        title="复制" aria-label="复制">
+                                        <i class="bi bi-files"></i>
+                                    </button>
+                                    <button class="btn-icon btn-icon-danger" @click="confirmDeleteTunnel(t)" :disabled="loading"
+                                        title="删除" aria-label="删除">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M3 6h18" />
+                                            <path d="M8 6V4h8v2" />
+                                            <path d="M19 6l-1 14H6L5 6" />
+                                            <path d="M10 11v6" />
+                                            <path d="M14 11v6" />
+                                        </svg>
+                                    </button>
+                                </template>
                             </div>
                         </div>
                     </div>
@@ -2231,6 +2256,120 @@
                     </div>
                 </div>
 
+                <!-- 全穿透模态框 -->
+                <div class="modal-overlay" v-if="showFullSetModal" v-cloak @click.self="showFullSetModal = false">
+                    <div class="modal-content" style="max-width: 860px;">
+                        <div class="modal-title">
+                            <i class="bi bi-arrow-left-right"></i>
+                            添加全穿透
+                            <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="showFullSetModal = false">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">名称（可选）</label>
+                                <input type="text" class="form-input" v-model="newFullSet.name" placeholder="例如: 全端口穿透到 VPS">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">启用</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newFullSet.enabled">
+                                    <span style="opacity: 0.9;">{{ newFullSet.enabled ? '已启用' : '未启用' }}</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">远程监听地址</label>
+                                <select class="form-input" v-model="newFullSet.remote_bind_addr">
+                                    <option value="127.0.0.1">127.0.0.1（仅远程本机）</option>
+                                    <option value="0.0.0.0">0.0.0.0（公网暴露）</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="max-width: 180px;">
+                                <label class="form-label">扫描间隔 (ms)</label>
+                                <input type="number" class="form-input" v-model.number="newFullSet.scan_interval_ms" placeholder="3000">
+                            </div>
+                            <div class="form-group" style="max-width: 180px;">
+                                <label class="form-label">删除防抖 (ms)</label>
+                                <input type="number" class="form-input" v-model.number="newFullSet.debounce_ms" placeholder="8000">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">SSH 主机</label>
+                                <input type="text" class="form-input" v-model="newFullSet.ssh_host" placeholder="example.com">
+                            </div>
+                            <div class="form-group" style="max-width: 140px;">
+                                <label class="form-label">SSH 端口</label>
+                                <input type="number" class="form-input" v-model.number="newFullSet.ssh_port" placeholder="22">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">用户名</label>
+                                <input type="text" class="form-input" v-model="newFullSet.username" placeholder="root">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="max-width: 220px;">
+                                <label class="form-label">认证方式</label>
+                                <select class="form-input" v-model="newFullSet.auth_type">
+                                    <option value="password">Password</option>
+                                    <option value="private_key_path">Private Key Path</option>
+                                </select>
+                            </div>
+                            <div class="form-group" v-if="newFullSet.auth_type === 'password'">
+                                <label class="form-label">密码</label>
+                                <input type="password" class="form-input" v-model="newFullSet.password" placeholder="密码">
+                            </div>
+                            <div class="form-group" v-else>
+                                <label class="form-label">私钥路径</label>
+                                <input type="text" class="form-input" v-model="newFullSet.private_key_path" placeholder="/root/.ssh/id_ed25519">
+                            </div>
+                        </div>
+                        <div class="form-row" v-if="newFullSet.auth_type === 'private_key_path'">
+                            <div class="form-group">
+                                <label class="form-label">私钥口令（可选）</label>
+                                <input type="password" class="form-input" v-model="newFullSet.private_key_passphrase" placeholder="无口令留空">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="max-width: 240px;">
+                                <label class="form-label">主机指纹校验</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newFullSet.strict_host_key_checking">
+                                    <span style="opacity: 0.9;">严格校验</span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">HostKey 指纹（SHA256:...）</label>
+                                <input type="text" class="form-input" v-model="newFullSet.host_key_fingerprint" placeholder="SHA256:xxxx">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">不穿透端口黑名单（逗号/空格/换行分隔）</label>
+                                <textarea class="form-input" v-model="newFullSet.exclude_ports_text" rows="3" placeholder="例如: 80, 443, 3000"></textarea>
+                            </div>
+                        </div>
+
+                        <div class="modal-actions">
+                            <button class="btn-custom btn-cancel btn-sm-custom" @click="showFullSetModal = false">取消</button>
+                            <button class="btn-custom btn-add btn-sm-custom" @click="submitFullSet" :disabled="loading || !canSubmitFullSet">
+                                <span v-if="loading && (loadingAction === 'fullSetSave')" class="spinner" style="width:12px;height:12px;"></span>
+                                <i v-else class="bi bi-plus-lg"></i>
+                                添加
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 日志查看 - 全宽底部 -->
                 <div class="layout-full" v-if="status.running">
                     <!-- 日志切换按钮 -->
@@ -2346,12 +2485,31 @@
 	                    const switchingDns = ref(false);
 	                const proxyStatus = ref(null);
                     // TCP tunnels (SSH -R)
-                    const tcpTunnelsLoaded = ref(false);
-                    const tcpTunnelsSupported = ref(false);
+                const tcpTunnelsLoaded = ref(false);
+                const tcpTunnelsSupported = ref(false);
                     const tcpTunnels = ref([]);
+                    const tcpViewMode = ref('single'); // single | full
                     const showTunnelModal = ref(false);
                     const editingTunnelId = ref(null);
                     const editingTunnelOriginalAuthType = ref(null);
+                    const showFullSetModal = ref(false);
+                    const newFullSet = ref({
+                        name: '',
+                        enabled: true,
+                        remote_bind_addr: '127.0.0.1',
+                        scan_interval_ms: 3000,
+                        debounce_ms: 8000,
+                        ssh_host: '',
+                        ssh_port: 22,
+                        username: 'root',
+                        auth_type: 'password',
+                        password: '',
+                        private_key_path: '',
+                        private_key_passphrase: '',
+                        strict_host_key_checking: true,
+                        host_key_fingerprint: '',
+                        exclude_ports_text: '',
+                    });
                     const newTunnel = ref({
                         name: '',
                         enabled: true,
@@ -2573,6 +2731,24 @@
                     }
                     if (!editingTunnelId.value) return !!newTunnel.value.private_key_path;
                     return authTypeChanged ? !!newTunnel.value.private_key_path : true;
+                });
+
+                const canSubmitFullSet = computed(() => {
+                    if (!newFullSet.value.ssh_host || !newFullSet.value.username) return false;
+                    if (newFullSet.value.strict_host_key_checking && !newFullSet.value.host_key_fingerprint) return false;
+                    if (newFullSet.value.auth_type === 'password') return !!newFullSet.value.password;
+                    return !!newFullSet.value.private_key_path;
+                });
+
+                const displayedTcpItems = computed(() => {
+                    const mode = tcpViewMode.value;
+                    return (tcpTunnels.value || []).filter(t => (mode === 'full' ? t.mode === 'full' : t.mode !== 'full'));
+                });
+
+                const allTcpEnabled = computed(() => {
+                    const items = displayedTcpItems.value || [];
+                    if (!items.length) return false;
+                    return items.every(i => !!i.enabled);
                 });
 
                 // 过滤只显示 selector 类型的代理组
@@ -2934,6 +3110,86 @@
                         showTunnelModal.value = true;
                     };
 
+                    const openFullSetModal = () => {
+                        newFullSet.value = {
+                            name: '',
+                            enabled: true,
+                            remote_bind_addr: '127.0.0.1',
+                            scan_interval_ms: 3000,
+                            debounce_ms: 8000,
+                            ssh_host: '',
+                            ssh_port: 22,
+                            username: 'root',
+                            auth_type: 'password',
+                            password: '',
+                            private_key_path: '',
+                            private_key_passphrase: '',
+                            strict_host_key_checking: true,
+                            host_key_fingerprint: '',
+                            exclude_ports_text: '',
+                        };
+                        showFullSetModal.value = true;
+                    };
+
+                    const parsePortList = (text) => {
+                        const parts = (text || '')
+                            .split(/[\s,]+/g)
+                            .map(s => s.trim())
+                            .filter(Boolean);
+                        const ports = [];
+                        const seen = new Set();
+                        for (const p of parts) {
+                            const n = Number(p);
+                            if (!Number.isFinite(n)) continue;
+                            const i = Math.floor(n);
+                            if (i <= 0 || i > 65535) continue;
+                            if (seen.has(i)) continue;
+                            seen.add(i);
+                            ports.push(i);
+                        }
+                        return ports;
+                    };
+
+                    const submitFullSet = async () => {
+                        if (loading.value) return;
+                        loading.value = true;
+                        loadingAction.value = 'fullSetSave';
+                        try {
+                            const auth = newFullSet.value.auth_type === 'password'
+                                ? { type: 'password', password: newFullSet.value.password }
+                                : { type: 'private_key_path', path: newFullSet.value.private_key_path, passphrase: (newFullSet.value.private_key_passphrase || null) };
+
+                            const body = {
+                                name: newFullSet.value.name || null,
+                                enabled: !!newFullSet.value.enabled,
+                                remote_bind_addr: newFullSet.value.remote_bind_addr || '127.0.0.1',
+                                ssh_host: newFullSet.value.ssh_host,
+                                ssh_port: Number(newFullSet.value.ssh_port || 22),
+                                username: newFullSet.value.username,
+                                auth,
+                                strict_host_key_checking: !!newFullSet.value.strict_host_key_checking,
+                                host_key_fingerprint: newFullSet.value.host_key_fingerprint || '',
+                                exclude_ports: parsePortList(newFullSet.value.exclude_ports_text),
+                                scan_interval_ms: Number(newFullSet.value.scan_interval_ms || 3000),
+                                debounce_ms: Number(newFullSet.value.debounce_ms || 8000),
+                            };
+
+                            await apiFetch('/api/tcp-tunnel-sets', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(body),
+                            });
+                            showToast('全穿透已添加', 'success');
+                            showFullSetModal.value = false;
+                            await fetchTcpTunnels();
+                        } catch (e) {
+                            showToast(`添加失败: ${e.message || e}`, 'error');
+                        } finally {
+                            loading.value = false;
+                            loadingAction.value = '';
+                        }
+                    };
+
                     const handleRemoteBindChange = async () => {
                         if (newTunnel.value.remote_bind_addr !== '0.0.0.0') return;
                         if (newTunnel.value.allow_public_bind) return;
@@ -3036,6 +3292,40 @@
                             await fetchTcpTunnels();
                         } catch (e) {
                             showToast(`操作失败: ${e.message || e}`, 'error');
+                        }
+                    };
+
+                    const toggleAllTcp = async () => {
+                        if (loading.value) return;
+                        const items = displayedTcpItems.value || [];
+                        if (!items.length) return;
+                        const wasAllEnabled = allTcpEnabled.value;
+                        loading.value = true;
+                        loadingAction.value = 'tcpBulkToggle';
+                        try {
+                            const ids = items.map(i => i.id);
+                            if (tcpViewMode.value === 'full') {
+                                const path = wasAllEnabled ? '/api/tcp-tunnel-sets/bulk/stop' : '/api/tcp-tunnel-sets/bulk/start';
+                                await apiFetch(path, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ ids }),
+                                });
+                            } else {
+                                const path = wasAllEnabled ? '/api/tcp-tunnels/bulk/stop' : '/api/tcp-tunnels/bulk/start';
+                                await apiFetch(path, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ ids }),
+                                });
+                            }
+                            await fetchTcpTunnels();
+                            showToast(wasAllEnabled ? '已全部停止' : '已全部启动', 'success');
+                        } catch (e) {
+                            showToast(`批量操作失败: ${e.message || e}`, 'error');
+                        } finally {
+                            loading.value = false;
+                            loadingAction.value = '';
                         }
                     };
 
@@ -3708,6 +3998,8 @@
 		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 		                    proxyStatus,
                             tcpTunnelsLoaded, tcpTunnelsSupported, tcpTunnels,
+                            tcpViewMode, displayedTcpItems, allTcpEnabled, toggleAllTcp,
+                            showFullSetModal, newFullSet, canSubmitFullSet, openFullSetModal, submitFullSet,
 		                    reloadSubFiles,
 	                    newNode, canAddNode, canTestNode, canSubmitNode, showNodeModal, nodeType, setNodeType,
                         portTouched, openNodeModal,

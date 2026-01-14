@@ -28,6 +28,7 @@ use tokio::time::{sleep, Duration};
 use base64::Engine;
 
 mod tcp_tunnel;
+mod full_tunnel;
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -127,6 +128,15 @@ struct TcpTunnelConfig {
     keepalive_interval_ms: u64,
     #[serde(default = "default_tcp_tunnel_backoff")]
     reconnect_backoff_ms: TcpTunnelBackoff,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_by: Option<TcpTunnelManagedBy>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TcpTunnelManagedBy {
+    FullTunnel { set_id: String, managed_port: u16 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -364,6 +374,40 @@ struct TcpTunnelTestResponse {
     ok: bool,
 }
 
+#[derive(Deserialize)]
+struct BulkIdsRequest {
+    ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TcpTunnelSetCreateRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    remote_bind_addr: Option<String>,
+    ssh_host: String,
+    #[serde(default)]
+    ssh_port: Option<u16>,
+    username: String,
+    auth: TcpTunnelAuth,
+    #[serde(default)]
+    strict_host_key_checking: Option<bool>,
+    #[serde(default)]
+    host_key_fingerprint: Option<String>,
+    #[serde(default)]
+    exclude_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    scan_interval_ms: Option<u64>,
+    #[serde(default)]
+    debounce_ms: Option<u64>,
+}
+
+fn generate_tunnel_set_id() -> String {
+    format!("s-{}", uuid::Uuid::new_v4())
+}
+
 #[derive(Serialize)]
 struct SetupStatusResponse {
     initialized: bool,
@@ -393,6 +437,7 @@ struct AppState {
     proxy_monitor: Mutex<ProxyMonitorState>,
     setup_required: AtomicBool,
     tcp_tunnel: tcp_tunnel::TunnelManager,
+    full_tunnel: full_tunnel::FullTunnelManager,
 }
 
 #[derive(Clone)]
@@ -2350,12 +2395,18 @@ fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTu
         connect_timeout_ms,
         keepalive_interval_ms,
         reconnect_backoff_ms,
+        managed_by: None,
     })
 }
 
 async fn apply_tunnels_from_config(state: &Arc<AppState>) {
     let tunnels = { state.config.lock().await.tcp_tunnels.clone() };
     state.tcp_tunnel.apply_config(&tunnels).await;
+}
+
+async fn apply_full_tunnel_sets_from_config(state: &Arc<AppState>) {
+    let sets = { state.config.lock().await.tcp_tunnel_sets.clone() };
+    state.full_tunnel.sync_from_config(state.clone(), sets).await;
 }
 
 async fn get_tcp_tunnels(
@@ -2734,11 +2785,21 @@ async fn get_tcp_tunnel_overview(
 
     for s in sets {
         let mut status = tcp_tunnel::TunnelRuntimeStatus::default();
-        status.state = if s.enabled {
-            tcp_tunnel::TunnelState::Forwarding
-        } else {
+        let st = state.full_tunnel.get_status(&s.id).await;
+        status.state = if !s.enabled {
             tcp_tunnel::TunnelState::Stopped
+        } else if st.last_error.is_some() {
+            tcp_tunnel::TunnelState::Error
+        } else {
+            tcp_tunnel::TunnelState::Forwarding
         };
+        if let Some(e) = st.last_error {
+            status.last_error = Some(tcp_tunnel::TunnelErrorInfo {
+                code: "SCAN_FAILED".to_string(),
+                message: e,
+                at_ms: chrono::Utc::now().timestamp_millis(),
+            });
+        }
         items.push(TcpTunnelOverviewItem {
             mode: TcpTunnelOverviewMode::Full,
             id: s.id,
@@ -2785,6 +2846,7 @@ async fn start_tcp_tunnel_set(
             ));
         }
     }
+    apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set started")))
 }
 
@@ -2805,6 +2867,7 @@ async fn stop_tcp_tunnel_set(
             ));
         }
     }
+    apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set stopped")))
 }
 
@@ -2826,7 +2889,161 @@ async fn restart_tcp_tunnel_set(
             ));
         }
     }
+    apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set restarted")))
+}
+
+async fn create_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TcpTunnelSetCreateRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let id = generate_tunnel_set_id();
+    let enabled = req.enabled.unwrap_or(false);
+    let remote_bind_addr = req.remote_bind_addr.unwrap_or_else(default_remote_bind_addr);
+    let ssh_port = req.ssh_port.unwrap_or_else(default_ssh_port);
+    let strict_host_key_checking = req.strict_host_key_checking.unwrap_or(true);
+    let host_key_fingerprint = req.host_key_fingerprint.unwrap_or_default();
+    let exclude_ports = req.exclude_ports.unwrap_or_default();
+    let scan_interval_ms = req.scan_interval_ms.unwrap_or(3_000);
+    let debounce_ms = req.debounce_ms.unwrap_or(8_000);
+
+    if strict_host_key_checking && host_key_fingerprint.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "host_key_fingerprint is required when strict_host_key_checking is true",
+            )),
+        ));
+    }
+
+    match &req.auth {
+        TcpTunnelAuth::Password { password } if password.is_empty() => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("password is required"))));
+        }
+        TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("private key path is required")),
+            ));
+        }
+        _ => {}
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        config.tcp_tunnel_sets.push(TcpTunnelSetConfig {
+            id,
+            name: req.name,
+            enabled,
+            remote_bind_addr,
+            ssh_host: req.ssh_host,
+            ssh_port,
+            username: req.username,
+            auth: req.auth,
+            strict_host_key_checking,
+            host_key_fingerprint,
+            exclude_ports,
+            scan_interval_ms,
+            debounce_ms,
+        });
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    apply_full_tunnel_sets_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Set created")))
+}
+
+async fn bulk_start_tcp_tunnels(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkIdsRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        for id in req.ids.iter() {
+            if let Some(t) = config.tcp_tunnels.iter_mut().find(|t| &t.id == id) {
+                t.enabled = true;
+            }
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_tunnels_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Tunnels started")))
+}
+
+async fn bulk_stop_tcp_tunnels(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkIdsRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        for id in req.ids.iter() {
+            if let Some(t) = config.tcp_tunnels.iter_mut().find(|t| &t.id == id) {
+                t.enabled = false;
+            }
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_tunnels_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Tunnels stopped")))
+}
+
+async fn bulk_start_tcp_tunnel_sets(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkIdsRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        for id in req.ids.iter() {
+            if let Some(s) = config.tcp_tunnel_sets.iter_mut().find(|s| &s.id == id) {
+                s.enabled = true;
+            }
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_full_tunnel_sets_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Sets started")))
+}
+
+async fn bulk_stop_tcp_tunnel_sets(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkIdsRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        for id in req.ids.iter() {
+            if let Some(s) = config.tcp_tunnel_sets.iter_mut().find(|s| &s.id == id) {
+                s.enabled = false;
+            }
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_full_tunnel_sets_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Sets stopped")))
 }
 
 async fn copy_tcp_tunnel(
@@ -4710,12 +4927,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         proxy_monitor: Mutex::new(ProxyMonitorState::default()),
         setup_required: AtomicBool::new(setup_required),
         tcp_tunnel: tcp_tunnel::TunnelManager::new(),
+        full_tunnel: full_tunnel::FullTunnelManager::new(),
     });
 
     // Apply initial TCP tunnel config (best-effort).
     {
         let cfg = app_state.config.lock().await;
         app_state.tcp_tunnel.apply_config(&cfg.tcp_tunnels).await;
+        app_state
+            .full_tunnel
+            .sync_from_config(app_state.clone(), cfg.tcp_tunnel_sets.clone())
+            .await;
     }
 
     // DNS health monitor (best-effort). It updates config.dns_active and restarts sing-box when needed.
@@ -4774,10 +4996,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnels/{id}/restart", post(restart_tcp_tunnel))
         .route("/api/tcp-tunnels/{id}/test", post(test_tcp_tunnel))
         .route("/api/tcp-tunnels/{id}/copy", post(copy_tcp_tunnel))
+        .route("/api/tcp-tunnels/bulk/start", post(bulk_start_tcp_tunnels))
+        .route("/api/tcp-tunnels/bulk/stop", post(bulk_stop_tcp_tunnels))
         .route("/api/tcp-tunnel/overview", get(get_tcp_tunnel_overview))
+        .route("/api/tcp-tunnel-sets", post(create_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/start", post(start_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/stop", post(stop_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/restart", post(restart_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/bulk/start", post(bulk_start_tcp_tunnel_sets))
+        .route("/api/tcp-tunnel-sets/bulk/stop", post(bulk_stop_tcp_tunnel_sets))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
