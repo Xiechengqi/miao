@@ -465,7 +465,7 @@ impl russh::client::Handler for TunnelClientHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
         if !self.cfg.strict_host_key_checking {
             return Ok(true);
@@ -497,7 +497,7 @@ impl russh::client::Handler for TunnelClientHandler {
 
     fn server_channel_open_forwarded_tcpip(
         &mut self,
-        mut channel: russh::Channel<russh::client::Msg>,
+        channel: russh::Channel<russh::client::Msg>,
         _connected_address: &str,
         _connected_port: u32,
         _originator_address: &str,
@@ -515,7 +515,9 @@ impl russh::client::Handler for TunnelClientHandler {
             let result = tokio::net::TcpStream::connect(&local_addr).await;
             match result {
                 Ok(mut stream) => {
-                    let copy_res = tokio::io::copy_bidirectional(&mut channel, &mut stream).await;
+                    let mut channel_stream = channel.into_stream();
+                    let copy_res =
+                        tokio::io::copy_bidirectional(&mut channel_stream, &mut stream).await;
                     if let Ok((a, b)) = copy_res {
                         let mut s = status.write().await;
                         s.bytes_in = s.bytes_in.saturating_add(a);
@@ -536,7 +538,9 @@ impl russh::client::Handler for TunnelClientHandler {
 }
 
 #[cfg(feature = "tcp_tunnel")]
-fn compute_openssh_sha256_fingerprint(key: &ssh_key::PublicKey) -> Result<String, russh::Error> {
+fn compute_openssh_sha256_fingerprint(
+    key: &russh::keys::ssh_key::PublicKey,
+) -> Result<String, russh::Error> {
     use base64::engine::general_purpose::STANDARD_NO_PAD;
     use base64::Engine;
     use sha2::{Digest, Sha256};
