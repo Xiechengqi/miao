@@ -507,31 +507,39 @@ impl russh::client::Handler for TunnelClientHandler {
         let local_addr = format!("{}:{}", self.cfg.local_addr, self.cfg.local_port);
         let status = self.status.clone();
         async move {
-            {
-                let mut s = status.write().await;
-                s.active_conns = s.active_conns.saturating_add(1);
-            }
+            // Important: do not block the SSH session handler with a long-lived copy loop.
+            // If we await I/O here, the underlying session task may stop processing packets,
+            // resulting in deadlocks (no data forwarded; disconnect/cancel not applied).
+            tokio::spawn(async move {
+                {
+                    let mut s = status.write().await;
+                    s.active_conns = s.active_conns.saturating_add(1);
+                }
 
-            let result = tokio::net::TcpStream::connect(&local_addr).await;
-            match result {
-                Ok(mut stream) => {
-                    let mut channel_stream = channel.into_stream();
-                    let copy_res =
-                        tokio::io::copy_bidirectional(&mut channel_stream, &mut stream).await;
-                    if let Ok((a, b)) = copy_res {
-                        let mut s = status.write().await;
-                        s.bytes_in = s.bytes_in.saturating_add(a);
-                        s.bytes_out = s.bytes_out.saturating_add(b);
+                let result = tokio::net::TcpStream::connect(&local_addr).await;
+                match result {
+                    Ok(mut stream) => {
+                        let mut channel_stream = channel.into_stream();
+                        let copy_res =
+                            tokio::io::copy_bidirectional(&mut channel_stream, &mut stream).await;
+                        let _ = tokio::io::AsyncWriteExt::shutdown(&mut channel_stream).await;
+                        if let Ok((a, b)) = copy_res {
+                            let mut s = status.write().await;
+                            s.bytes_in = s.bytes_in.saturating_add(a);
+                            s.bytes_out = s.bytes_out.saturating_add(b);
+                        }
+                    }
+                    Err(e) => {
+                        record_last_error(&status, "LOCAL_CONNECT_FAILED", &format!("{e}")).await;
+                        let _ = channel.close().await;
                     }
                 }
-                Err(e) => {
-                    record_last_error(&status, "LOCAL_CONNECT_FAILED", &format!("{e}")).await;
+
+                {
+                    let mut s = status.write().await;
+                    s.active_conns = s.active_conns.saturating_sub(1);
                 }
-            }
-            {
-                let mut s = status.write().await;
-                s.active_conns = s.active_conns.saturating_sub(1);
-            }
+            });
             Ok(())
         }
     }
