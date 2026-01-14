@@ -58,6 +58,10 @@ nodes:
 # proxy_window_fail_rate: 0.6
 # proxy_pause_ms: 60000
 
+# IPv6 note:
+# Miao enables sing-box TUN with an IPv6 ULA prefix by default (fd00:172:18::1/126) to avoid IPv6 being blocked by strict routing rules.
+# DNS strategy is still prefer_ipv4 by default, so IPv6 will mainly be used when necessary.
+
 # TCP reverse tunneling via SSH (-R) (optional)
 # Note:
 # - remote_port must be explicit (no auto allocation). Port conflict will be marked as error.
