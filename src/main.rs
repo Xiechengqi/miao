@@ -2610,6 +2610,67 @@ async fn test_tcp_tunnel(
     }
 }
 
+async fn copy_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<TcpTunnelItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut new_cfg: Option<TcpTunnelConfig> = None;
+    {
+        let mut config = state.config.lock().await;
+        let Some(existing) = config.tcp_tunnels.iter().find(|t| t.id == id).cloned() else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+        };
+
+        let mut cloned = existing.clone();
+        cloned.id = generate_tunnel_id();
+        cloned.enabled = false;
+        cloned.name = existing.name.as_ref().and_then(|n| {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("{trimmed}-copy"))
+            }
+        });
+
+        config.tcp_tunnels.push(cloned.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        new_cfg = Some(cloned);
+    }
+
+    apply_tunnels_from_config(&state).await;
+    let cfg = new_cfg.expect("set");
+    let status = state.tcp_tunnel.get_status(&cfg.id).await.unwrap_or_default();
+    Ok(Json(ApiResponse::success(
+        "Tunnel copied",
+        TcpTunnelItem {
+            id: cfg.id,
+            name: cfg.name,
+            enabled: cfg.enabled,
+            local_addr: cfg.local_addr,
+            local_port: cfg.local_port,
+            remote_bind_addr: cfg.remote_bind_addr,
+            remote_port: cfg.remote_port,
+            ssh_host: cfg.ssh_host,
+            ssh_port: cfg.ssh_port,
+            username: cfg.username,
+            auth: redact_tunnel_auth(&cfg.auth),
+            strict_host_key_checking: cfg.strict_host_key_checking,
+            host_key_fingerprint: cfg.host_key_fingerprint,
+            allow_public_bind: cfg.allow_public_bind,
+            connect_timeout_ms: cfg.connect_timeout_ms,
+            keepalive_interval_ms: cfg.keepalive_interval_ms,
+            reconnect_backoff_ms: cfg.reconnect_backoff_ms,
+            status,
+        },
+    )))
+}
+
 // ============================================================================
 // Internal Functions
 // ============================================================================
@@ -4494,6 +4555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnels/{id}/stop", post(stop_tcp_tunnel))
         .route("/api/tcp-tunnels/{id}/restart", post(restart_tcp_tunnel))
         .route("/api/tcp-tunnels/{id}/test", post(test_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}/copy", post(copy_tcp_tunnel))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）

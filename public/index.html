@@ -1736,6 +1736,10 @@
                                     title="重启" aria-label="重启">
                                     <i class="bi bi-arrow-repeat"></i>
                                 </button>
+                                <button class="btn-icon" @click="copyTunnel(t)" :disabled="loading"
+                                    title="复制" aria-label="复制">
+                                    <i class="bi bi-files"></i>
+                                </button>
                                 <button class="btn-icon" @click="toggleTunnel(t)" :disabled="loading"
                                     :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
                                     <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
@@ -3050,6 +3054,16 @@
                         });
                     };
 
+                    const copyTunnel = async (t) => {
+                        try {
+                            await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/copy`, { method: 'POST' });
+                            showToast('已复制（默认未启动）', 'success');
+                            await fetchTcpTunnels();
+                        } catch (e) {
+                            showToast(`复制失败: ${e.message || e}`, 'error');
+                        }
+                    };
+
                     const getDnsBadgeClass = (h) => {
                         if (!h) return 'dns-badge-unknown';
                         if (h.cooldown_remaining_secs > 0) return 'dns-badge-cooldown';
@@ -3695,6 +3709,7 @@
                         formatNodeType, getNodeTypeClass,
 	                    fetchDnsStatus, checkDnsNow, switchDnsActive, getDnsBadgeClass, dnsHealthTitle,
                             fetchTcpTunnels, openTunnelModal, handleRemoteBindChange, submitTunnel, toggleTunnel, restartTunnel, testTunnel, confirmDeleteTunnel,
+                            copyTunnel,
 	                    fetchProxyStatus, getProxyMonitorLabel, isNodeSelected, getNodeSelectIndex, handleProxyNodeClick,
 	                    switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
 	                    formatUptime
