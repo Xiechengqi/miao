@@ -2958,6 +2958,36 @@ async fn create_tcp_tunnel_set(
     Ok(Json(ApiResponse::success_no_data("Set created")))
 }
 
+async fn delete_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let before = config.tcp_tunnel_sets.len();
+        config.tcp_tunnel_sets.retain(|s| s.id != id);
+        if config.tcp_tunnel_sets.len() == before {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        }
+        // Also remove any managed tunnels for this set.
+        config.tcp_tunnels.retain(|t| {
+            !matches!(
+                &t.managed_by,
+                Some(TcpTunnelManagedBy::FullTunnel { set_id, .. }) if set_id == &id
+            )
+        });
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_tunnels_from_config(&state).await;
+    apply_full_tunnel_sets_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Set deleted")))
+}
+
 async fn bulk_start_tcp_tunnels(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkIdsRequest>,
@@ -5003,6 +5033,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnel-sets/{id}/start", post(start_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/stop", post(stop_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/restart", post(restart_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}", delete(delete_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/bulk/start", post(bulk_start_tcp_tunnel_sets))
         .route("/api/tcp-tunnel-sets/bulk/stop", post(bulk_stop_tcp_tunnel_sets))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件

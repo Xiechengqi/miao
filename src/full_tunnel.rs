@@ -44,13 +44,15 @@ impl FullTunnelManager {
             desired.insert(s.id.clone(), s);
         }
 
+        let mut to_join: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
         // Stop removed sets
         let existing_ids: Vec<String> = handles.keys().cloned().collect();
         for id in existing_ids {
             if !desired.contains_key(&id) {
                 if let Some(h) = handles.remove(&id) {
                     let _ = h.stop_tx.send(true);
-                    let _ = h.join.await;
+                    to_join.push(h.join);
                 }
                 let mut st = self.inner.status.lock().await;
                 st.remove(&id);
@@ -60,8 +62,9 @@ impl FullTunnelManager {
         // Start/stop/update existing
         for (id, cfg) in desired {
             if !cfg.enabled {
-                if let Some(h) = handles.get(&id) {
+                if let Some(h) = handles.remove(&id) {
                     let _ = h.stop_tx.send(true);
+                    to_join.push(h.join);
                 }
                 let mut st = self.inner.status.lock().await;
                 st.entry(id.clone()).or_default().enabled = false;
@@ -85,6 +88,11 @@ impl FullTunnelManager {
             handles.insert(id.clone(), SetHandle { stop_tx, join });
             let mut st = self.inner.status.lock().await;
             st.entry(id.clone()).or_default().enabled = true;
+        }
+
+        drop(handles);
+        for j in to_join {
+            let _ = j.await;
         }
     }
 }
@@ -345,4 +353,3 @@ fn extract_port(s: &str) -> Option<u16> {
     let port_str = it.next()?;
     port_str.parse::<u16>().ok()
 }
-
