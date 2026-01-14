@@ -1676,11 +1676,11 @@
                     </div>
                 </div>
 
-                <!-- TCP 穿透 (SSH -R) - 全宽 -->
+                <!-- TCP 穿透 - 全宽 -->
                 <div class="glass-card layout-full">
                     <div class="card-header-custom">
                         <i class="bi bi-arrow-left-right"></i>
-                        <span>TCP 穿透 (SSH -R)</span>
+                        <span>TCP 穿透</span>
                         <button class="btn-custom btn-add btn-sm-custom"
                             @click="openTunnelModal(null)"
                             :disabled="loading || !tcpTunnelsLoaded || !tcpTunnelsSupported"
@@ -1706,6 +1706,9 @@
                             <div style="flex: 1;">
                                 <div class="list-item-text" style="white-space: normal;">
                                     <strong>{{ t.name || t.id }}</strong>
+                                    <span class="node-type-badge dns-badge-unknown" style="margin-left: 0.35rem;">
+                                        {{ t.mode === 'full' ? '全穿透' : '单穿透' }}
+                                    </span>
                                     <span v-if="t.remote_bind_addr === '0.0.0.0'" class="node-type-badge dns-badge-bad" title="公网暴露：请确认 sshd GatewayPorts / 防火墙规则">
                                         公网
                                     </span>
@@ -1715,7 +1718,12 @@
                                     </span>
                                 </div>
                                 <div class="node-info">
-                                    远程监听: {{ t.remote_bind_addr }}:{{ t.remote_port }} → 本地: {{ t.local_addr }}:{{ t.local_port }}
+                                    <template v-if="t.mode !== 'full'">
+                                        远程监听: {{ t.remote_bind_addr }}:{{ t.remote_port }} → 本地: {{ t.local_addr }}:{{ t.local_port }}
+                                    </template>
+                                    <template v-else>
+                                        远程监听: {{ t.remote_bind_addr }}（同端口映射）
+                                    </template>
                                 </div>
                                 <div class="node-info" style="opacity: 0.85;">
                                     SSH: {{ t.username }}@{{ t.ssh_host }}:{{ t.ssh_port }}
@@ -1726,31 +1734,31 @@
                                 </div>
                             </div>
                             <div class="node-actions">
-                                <button class="btn-icon" @click="testTunnel(t)" :disabled="loading"
-                                    title="测试" aria-label="测试">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M3 12h4l3 8 4-16 3 8h4" />
-                                    </svg>
-                                </button>
                                 <button class="btn-icon" @click="restartTunnel(t)" :disabled="loading"
                                     title="重启" aria-label="重启">
                                     <i class="bi bi-arrow-repeat"></i>
-                                </button>
-                                <button class="btn-icon" @click="copyTunnel(t)" :disabled="loading"
-                                    title="复制" aria-label="复制">
-                                    <i class="bi bi-files"></i>
                                 </button>
                                 <button class="btn-icon" @click="toggleTunnel(t)" :disabled="loading"
                                     :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
                                     <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
                                 </button>
-                                <button class="btn-icon" @click="openTunnelModal(t)" :disabled="loading"
+                                <button class="btn-icon" @click="testTunnel(t)" :disabled="loading || t.mode === 'full'"
+                                    title="测试" aria-label="测试">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 12h4l3 8 4-16 3 8h4" />
+                                    </svg>
+                                </button>
+                                <button class="btn-icon" @click="openTunnelModal(t)" :disabled="loading || t.mode === 'full'"
                                     title="编辑" aria-label="编辑">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <path d="M17 3a2.828 2.828 0 1 1 4 4L7 21H3v-4L17 3z" />
                                     </svg>
                                 </button>
-                                <button class="btn-icon btn-icon-danger" @click="confirmDeleteTunnel(t)" :disabled="loading"
+                                <button class="btn-icon" @click="copyTunnel(t)" :disabled="loading || t.mode === 'full'"
+                                    title="复制" aria-label="复制">
+                                    <i class="bi bi-files"></i>
+                                </button>
+                                <button class="btn-icon btn-icon-danger" @click="confirmDeleteTunnel(t)" :disabled="loading || t.mode === 'full'"
                                     title="删除" aria-label="删除">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <path d="M3 6h18" />
@@ -2884,7 +2892,7 @@
 
                     const fetchTcpTunnels = async () => {
                         try {
-                            const data = await apiFetch('/api/tcp-tunnels');
+                            const data = await apiFetch('/api/tcp-tunnel/overview');
                             tcpTunnelsLoaded.value = true;
                             tcpTunnelsSupported.value = !!data.data?.supported;
                             tcpTunnels.value = data.data?.items || [];
@@ -2897,6 +2905,7 @@
                     };
 
                     const openTunnelModal = (t) => {
+                        if (t && t.mode === 'full') return;
                         editingTunnelId.value = t ? t.id : null;
                         editingTunnelOriginalAuthType.value = t ? (t?.auth?.type || null) : null;
                         newTunnel.value = {
@@ -3010,10 +3019,18 @@
                     const toggleTunnel = async (t) => {
                         try {
                             if (t.enabled) {
-                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/stop`, { method: 'POST' });
+                                if (t.mode === 'full') {
+                                    await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(t.id)}/stop`, { method: 'POST' });
+                                } else {
+                                    await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/stop`, { method: 'POST' });
+                                }
                                 showToast('已停止', 'success');
                             } else {
-                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/start`, { method: 'POST' });
+                                if (t.mode === 'full') {
+                                    await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(t.id)}/start`, { method: 'POST' });
+                                } else {
+                                    await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/start`, { method: 'POST' });
+                                }
                                 showToast('已启动', 'success');
                             }
                             await fetchTcpTunnels();
@@ -3024,7 +3041,11 @@
 
                     const restartTunnel = async (t) => {
                         try {
-                            await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/restart`, { method: 'POST' });
+                            if (t.mode === 'full') {
+                                await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(t.id)}/restart`, { method: 'POST' });
+                            } else {
+                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/restart`, { method: 'POST' });
+                            }
                             showToast('已重启', 'success');
                             await fetchTcpTunnels();
                         } catch (e) {
@@ -3033,6 +3054,7 @@
                     };
 
                     const testTunnel = async (t) => {
+                        if (t.mode === 'full') return;
                         try {
                             await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/test`, { method: 'POST' });
                             showToast('测试成功', 'success');
@@ -3043,6 +3065,7 @@
                     };
 
                     const confirmDeleteTunnel = (t) => {
+                        if (t.mode === 'full') return;
                         showConfirm('删除 TCP 穿透', `确定删除 ${t.name || t.id}？`, async () => {
                             try {
                                 await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
@@ -3055,6 +3078,7 @@
                     };
 
                     const copyTunnel = async (t) => {
+                        if (t.mode === 'full') return;
                         try {
                             await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/copy`, { method: 'POST' });
                             showToast('已复制（默认未启动）', 'success');

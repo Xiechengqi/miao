@@ -129,6 +129,37 @@ struct TcpTunnelConfig {
     reconnect_backoff_ms: TcpTunnelBackoff,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct TcpTunnelSetConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+
+    #[serde(default = "default_remote_bind_addr")]
+    remote_bind_addr: String,
+
+    ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    ssh_port: u16,
+    username: String,
+
+    auth: TcpTunnelAuth,
+
+    #[serde(default = "default_true")]
+    strict_host_key_checking: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    host_key_fingerprint: String,
+
+    #[serde(default)]
+    exclude_ports: Vec<u16>,
+    #[serde(default)]
+    scan_interval_ms: u64,
+    #[serde(default)]
+    debounce_ms: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +203,10 @@ struct Config {
     // SSH reverse TCP tunnels (optional)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tcp_tunnels: Vec<TcpTunnelConfig>,
+
+    // Full tunnels (optional)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tcp_tunnel_sets: Vec<TcpTunnelSetConfig>,
 }
 
 const DEFAULT_PORT: u16 = 6161;
@@ -242,6 +277,53 @@ struct TcpTunnelItem {
 struct TcpTunnelListResponse {
     supported: bool,
     items: Vec<TcpTunnelItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TcpTunnelOverviewMode {
+    Single,
+    Full,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelOverviewItem {
+    mode: TcpTunnelOverviewMode,
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    ssh_host: String,
+    ssh_port: u16,
+    username: String,
+    remote_bind_addr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<TcpTunnelAuthPublic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strict_host_key_checking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_key_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_public_bind: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connect_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keepalive_interval_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reconnect_backoff_ms: Option<TcpTunnelBackoff>,
+    // For UI compatibility, keep a status object with a state string.
+    status: tcp_tunnel::TunnelRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelOverviewResponse {
+    supported: bool,
+    items: Vec<TcpTunnelOverviewItem>,
 }
 
 #[derive(Deserialize)]
@@ -2610,6 +2692,143 @@ async fn test_tcp_tunnel(
     }
 }
 
+async fn get_tcp_tunnel_overview(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<TcpTunnelOverviewResponse>> {
+    let supported = state.tcp_tunnel.supported();
+    let (tunnels, sets) = {
+        let config = state.config.lock().await;
+        (config.tcp_tunnels.clone(), config.tcp_tunnel_sets.clone())
+    };
+
+    let mut items: Vec<TcpTunnelOverviewItem> = Vec::with_capacity(tunnels.len() + sets.len());
+
+    for t in tunnels {
+        let status = state
+            .tcp_tunnel
+            .get_status(&t.id)
+            .await
+            .unwrap_or_default();
+        items.push(TcpTunnelOverviewItem {
+            mode: TcpTunnelOverviewMode::Single,
+            id: t.id,
+            name: t.name,
+            enabled: t.enabled,
+            ssh_host: t.ssh_host,
+            ssh_port: t.ssh_port,
+            username: t.username,
+            remote_bind_addr: t.remote_bind_addr,
+            remote_port: Some(t.remote_port),
+            local_addr: Some(t.local_addr),
+            local_port: Some(t.local_port),
+            auth: Some(redact_tunnel_auth(&t.auth)),
+            strict_host_key_checking: Some(t.strict_host_key_checking),
+            host_key_fingerprint: Some(t.host_key_fingerprint),
+            allow_public_bind: Some(t.allow_public_bind),
+            connect_timeout_ms: Some(t.connect_timeout_ms),
+            keepalive_interval_ms: Some(t.keepalive_interval_ms),
+            reconnect_backoff_ms: Some(t.reconnect_backoff_ms),
+            status,
+        });
+    }
+
+    for s in sets {
+        let mut status = tcp_tunnel::TunnelRuntimeStatus::default();
+        status.state = if s.enabled {
+            tcp_tunnel::TunnelState::Forwarding
+        } else {
+            tcp_tunnel::TunnelState::Stopped
+        };
+        items.push(TcpTunnelOverviewItem {
+            mode: TcpTunnelOverviewMode::Full,
+            id: s.id,
+            name: s.name,
+            enabled: s.enabled,
+            ssh_host: s.ssh_host,
+            ssh_port: s.ssh_port,
+            username: s.username,
+            remote_bind_addr: s.remote_bind_addr,
+            remote_port: None,
+            local_addr: None,
+            local_port: None,
+            auth: None,
+            strict_host_key_checking: None,
+            host_key_fingerprint: None,
+            allow_public_bind: None,
+            connect_timeout_ms: None,
+            keepalive_interval_ms: None,
+            reconnect_backoff_ms: None,
+            status,
+        });
+    }
+
+    Json(ApiResponse::success(
+        "TCP tunnel overview",
+        TcpTunnelOverviewResponse { supported, items },
+    ))
+}
+
+async fn start_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(s) = config.tcp_tunnel_sets.iter_mut().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        };
+        s.enabled = true;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("Set started")))
+}
+
+async fn stop_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(s) = config.tcp_tunnel_sets.iter_mut().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        };
+        s.enabled = false;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("Set stopped")))
+}
+
+async fn restart_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    // For now, "restart" means set enabled=true (controller will handle actual runtime when implemented).
+    {
+        let mut config = state.config.lock().await;
+        let Some(s) = config.tcp_tunnel_sets.iter_mut().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        };
+        s.enabled = true;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("Set restarted")))
+}
+
 async fn copy_tcp_tunnel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -4426,6 +4645,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 proxy_window_fail_rate: None,
                 proxy_pause_ms: None,
                 tcp_tunnels: vec![],
+                tcp_tunnel_sets: vec![],
             },
             true,
         ),
@@ -4554,6 +4774,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnels/{id}/restart", post(restart_tcp_tunnel))
         .route("/api/tcp-tunnels/{id}/test", post(test_tcp_tunnel))
         .route("/api/tcp-tunnels/{id}/copy", post(copy_tcp_tunnel))
+        .route("/api/tcp-tunnel/overview", get(get_tcp_tunnel_overview))
+        .route("/api/tcp-tunnel-sets/{id}/start", post(start_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}/stop", post(stop_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}/restart", post(restart_tcp_tunnel_set))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
