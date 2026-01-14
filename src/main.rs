@@ -2561,21 +2561,23 @@ async fn restart_tcp_tunnel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    {
+    let tunnel_cfg = {
         let mut config = state.config.lock().await;
         let Some(t) = config.tcp_tunnels.iter_mut().find(|t| t.id == id) else {
             return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
         };
         t.enabled = true;
+        let cloned = t.clone();
         if let Err(e) = save_config(&config).await {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiResponse::error(format!("Failed to save config: {}", e))),
             ));
         }
+        cloned
     }
-    apply_tunnels_from_config(&state).await;
-    let _ = state.tcp_tunnel.restart(&id).await;
+    // Restart with the latest config to guarantee "restart" also starts a previously stopped tunnel.
+    let _ = state.tcp_tunnel.restart_with_config(tunnel_cfg).await;
     Ok(Json(ApiResponse::success_no_data("Tunnel restarted")))
 }
 

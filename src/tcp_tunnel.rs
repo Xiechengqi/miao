@@ -139,17 +139,34 @@ impl TunnelManager {
     }
 
     pub async fn restart(&self, id: &str) -> Result<(), String> {
-        let mut guard = self.inner.tunnels.lock().await;
-        let Some(old) = guard.remove(id) else {
-            return Err("Tunnel not found".to_string());
+        let cfg = {
+            let guard = self.inner.tunnels.lock().await;
+            let Some(old) = guard.get(id) else {
+                return Err("Tunnel not found".to_string());
+            };
+            old.config.clone()
         };
-        let _ = old.stop_tx.send(true);
-        let join = old.join;
-        drop(guard);
-        let _ = join.await;
+        self.restart_with_config(cfg).await
+    }
+
+    pub async fn restart_with_config(&self, cfg: TcpTunnelConfig) -> Result<(), String> {
+        let mut join: Option<tokio::task::JoinHandle<()>> = None;
+
+        {
+            let mut guard = self.inner.tunnels.lock().await;
+            if let Some(old) = guard.remove(&cfg.id) {
+                let _ = old.stop_tx.send(true);
+                join = Some(old.join);
+            }
+        }
+
+        if let Some(j) = join {
+            let _ = j.await;
+        }
+
         let mut guard = self.inner.tunnels.lock().await;
-        let new_handle = spawn_tunnel(old.config).await;
-        guard.insert(id.to_string(), new_handle);
+        let new_handle = spawn_tunnel(cfg.clone()).await;
+        guard.insert(cfg.id.clone(), new_handle);
         Ok(())
     }
 
