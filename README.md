@@ -80,6 +80,8 @@ sudo ./miao --sub ./sub
 
 ## DNS 说明（DoH 优先 + 自动切换）
 
-默认使用多个 DoH 远程 DNS（Cloudflare/Google/Quad9）并在后端定时探测可用性，必要时会自动切换 `dns.final` 并重启 sing-box 使其生效。
+默认使用多个 DoH 远程 DNS（Cloudflare/Google/Quad9）并在后端定时探测可用性。
 
 可在 `config.yaml` 中通过 `dns_active` / `dns_candidates` / `dns_check_interval_ms` 等字段调整策略（见 `config.yaml.example`）。
+
+如果希望“切换 DNS 不重启 sing-box”，需要把 DNS 切换从 sing-box 配置层挪到外部（例如让 sing-box 只指向本地 `smartdns/mosdns/dnsmasq`，由本地转发器做上游健康检查与切换）。

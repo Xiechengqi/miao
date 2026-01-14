@@ -36,12 +36,12 @@ nodes:
 #   - doh-cf
 #   - doh-google
 #   # Note: `dns-direct` will only be used automatically when the active `proxy` node type is `ssh`.
-#   # If you want to use UDP DNS (IP DNS), add tags like `dns-google-udp` / `dns-114-udp` here so they can be selected.
+#   # If you want to use UDP DNS (IP DNS), run a local DNS forwarder and point sing-box to it (see README).
 #
 # Health check interval and thresholds (milliseconds).
-# dns_check_interval_ms: 180000
-# dns_fail_threshold: 3
-# dns_cooldown_ms: 300000
+# dns_check_interval_ms: 300000
+# dns_fail_threshold: 5
+# dns_cooldown_ms: 600000
 
 # Proxy multi-select & auto failover (optional)
 # Selected candidate nodes (ordered by priority). When there are 2+ candidates,

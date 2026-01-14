@@ -1801,13 +1801,7 @@ async fn get_dns_status(
         proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
     };
     let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
-    let active = if proxy_is_ssh {
-        "dns-direct".to_string()
-    } else if stored_active == "dns-direct" {
-        DEFAULT_DNS_ACTIVE.to_string()
-    } else {
-        stored_active
-    };
+    let active = sanitize_dns_active(&stored_active, proxy_is_ssh);
 
     let now = Instant::now();
     let monitor = state.dns_monitor.lock().await;
@@ -1874,13 +1868,7 @@ async fn check_dns_now(
         let node_type_by_tag = state.node_type_by_tag.lock().await;
         proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
     };
-    let active = if proxy_is_ssh {
-        "dns-direct".to_string()
-    } else if stored_active == "dns-direct" {
-        DEFAULT_DNS_ACTIVE.to_string()
-    } else {
-        stored_active
-    };
+    let active = sanitize_dns_active(&stored_active, proxy_is_ssh);
     let candidates = vec![active];
     let _ = run_dns_checks(
         &state,
@@ -2296,9 +2284,24 @@ fn default_dns_candidates() -> Vec<String> {
     vec![
         "doh-cf".to_string(),
         "doh-google".to_string(),
-        "dns-cf-udp".to_string(),
-        "dns-google-udp".to_string(),
     ]
+}
+
+fn is_supported_dns_tag(tag: &str) -> bool {
+    matches!(tag, "dns-direct" | "doh-cf" | "doh-google")
+}
+
+fn sanitize_dns_active(configured: &str, proxy_is_ssh: bool) -> String {
+    if proxy_is_ssh {
+        return "dns-direct".to_string();
+    }
+    if configured == "dns-direct" {
+        return DEFAULT_DNS_ACTIVE.to_string();
+    }
+    if is_supported_dns_tag(configured) {
+        return configured.to_string();
+    }
+    DEFAULT_DNS_ACTIVE.to_string()
 }
 
 fn doh_candidates_by_tag() -> HashMap<&'static str, DohCandidate> {
@@ -2384,8 +2387,6 @@ fn udp_dns_candidates_by_tag() -> HashMap<&'static str, UdpDnsCandidate> {
     HashMap::from([
         // Keep tags stable with sing-box template in get_config_template().
         ("dns-direct", UdpDnsCandidate { ip: "223.5.5.5", port: 53 }),
-        ("dns-cf-udp", UdpDnsCandidate { ip: "1.1.1.1", port: 53 }),
-        ("dns-google-udp", UdpDnsCandidate { ip: "8.8.8.8", port: 53 }),
     ])
 }
 
@@ -2518,6 +2519,9 @@ fn normalize_dns_candidates(raw: Vec<String>, proxy_is_ssh: bool) -> Vec<String>
         if tag == "dns-direct" {
             continue;
         }
+        if !is_supported_dns_tag(&tag) {
+            continue;
+        }
         if seen.insert(tag.clone()) {
             out.push(tag);
         }
@@ -2532,7 +2536,7 @@ fn normalize_dns_candidates(raw: Vec<String>, proxy_is_ssh: bool) -> Vec<String>
 
 async fn dns_health_monitor(state: Arc<AppState>) {
     loop {
-        let (raw_candidates, interval_ms, fail_threshold, cooldown_ms, stored_active, proxy_selection) = {
+        let (raw_candidates, interval_ms, fail_threshold, cooldown_ms, proxy_selection) = {
             let config = state.config.lock().await;
             (
                 config
@@ -2542,10 +2546,6 @@ async fn dns_health_monitor(state: Arc<AppState>) {
                 config.dns_check_interval_ms.unwrap_or(180_000),
                 config.dns_fail_threshold.unwrap_or(3),
                 config.dns_cooldown_ms.unwrap_or(300_000),
-                config
-                    .dns_active
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
                 config
                     .selections
                     .get("proxy")
@@ -2560,91 +2560,14 @@ async fn dns_health_monitor(state: Arc<AppState>) {
         };
 
         let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
-        let active = if proxy_is_ssh {
-            "dns-direct".to_string()
-        } else if stored_active == "dns-direct" {
-            DEFAULT_DNS_ACTIVE.to_string()
-        } else {
-            stored_active.clone()
-        };
-
-        if proxy_is_ssh {
-            if stored_active != "dns-direct" {
-                {
-                    let mut config = state.config.lock().await;
-                    config.dns_active = Some("dns-direct".to_string());
-                    if let Err(e) = save_config(&config).await {
-                        eprintln!("Failed to save config while enforcing ssh DNS: {}", e);
-                    }
-                }
-                if is_sing_running().await {
-                    if let Err(e) = regenerate_and_restart(state.clone()).await {
-                        eprintln!("SSH DNS enforcement restart failed: {}", e);
-                    } else {
-                        println!("Switched DNS active server (ssh): dns-direct");
-                    }
-                }
-            }
-            sleep(Duration::from_millis(interval_ms)).await;
-            continue;
-        }
-
-        let mut desired = active.clone();
-        let active_vec = vec![active.clone()];
-        let active_health = run_dns_checks(
+        let _ = run_dns_checks(
             &state,
-            &active_vec,
+            &candidates,
             fail_threshold,
             cooldown_ms,
             Duration::from_millis(2_500),
         )
         .await;
-
-        if !active_health.get(&active).copied().unwrap_or(false) {
-            // Only probe other candidates when the current active DNS is unhealthy.
-            for tag in candidates.iter() {
-                if tag == &active {
-                    continue;
-                }
-
-                let tag = tag.clone();
-                let tag_vec = vec![tag.clone()];
-                let tag_health = run_dns_checks(
-                    &state,
-                    &tag_vec,
-                    fail_threshold,
-                    cooldown_ms,
-                    Duration::from_millis(2_500),
-                )
-                .await;
-                if tag_health.get(&tag).copied().unwrap_or(false) {
-                    desired = tag;
-                    break;
-                }
-            }
-
-            if desired == active {
-                // No candidate is healthy; keep Cloudflare for non-ssh (never fallback to dns-direct).
-                desired = DEFAULT_DNS_ACTIVE.to_string();
-            }
-        }
-
-        if desired != stored_active {
-            {
-                let mut config = state.config.lock().await;
-                config.dns_active = Some(desired.clone());
-                if let Err(e) = save_config(&config).await {
-                    eprintln!("Failed to save config while switching DNS: {}", e);
-                }
-            }
-            if is_sing_running().await {
-                if let Err(e) = regenerate_and_restart(state.clone()).await {
-                    eprintln!("DNS switch triggered restart failed: {}", e);
-                } else {
-                    println!("Switched DNS active server: {}", desired);
-                }
-            }
-        }
 
         sleep(Duration::from_millis(interval_ms)).await;
     }
@@ -3227,16 +3150,8 @@ async fn gen_config(
             .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned()));
         let proxy_is_ssh = proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag);
 
-        let active = if proxy_is_ssh {
-            "dns-direct".to_string()
-        } else {
-            let configured = config.dns_active.as_deref().unwrap_or(DEFAULT_DNS_ACTIVE);
-            if configured == "dns-direct" {
-                DEFAULT_DNS_ACTIVE.to_string()
-            } else {
-                configured.to_string()
-            }
-        };
+        let configured = config.dns_active.as_deref().unwrap_or(DEFAULT_DNS_ACTIVE);
+        let active = sanitize_dns_active(configured, proxy_is_ssh);
         dns["final"] = serde_json::Value::String(active);
     }
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
@@ -3280,8 +3195,6 @@ fn get_config_template() -> serde_json::Value {
             "independent_cache": true,
             "servers": [
                 {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53},
-                {"type": "udp", "tag": "dns-cf-udp", "server": "1.1.1.1", "server_port": 53},
-                {"type": "udp", "tag": "dns-google-udp", "server": "8.8.8.8", "server_port": 53},
                 {
                     "type": "https",
                     "tag": "doh-cf",
