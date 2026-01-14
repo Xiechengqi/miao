@@ -2575,7 +2575,7 @@ async fn restart_tcp_tunnel(
             ));
         }
         cloned
-    }
+    };
     // Restart with the latest config to guarantee "restart" also starts a previously stopped tunnel.
     let _ = state.tcp_tunnel.restart_with_config(tunnel_cfg).await;
     Ok(Json(ApiResponse::success_no_data("Tunnel restarted")))
@@ -2614,8 +2614,7 @@ async fn copy_tcp_tunnel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<TcpTunnelItem>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let mut new_cfg: Option<TcpTunnelConfig> = None;
-    {
+    let cfg = {
         let mut config = state.config.lock().await;
         let Some(existing) = config.tcp_tunnels.iter().find(|t| t.id == id).cloned() else {
             return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
@@ -2640,11 +2639,10 @@ async fn copy_tcp_tunnel(
                 Json(ApiResponse::error(format!("Failed to save config: {}", e))),
             ));
         }
-        new_cfg = Some(cloned);
-    }
+        cloned
+    };
 
     apply_tunnels_from_config(&state).await;
-    let cfg = new_cfg.expect("set");
     let status = state.tcp_tunnel.get_status(&cfg.id).await.unwrap_or_default();
     Ok(Json(ApiResponse::success(
         "Tunnel copied",
