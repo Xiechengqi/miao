@@ -57,3 +57,37 @@ nodes:
 # proxy_window_size: 10
 # proxy_window_fail_rate: 0.6
 # proxy_pause_ms: 60000
+
+# TCP reverse tunneling via SSH (-R) (optional)
+# Note:
+# - remote_port must be explicit (no auto allocation). Port conflict will be marked as error.
+# - Default remote_bind_addr is 127.0.0.1 (remote localhost only).
+# - To expose publicly (0.0.0.0), you must set allow_public_bind: true and configure sshd GatewayPorts.
+# - On update from the Web UI, leaving password/passphrase blank keeps the existing value.
+#
+# tcp_tunnels:
+#   - id: "t1"
+#     name: "Expose local 8080"
+#     enabled: true
+#     local_addr: "127.0.0.1"
+#     local_port: 8080
+#     remote_bind_addr: "0.0.0.0"   # or 127.0.0.1
+#     remote_port: 18080
+#     allow_public_bind: true
+#     ssh_host: "example.com"
+#     ssh_port: 22
+#     username: "root"
+#     auth:
+#       type: "password"
+#       password: "your-password"
+#       # or:
+#       # type: "private_key_path"
+#       # path: "/root/.ssh/id_ed25519"
+#       # passphrase: ""
+#     strict_host_key_checking: true
+#     host_key_fingerprint: "SHA256:xxxx"
+#     connect_timeout_ms: 5000
+#     keepalive_interval_ms: 10000
+#     reconnect_backoff_ms:
+#       base_ms: 1000
+#       max_ms: 30000

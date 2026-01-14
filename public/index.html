@@ -1676,6 +1676,91 @@
                     </div>
                 </div>
 
+                <!-- TCP 穿透 (SSH -R) - 全宽 -->
+                <div class="glass-card layout-full">
+                    <div class="card-header-custom">
+                        <i class="bi bi-arrow-left-right"></i>
+                        <span>TCP 穿透 (SSH -R)</span>
+                        <button class="btn-custom btn-add btn-sm-custom"
+                            @click="openTunnelModal(null)"
+                            :disabled="loading || !tcpTunnelsLoaded || !tcpTunnelsSupported"
+                            style="margin-left: auto;">
+                            <i class="bi bi-plus-lg"></i>
+                            添加
+                        </button>
+                    </div>
+
+                    <div v-if="!tcpTunnelsLoaded" class="empty-state">
+                        <i class="bi bi-hourglass-split" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        正在加载...
+                    </div>
+                    <div v-else-if="!tcpTunnelsSupported" class="empty-state">
+                        当前版本未启用 <code>tcp_tunnel</code> 特性
+                    </div>
+                    <div v-else-if="tcpTunnels.length === 0" class="empty-state">
+                        <i class="bi bi-plug" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        暂无 TCP 穿透配置
+                    </div>
+                    <div v-else>
+                        <div v-for="t in tcpTunnels" :key="t.id" class="list-item">
+                            <div style="flex: 1;">
+                                <div class="list-item-text" style="white-space: normal;">
+                                    <strong>{{ t.name || t.id }}</strong>
+                                    <span v-if="t.remote_bind_addr === '0.0.0.0'" class="node-type-badge dns-badge-bad" title="公网暴露：请确认 sshd GatewayPorts / 防火墙规则">
+                                        公网
+                                    </span>
+                                    <span class="node-type-badge"
+                                        :class="t.status.state === 'forwarding' ? 'dns-badge-ok' : (t.status.state === 'connecting' ? 'dns-badge-cooldown' : (t.status.state === 'error' ? 'dns-badge-bad' : 'dns-badge-unknown'))">
+                                        {{ t.status.state }}
+                                    </span>
+                                </div>
+                                <div class="node-info">
+                                    远程监听: {{ t.remote_bind_addr }}:{{ t.remote_port }} → 本地: {{ t.local_addr }}:{{ t.local_port }}
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    SSH: {{ t.username }}@{{ t.ssh_host }}:{{ t.ssh_port }}
+                                    <span style="margin-left: 0.5rem;">连接: {{ t.status.active_conns }}</span>
+                                </div>
+                                <div class="node-info" v-if="t.status.last_error" style="color: rgba(255, 110, 110, 0.95);">
+                                    {{ t.status.last_error.code }}: {{ t.status.last_error.message }}
+                                </div>
+                            </div>
+                            <div class="node-actions">
+                                <button class="btn-icon" @click="testTunnel(t)" :disabled="loading"
+                                    title="测试" aria-label="测试">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 12h4l3 8 4-16 3 8h4" />
+                                    </svg>
+                                </button>
+                                <button class="btn-icon" @click="restartTunnel(t)" :disabled="loading"
+                                    title="重启" aria-label="重启">
+                                    <i class="bi bi-arrow-repeat"></i>
+                                </button>
+                                <button class="btn-icon" @click="toggleTunnel(t)" :disabled="loading"
+                                    :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
+                                    <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                </button>
+                                <button class="btn-icon" @click="openTunnelModal(t)" :disabled="loading"
+                                    title="编辑" aria-label="编辑">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M17 3a2.828 2.828 0 1 1 4 4L7 21H3v-4L17 3z" />
+                                    </svg>
+                                </button>
+                                <button class="btn-icon btn-icon-danger" @click="confirmDeleteTunnel(t)" :disabled="loading"
+                                    title="删除" aria-label="删除">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 6h18" />
+                                        <path d="M8 6V4h8v2" />
+                                        <path d="M19 6l-1 14H6L5 6" />
+                                        <path d="M10 11v6" />
+                                        <path d="M14 11v6" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 左列 -->
                 <div class="layout-column">
 
@@ -1984,6 +2069,156 @@
                     </div>
                 </div>
 
+                <!-- TCP 穿透模态框 -->
+                <div class="modal-overlay" v-if="showTunnelModal" v-cloak @click.self="showTunnelModal = false">
+                    <div class="modal-content" style="max-width: 860px;">
+                        <div class="modal-title">
+                            <i class="bi bi-arrow-left-right"></i>
+                            {{ editingTunnelId ? '编辑 TCP 穿透' : '添加 TCP 穿透' }}
+                            <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="showTunnelModal = false">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">名称（可选）</label>
+                                <input type="text" class="form-input" v-model="newTunnel.name" placeholder="例如: 远程暴露本地 8080">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">启用</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newTunnel.enabled">
+                                    <span style="opacity: 0.9;">{{ newTunnel.enabled ? '已启用' : '未启用' }}</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">本地目标地址</label>
+                                <input type="text" class="form-input" v-model="newTunnel.local_addr" placeholder="127.0.0.1">
+                            </div>
+                            <div class="form-group" style="max-width: 140px;">
+                                <label class="form-label">本地端口</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.local_port" placeholder="8080">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">远程监听地址</label>
+                                <select class="form-input" v-model="newTunnel.remote_bind_addr" @change="handleRemoteBindChange">
+                                    <option value="127.0.0.1">127.0.0.1（仅远程本机）</option>
+                                    <option value="0.0.0.0">0.0.0.0（公网暴露）</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="max-width: 140px;">
+                                <label class="form-label">远程端口</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.remote_port" placeholder="18080">
+                            </div>
+                        </div>
+
+                        <div class="list-item" v-if="newTunnel.remote_bind_addr === '0.0.0.0'" style="border-color: rgba(255,110,110,0.5); background: rgba(255,110,110,0.08); margin-bottom: 0.75rem;">
+                            <div style="flex: 1; font-size: 0.9rem; line-height: 1.4;">
+                                <div style="font-weight: 700; margin-bottom: 0.25rem;">风险提示：公网暴露</div>
+                                <div style="opacity: 0.95;">
+                                    该配置会把远程服务器端口暴露到公网，请确认远程 <code>sshd</code> 启用 <code>GatewayPorts</code>，并配置防火墙/安全组。
+                                </div>
+                                <label class="log-auto-scroll" style="display: inline-flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem;">
+                                    <input type="checkbox" v-model="newTunnel.allow_public_bind">
+                                    <span>我理解风险并允许公网监听</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">SSH 主机</label>
+                                <input type="text" class="form-input" v-model="newTunnel.ssh_host" placeholder="example.com">
+                            </div>
+                            <div class="form-group" style="max-width: 140px;">
+                                <label class="form-label">SSH 端口</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.ssh_port" placeholder="22">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">用户名</label>
+                                <input type="text" class="form-input" v-model="newTunnel.username" placeholder="root">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="max-width: 220px;">
+                                <label class="form-label">认证方式</label>
+                                <select class="form-input" v-model="newTunnel.auth_type">
+                                    <option value="password">Password</option>
+                                    <option value="private_key_path">Private Key Path</option>
+                                </select>
+                            </div>
+                            <div class="form-group" v-if="newTunnel.auth_type === 'password'">
+                                <label class="form-label">密码</label>
+                                <input type="password" class="form-input" v-model="newTunnel.password" :placeholder="editingTunnelId ? '留空保持不变' : '密码'">
+                            </div>
+                            <div class="form-group" v-else>
+                                <label class="form-label">私钥路径</label>
+                                <input type="text" class="form-input" v-model="newTunnel.private_key_path" placeholder="/root/.ssh/id_ed25519">
+                            </div>
+                        </div>
+                        <div class="form-row" v-if="newTunnel.auth_type === 'private_key_path'">
+                            <div class="form-group">
+                                <label class="form-label">私钥口令（可选）</label>
+                                <input type="password" class="form-input" v-model="newTunnel.private_key_passphrase" :disabled="newTunnel.clear_private_key_passphrase"
+                                    :placeholder="editingTunnelId ? '留空保持不变' : '无口令留空'">
+                                <div v-if="editingTunnelId" style="margin-top: 0.35rem;">
+                                    <label class="log-auto-scroll" style="display: inline-flex; align-items: center; gap: 0.5rem;">
+                                        <input type="checkbox" v-model="newTunnel.clear_private_key_passphrase" @change="() => { if (newTunnel.clear_private_key_passphrase) newTunnel.private_key_passphrase = ''; }">
+                                        <span>清空口令</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="max-width: 240px;">
+                                <label class="form-label">主机指纹校验</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newTunnel.strict_host_key_checking">
+                                    <span style="opacity: 0.9;">严格校验</span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">HostKey 指纹（SHA256:...）</label>
+                                <input type="text" class="form-input" v-model="newTunnel.host_key_fingerprint" placeholder="SHA256:xxxx">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="max-width: 180px;">
+                                <label class="form-label">连接超时 (ms)</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.connect_timeout_ms" placeholder="5000">
+                            </div>
+                            <div class="form-group" style="max-width: 180px;">
+                                <label class="form-label">Keepalive (ms)</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.keepalive_interval_ms" placeholder="10000">
+                            </div>
+                            <div class="form-group" style="max-width: 180px;">
+                                <label class="form-label">重连 base (ms)</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.backoff_base_ms" placeholder="1000">
+                            </div>
+                            <div class="form-group" style="max-width: 180px;">
+                                <label class="form-label">重连 max (ms)</label>
+                                <input type="number" class="form-input" v-model.number="newTunnel.backoff_max_ms" placeholder="30000">
+                            </div>
+                        </div>
+
+                        <div class="modal-actions">
+                            <button class="btn-custom btn-cancel btn-sm-custom" @click="showTunnelModal = false">取消</button>
+                            <button class="btn-custom btn-add btn-sm-custom" @click="submitTunnel" :disabled="loading || !canSubmitTunnel">
+                                <span v-if="loading && (loadingAction === 'tunnelSave')" class="spinner" style="width:12px;height:12px;"></span>
+                                <i v-else :class="['bi', editingTunnelId ? 'bi-check-lg' : 'bi-plus-lg']"></i>
+                                {{ editingTunnelId ? '保存' : '添加' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 日志查看 - 全宽底部 -->
                 <div class="layout-full" v-if="status.running">
                     <!-- 日志切换按钮 -->
@@ -2097,7 +2332,37 @@
 	                    const dnsSelected = ref('');
 	                    const checkingDns = ref(false);
 	                    const switchingDns = ref(false);
-	                    const proxyStatus = ref(null);
+	                const proxyStatus = ref(null);
+                    // TCP tunnels (SSH -R)
+                    const tcpTunnelsLoaded = ref(false);
+                    const tcpTunnelsSupported = ref(false);
+                    const tcpTunnels = ref([]);
+                    const showTunnelModal = ref(false);
+                    const editingTunnelId = ref(null);
+                    const editingTunnelOriginalAuthType = ref(null);
+                    const newTunnel = ref({
+                        name: '',
+                        enabled: true,
+                        local_addr: '127.0.0.1',
+                        local_port: 8080,
+                        remote_bind_addr: '127.0.0.1',
+                        remote_port: 18080,
+                        allow_public_bind: false,
+                        ssh_host: '',
+                        ssh_port: 22,
+                        username: 'root',
+                        auth_type: 'password',
+                        password: '',
+                        private_key_path: '',
+                        private_key_passphrase: '',
+                        clear_private_key_passphrase: false,
+                        strict_host_key_checking: true,
+                        host_key_fingerprint: '',
+                        connect_timeout_ms: 5000,
+                        keepalive_interval_ms: 10000,
+                        backoff_base_ms: 1000,
+                        backoff_max_ms: 30000,
+                    });
 		                const subDir = ref('');
 		                const subSource = ref(null);
 		                const subDirError = ref('');
@@ -2277,6 +2542,25 @@
                         return newNode.value.tag && newNode.value.server && newNode.value.server_port;
                     }
                     return canAddNode.value;
+                });
+
+                const canSubmitTunnel = computed(() => {
+                    if (!tcpTunnelsSupported.value) return false;
+                    if (!newTunnel.value.local_port || !newTunnel.value.remote_port) return false;
+                    if (!newTunnel.value.ssh_host || !newTunnel.value.username) return false;
+                    if (newTunnel.value.remote_bind_addr === '0.0.0.0' && !newTunnel.value.allow_public_bind) return false;
+                    if (newTunnel.value.strict_host_key_checking && !newTunnel.value.host_key_fingerprint) return false;
+
+                    const authTypeChanged = !!editingTunnelId.value
+                        && !!editingTunnelOriginalAuthType.value
+                        && newTunnel.value.auth_type !== editingTunnelOriginalAuthType.value;
+
+                    if (newTunnel.value.auth_type === 'password') {
+                        if (!editingTunnelId.value) return !!newTunnel.value.password;
+                        return authTypeChanged ? !!newTunnel.value.password : true;
+                    }
+                    if (!editingTunnelId.value) return !!newTunnel.value.private_key_path;
+                    return authTypeChanged ? !!newTunnel.value.private_key_path : true;
                 });
 
                 // 过滤只显示 selector 类型的代理组
@@ -2592,6 +2876,178 @@
                         } catch (e) { } finally {
                             switchingDns.value = false;
                         }
+                    };
+
+                    const fetchTcpTunnels = async () => {
+                        try {
+                            const data = await apiFetch('/api/tcp-tunnels');
+                            tcpTunnelsLoaded.value = true;
+                            tcpTunnelsSupported.value = !!data.data?.supported;
+                            tcpTunnels.value = data.data?.items || [];
+                        } catch (e) {
+                            tcpTunnelsLoaded.value = true;
+                            tcpTunnelsSupported.value = false;
+                            tcpTunnels.value = [];
+                            console.error('获取 TCP 穿透失败:', e);
+                        }
+                    };
+
+                    const openTunnelModal = (t) => {
+                        editingTunnelId.value = t ? t.id : null;
+                        editingTunnelOriginalAuthType.value = t ? (t?.auth?.type || null) : null;
+                        newTunnel.value = {
+                            name: t?.name || '',
+                            enabled: t ? !!t.enabled : true,
+                            local_addr: t?.local_addr || '127.0.0.1',
+                            local_port: t?.local_port || 8080,
+                            remote_bind_addr: t?.remote_bind_addr || '127.0.0.1',
+                            remote_port: t?.remote_port || 18080,
+                            allow_public_bind: t ? !!t.allow_public_bind : false,
+                            ssh_host: t?.ssh_host || '',
+                            ssh_port: t?.ssh_port || 22,
+                            username: t?.username || 'root',
+                            auth_type: t?.auth?.type || 'password',
+                            password: '',
+                            private_key_path: (t?.auth?.type === 'private_key_path' ? (t?.auth?.path || '') : ''),
+                            private_key_passphrase: '',
+                            clear_private_key_passphrase: false,
+                            strict_host_key_checking: t ? !!t.strict_host_key_checking : true,
+                            host_key_fingerprint: t?.host_key_fingerprint || '',
+                            connect_timeout_ms: t?.connect_timeout_ms || 5000,
+                            keepalive_interval_ms: t?.keepalive_interval_ms || 10000,
+                            backoff_base_ms: t?.reconnect_backoff_ms?.base_ms || 1000,
+                            backoff_max_ms: t?.reconnect_backoff_ms?.max_ms || 30000,
+                        };
+                        showTunnelModal.value = true;
+                    };
+
+                    const handleRemoteBindChange = async () => {
+                        if (newTunnel.value.remote_bind_addr !== '0.0.0.0') return;
+                        if (newTunnel.value.allow_public_bind) return;
+                        showConfirm(
+                            '公网暴露确认',
+                            '选择 0.0.0.0 将把端口暴露到公网，请确认 sshd GatewayPorts 与防火墙/安全组规则。',
+                            () => { newTunnel.value.allow_public_bind = true; }
+                        );
+                    };
+
+                    const buildTunnelRequest = () => {
+                        const authTypeChanged = !!editingTunnelId.value
+                            && !!editingTunnelOriginalAuthType.value
+                            && newTunnel.value.auth_type !== editingTunnelOriginalAuthType.value;
+
+                        const auth = newTunnel.value.auth_type === 'password'
+                            ? {
+                                type: 'password',
+                                // If editing and auth type unchanged, empty string means "keep existing".
+                                password: (editingTunnelId.value && !authTypeChanged) ? (newTunnel.value.password || '') : (newTunnel.value.password || ''),
+                            }
+                            : {
+                                type: 'private_key_path',
+                                // If editing and auth type unchanged, empty string means "keep existing".
+                                path: (editingTunnelId.value && !authTypeChanged) ? (newTunnel.value.private_key_path || '') : (newTunnel.value.private_key_path || ''),
+                                // null means "keep existing" (backend); "" means "clear".
+                                passphrase: newTunnel.value.clear_private_key_passphrase
+                                    ? ''
+                                    : (newTunnel.value.private_key_passphrase ? newTunnel.value.private_key_passphrase : null),
+                            };
+
+                        return {
+                            name: newTunnel.value.name || null,
+                            enabled: !!newTunnel.value.enabled,
+                            local_addr: newTunnel.value.local_addr || '127.0.0.1',
+                            local_port: Number(newTunnel.value.local_port),
+                            remote_bind_addr: newTunnel.value.remote_bind_addr || '127.0.0.1',
+                            remote_port: Number(newTunnel.value.remote_port),
+                            ssh_host: newTunnel.value.ssh_host,
+                            ssh_port: Number(newTunnel.value.ssh_port || 22),
+                            username: newTunnel.value.username,
+                            auth,
+                            strict_host_key_checking: !!newTunnel.value.strict_host_key_checking,
+                            host_key_fingerprint: newTunnel.value.host_key_fingerprint || '',
+                            allow_public_bind: !!newTunnel.value.allow_public_bind,
+                            connect_timeout_ms: Number(newTunnel.value.connect_timeout_ms || 5000),
+                            keepalive_interval_ms: Number(newTunnel.value.keepalive_interval_ms || 10000),
+                            reconnect_backoff_ms: { base_ms: Number(newTunnel.value.backoff_base_ms || 1000), max_ms: Number(newTunnel.value.backoff_max_ms || 30000) },
+                        };
+                    };
+
+                    const submitTunnel = async () => {
+                        if (loading.value) return;
+                        loading.value = true;
+                        loadingAction.value = 'tunnelSave';
+                        try {
+                            const body = buildTunnelRequest();
+                            if (editingTunnelId.value) {
+                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(editingTunnelId.value)}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(body),
+                                });
+                                showToast('TCP 穿透已更新', 'success');
+                            } else {
+                                await apiFetch('/api/tcp-tunnels', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(body),
+                                });
+                                showToast('TCP 穿透已添加', 'success');
+                            }
+                            showTunnelModal.value = false;
+                            await fetchTcpTunnels();
+                        } catch (e) {
+                            showToast(`保存失败: ${e.message || e}`, 'error');
+                        } finally {
+                            loading.value = false;
+                            loadingAction.value = '';
+                        }
+                    };
+
+                    const toggleTunnel = async (t) => {
+                        try {
+                            if (t.enabled) {
+                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/stop`, { method: 'POST' });
+                                showToast('已停止', 'success');
+                            } else {
+                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/start`, { method: 'POST' });
+                                showToast('已启动', 'success');
+                            }
+                            await fetchTcpTunnels();
+                        } catch (e) {
+                            showToast(`操作失败: ${e.message || e}`, 'error');
+                        }
+                    };
+
+                    const restartTunnel = async (t) => {
+                        try {
+                            await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/restart`, { method: 'POST' });
+                            showToast('已重启', 'success');
+                            await fetchTcpTunnels();
+                        } catch (e) {
+                            showToast(`重启失败: ${e.message || e}`, 'error');
+                        }
+                    };
+
+                    const testTunnel = async (t) => {
+                        try {
+                            await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}/test`, { method: 'POST' });
+                            showToast('测试成功', 'success');
+                            await fetchTcpTunnels();
+                        } catch (e) {
+                            showToast(`测试失败: ${e.message || e}`, 'error');
+                        }
+                    };
+
+                    const confirmDeleteTunnel = (t) => {
+                        showConfirm('删除 TCP 穿透', `确定删除 ${t.name || t.id}？`, async () => {
+                            try {
+                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
+                                showToast('已删除', 'success');
+                                await fetchTcpTunnels();
+                            } catch (e) {
+                                showToast(`删除失败: ${e.message || e}`, 'error');
+                            }
+                        });
                     };
 
                     const getDnsBadgeClass = (h) => {
@@ -3165,6 +3621,7 @@
 
                     await fetchStatus();
                     await fetchDnsStatus();
+                    await fetchTcpTunnels();
 	                    await fetchSubFiles();
 	                    await fetchNodes();
 	                    await fetchProxies();
@@ -3177,6 +3634,7 @@
                     statusInterval = setInterval(async () => {
 	                        await fetchStatus();
 	                        await fetchDnsStatus();
+                            await fetchTcpTunnels();
 	                        if (status.value.running) {
 	                            await fetchProxies();
 	                            await fetchProxyStatus();
@@ -3201,7 +3659,7 @@
                     if (logsWs) logsWs.close();
                 });
 
-		                return {
+	                return {
 		                    // 初始化相关
 		                    setupRequired, setupPassword, settingUp, setupError,
 		                    handleSetupInit,
@@ -3211,10 +3669,12 @@
 	                // 状态
 		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 		                    proxyStatus,
+                            tcpTunnelsLoaded, tcpTunnelsSupported, tcpTunnels,
 		                    reloadSubFiles,
 	                    newNode, canAddNode, canTestNode, canSubmitNode, showNodeModal, nodeType, setNodeType,
                         portTouched, openNodeModal,
                         editingTag,
+                            showTunnelModal, editingTunnelId, editingTunnelOriginalAuthType, newTunnel, canSubmitTunnel,
 		                    proxies, delays, traffic, testingGroup, selectorGroups,
 	                    // 日志相关
 	                    logs, logContainer, logAutoScroll, showLogs, clearLogs,
@@ -3234,6 +3694,7 @@
 	                    submitNode, openEditNode, testNodeFromModal, testManualNode, deleteNode, confirmDeleteNode,
                         formatNodeType, getNodeTypeClass,
 	                    fetchDnsStatus, checkDnsNow, switchDnsActive, getDnsBadgeClass, dnsHealthTitle,
+                            fetchTcpTunnels, openTunnelModal, handleRemoteBindChange, submitTunnel, toggleTunnel, restartTunnel, testTunnel, confirmDeleteTunnel,
 	                    fetchProxyStatus, getProxyMonitorLabel, isNodeSelected, getNodeSelectIndex, handleProxyNodeClick,
 	                    switchProxy, testAllDelays, getDelayClass, formatDelay, formatSpeed,
 	                    formatUptime

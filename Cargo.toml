@@ -3,6 +3,10 @@ name = "miao-rust"
 version = "0.0.0"
 edition = "2021"
 
+[features]
+# Optional SSH reverse TCP tunneling via russh (git dependency).
+tcp_tunnel = ["dep:russh", "dep:sha2"]
+
 [dependencies]
 axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1.0", features = ["full"] }
@@ -20,3 +24,6 @@ base64 = "0.22"
 percent-encoding = "2.3"
 jsonwebtoken = "9.3"
 chrono = "0.4"
+russh = { git = "https://github.com/warp-tech/russh", optional = true }
+sha2 = { version = "0.10", optional = true }
+uuid = { version = "1.0", features = ["v4"] }

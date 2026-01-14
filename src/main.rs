@@ -27,6 +27,8 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use base64::Engine;
 
+mod tcp_tunnel;
+
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,6 +42,92 @@ const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-arm64");
 // ============================================================================
 // Data Structures
 // ============================================================================
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_local_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_remote_bind_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_keepalive_interval_ms() -> u64 {
+    10_000
+}
+
+fn default_tcp_tunnel_backoff() -> TcpTunnelBackoff {
+    TcpTunnelBackoff {
+        base_ms: 1_000,
+        max_ms: 30_000,
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TcpTunnelAuth {
+    Password { password: String },
+    PrivateKeyPath {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct TcpTunnelBackoff {
+    base_ms: u64,
+    max_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct TcpTunnelConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+
+    #[serde(default = "default_local_addr")]
+    local_addr: String,
+    local_port: u16,
+
+    #[serde(default = "default_remote_bind_addr")]
+    remote_bind_addr: String,
+    remote_port: u16,
+
+    ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    ssh_port: u16,
+    username: String,
+
+    auth: TcpTunnelAuth,
+
+    #[serde(default = "default_true")]
+    strict_host_key_checking: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    host_key_fingerprint: String,
+    #[serde(default)]
+    allow_public_bind: bool,
+
+    #[serde(default = "default_connect_timeout_ms")]
+    connect_timeout_ms: u64,
+    #[serde(default = "default_keepalive_interval_ms")]
+    keepalive_interval_ms: u64,
+    #[serde(default = "default_tcp_tunnel_backoff")]
+    reconnect_backoff_ms: TcpTunnelBackoff,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
@@ -80,6 +168,10 @@ struct Config {
     proxy_window_fail_rate: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     proxy_pause_ms: Option<u64>,
+
+    // SSH reverse TCP tunnels (optional)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tcp_tunnels: Vec<TcpTunnelConfig>,
 }
 
 const DEFAULT_PORT: u16 = 6161;
@@ -118,6 +210,79 @@ struct SelectionsResponse {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TcpTunnelAuthPublic {
+    Password,
+    PrivateKeyPath { path: String },
+}
+
+#[derive(Serialize)]
+struct TcpTunnelItem {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    local_addr: String,
+    local_port: u16,
+    remote_bind_addr: String,
+    remote_port: u16,
+    ssh_host: String,
+    ssh_port: u16,
+    username: String,
+    auth: TcpTunnelAuthPublic,
+    strict_host_key_checking: bool,
+    host_key_fingerprint: String,
+    allow_public_bind: bool,
+    connect_timeout_ms: u64,
+    keepalive_interval_ms: u64,
+    reconnect_backoff_ms: TcpTunnelBackoff,
+    status: tcp_tunnel::TunnelRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelListResponse {
+    supported: bool,
+    items: Vec<TcpTunnelItem>,
+}
+
+#[derive(Deserialize)]
+struct TcpTunnelUpsertRequest {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    local_addr: Option<String>,
+    local_port: u16,
+    #[serde(default)]
+    remote_bind_addr: Option<String>,
+    remote_port: u16,
+    ssh_host: String,
+    #[serde(default)]
+    ssh_port: Option<u16>,
+    username: String,
+    auth: TcpTunnelAuth,
+    #[serde(default)]
+    strict_host_key_checking: Option<bool>,
+    #[serde(default)]
+    host_key_fingerprint: Option<String>,
+    #[serde(default)]
+    allow_public_bind: Option<bool>,
+    #[serde(default)]
+    connect_timeout_ms: Option<u64>,
+    #[serde(default)]
+    keepalive_interval_ms: Option<u64>,
+    #[serde(default)]
+    reconnect_backoff_ms: Option<TcpTunnelBackoff>,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelTestResponse {
+    ok: bool,
+}
+
+#[derive(Serialize)]
 struct SetupStatusResponse {
     initialized: bool,
 }
@@ -145,6 +310,7 @@ struct AppState {
     dns_monitor: Mutex<DnsMonitorState>,
     proxy_monitor: Mutex<ProxyMonitorState>,
     setup_required: AtomicBool,
+    tcp_tunnel: tcp_tunnel::TunnelManager,
 }
 
 #[derive(Clone)]
@@ -2047,6 +2213,401 @@ async fn update_proxy_pool(
     Ok(Json(ApiResponse::success_no_data("Proxy pool updated")))
 }
 
+fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
+    match auth {
+        TcpTunnelAuth::Password { .. } => TcpTunnelAuthPublic::Password,
+        TcpTunnelAuth::PrivateKeyPath { path, .. } => TcpTunnelAuthPublic::PrivateKeyPath {
+            path: path.clone(),
+        },
+    }
+}
+
+fn generate_tunnel_id() -> String {
+    format!("t-{}", uuid::Uuid::new_v4())
+}
+
+fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTunnelConfig, String> {
+    let local_addr = req.local_addr.unwrap_or_else(default_local_addr);
+    let remote_bind_addr = req.remote_bind_addr.unwrap_or_else(default_remote_bind_addr);
+    let ssh_port = req.ssh_port.unwrap_or_else(default_ssh_port);
+    let strict_host_key_checking = req.strict_host_key_checking.unwrap_or(true);
+    let host_key_fingerprint = req.host_key_fingerprint.unwrap_or_default();
+    let allow_public_bind = req.allow_public_bind.unwrap_or(false);
+    let connect_timeout_ms = req.connect_timeout_ms.unwrap_or_else(default_connect_timeout_ms);
+    let keepalive_interval_ms = req
+        .keepalive_interval_ms
+        .unwrap_or_else(default_keepalive_interval_ms);
+    let reconnect_backoff_ms = req.reconnect_backoff_ms.unwrap_or_else(default_tcp_tunnel_backoff);
+    let enabled = req.enabled.unwrap_or(false);
+
+    if req.remote_port == 0 {
+        return Err("remote_port must be > 0".to_string());
+    }
+    if remote_bind_addr == "0.0.0.0" && !allow_public_bind {
+        return Err("allow_public_bind must be true when remote_bind_addr is 0.0.0.0".to_string());
+    }
+    if strict_host_key_checking && host_key_fingerprint.trim().is_empty() {
+        return Err("host_key_fingerprint is required when strict_host_key_checking is true".to_string());
+    }
+
+    Ok(TcpTunnelConfig {
+        id,
+        name: req.name,
+        enabled,
+        local_addr,
+        local_port: req.local_port,
+        remote_bind_addr,
+        remote_port: req.remote_port,
+        ssh_host: req.ssh_host,
+        ssh_port,
+        username: req.username,
+        auth: req.auth,
+        strict_host_key_checking,
+        host_key_fingerprint,
+        allow_public_bind,
+        connect_timeout_ms,
+        keepalive_interval_ms,
+        reconnect_backoff_ms,
+    })
+}
+
+async fn apply_tunnels_from_config(state: &Arc<AppState>) {
+    let tunnels = { state.config.lock().await.tcp_tunnels.clone() };
+    state.tcp_tunnel.apply_config(&tunnels).await;
+}
+
+async fn get_tcp_tunnels(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<TcpTunnelListResponse>> {
+    let supported = state.tcp_tunnel.supported();
+    let tunnels = { state.config.lock().await.tcp_tunnels.clone() };
+
+    let mut items = Vec::with_capacity(tunnels.len());
+    for t in tunnels {
+        let status = state
+            .tcp_tunnel
+            .get_status(&t.id)
+            .await
+            .unwrap_or_default();
+        items.push(TcpTunnelItem {
+            id: t.id,
+            name: t.name,
+            enabled: t.enabled,
+            local_addr: t.local_addr,
+            local_port: t.local_port,
+            remote_bind_addr: t.remote_bind_addr,
+            remote_port: t.remote_port,
+            ssh_host: t.ssh_host,
+            ssh_port: t.ssh_port,
+            username: t.username,
+            auth: redact_tunnel_auth(&t.auth),
+            strict_host_key_checking: t.strict_host_key_checking,
+            host_key_fingerprint: t.host_key_fingerprint,
+            allow_public_bind: t.allow_public_bind,
+            connect_timeout_ms: t.connect_timeout_ms,
+            keepalive_interval_ms: t.keepalive_interval_ms,
+            reconnect_backoff_ms: t.reconnect_backoff_ms,
+            status,
+        });
+    }
+
+    Json(ApiResponse::success(
+        "TCP tunnels",
+        TcpTunnelListResponse { supported, items },
+    ))
+}
+
+async fn create_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TcpTunnelUpsertRequest>,
+) -> Result<Json<ApiResponse<TcpTunnelItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let id = req.id.clone().unwrap_or_else(generate_tunnel_id);
+    let cfg = normalize_tcp_tunnel(req, id.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    // Require secrets on create.
+    match &cfg.auth {
+        TcpTunnelAuth::Password { password } if password.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("password is required")),
+            ));
+        }
+        TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("private key path is required")),
+            ));
+        }
+        _ => {}
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        if config.tcp_tunnels.iter().any(|t| t.id == id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Tunnel id already exists")),
+            ));
+        }
+        config.tcp_tunnels.push(cfg.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    apply_tunnels_from_config(&state).await;
+
+    let status = state.tcp_tunnel.get_status(&cfg.id).await.unwrap_or_default();
+    Ok(Json(ApiResponse::success(
+        "Tunnel created",
+        TcpTunnelItem {
+            id: cfg.id,
+            name: cfg.name,
+            enabled: cfg.enabled,
+            local_addr: cfg.local_addr,
+            local_port: cfg.local_port,
+            remote_bind_addr: cfg.remote_bind_addr,
+            remote_port: cfg.remote_port,
+            ssh_host: cfg.ssh_host,
+            ssh_port: cfg.ssh_port,
+            username: cfg.username,
+            auth: redact_tunnel_auth(&cfg.auth),
+            strict_host_key_checking: cfg.strict_host_key_checking,
+            host_key_fingerprint: cfg.host_key_fingerprint,
+            allow_public_bind: cfg.allow_public_bind,
+            connect_timeout_ms: cfg.connect_timeout_ms,
+            keepalive_interval_ms: cfg.keepalive_interval_ms,
+            reconnect_backoff_ms: cfg.reconnect_backoff_ms,
+            status,
+        },
+    )))
+}
+
+async fn update_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<TcpTunnelUpsertRequest>,
+) -> Result<Json<ApiResponse<TcpTunnelItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let existing = {
+        let config = state.config.lock().await;
+        config
+            .tcp_tunnels
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+    };
+    let Some(existing) = existing else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+    };
+
+    let mut cfg = normalize_tcp_tunnel(req, id.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    // Support "leave blank to keep unchanged" for secrets on update.
+    match (&existing.auth, &mut cfg.auth) {
+        (TcpTunnelAuth::Password { password: old }, TcpTunnelAuth::Password { password: new }) => {
+            if new.is_empty() {
+                *new = old.clone();
+            }
+        }
+        (
+            TcpTunnelAuth::PrivateKeyPath {
+                path: old_path,
+                passphrase: old_pass,
+            },
+            TcpTunnelAuth::PrivateKeyPath {
+                path: new_path,
+                passphrase: new_pass,
+            },
+        ) => {
+            if new_path.is_empty() {
+                *new_path = old_path.clone();
+            }
+            if new_pass.is_none() {
+                *new_pass = old_pass.clone();
+            }
+        }
+        _ => {}
+    }
+
+    // Require secrets after merge (important when switching auth types).
+    match &cfg.auth {
+        TcpTunnelAuth::Password { password } if password.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("password is required")),
+            ));
+        }
+        TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("private key path is required")),
+            ));
+        }
+        _ => {}
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.tcp_tunnels.iter().position(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+        };
+        config.tcp_tunnels[pos] = cfg.clone();
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    apply_tunnels_from_config(&state).await;
+    let status = state.tcp_tunnel.get_status(&cfg.id).await.unwrap_or_default();
+    Ok(Json(ApiResponse::success(
+        "Tunnel updated",
+        TcpTunnelItem {
+            id: cfg.id,
+            name: cfg.name,
+            enabled: cfg.enabled,
+            local_addr: cfg.local_addr,
+            local_port: cfg.local_port,
+            remote_bind_addr: cfg.remote_bind_addr,
+            remote_port: cfg.remote_port,
+            ssh_host: cfg.ssh_host,
+            ssh_port: cfg.ssh_port,
+            username: cfg.username,
+            auth: redact_tunnel_auth(&cfg.auth),
+            strict_host_key_checking: cfg.strict_host_key_checking,
+            host_key_fingerprint: cfg.host_key_fingerprint,
+            allow_public_bind: cfg.allow_public_bind,
+            connect_timeout_ms: cfg.connect_timeout_ms,
+            keepalive_interval_ms: cfg.keepalive_interval_ms,
+            reconnect_backoff_ms: cfg.reconnect_backoff_ms,
+            status,
+        },
+    )))
+}
+
+async fn delete_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let before = config.tcp_tunnels.len();
+        config.tcp_tunnels.retain(|t| t.id != id);
+        if config.tcp_tunnels.len() == before {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    apply_tunnels_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Tunnel deleted")))
+}
+
+async fn start_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(t) = config.tcp_tunnels.iter_mut().find(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+        };
+        t.enabled = true;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_tunnels_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Tunnel started")))
+}
+
+async fn stop_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(t) = config.tcp_tunnels.iter_mut().find(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+        };
+        t.enabled = false;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_tunnels_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Tunnel stopped")))
+}
+
+async fn restart_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(t) = config.tcp_tunnels.iter_mut().find(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+        };
+        t.enabled = true;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    apply_tunnels_from_config(&state).await;
+    let _ = state.tcp_tunnel.restart(&id).await;
+    Ok(Json(ApiResponse::success_no_data("Tunnel restarted")))
+}
+
+async fn test_tcp_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<TcpTunnelTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config = state.config.lock().await;
+        config
+            .tcp_tunnels
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+    };
+
+    let Some(cfg) = cfg else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
+    };
+
+    match state.tcp_tunnel.test(&cfg).await {
+        Ok(()) => Ok(Json(ApiResponse::success(
+            "Tunnel test ok",
+            TcpTunnelTestResponse { ok: true },
+        ))),
+        Err((code, message)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("{code}: {message}"))),
+        )),
+    }
+}
+
 // ============================================================================
 // Internal Functions
 // ============================================================================
@@ -3803,6 +4364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 proxy_window_size: None,
                 proxy_window_fail_rate: None,
                 proxy_pause_ms: None,
+                tcp_tunnels: vec![],
             },
             true,
         ),
@@ -3866,7 +4428,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         dns_monitor: Mutex::new(DnsMonitorState::default()),
         proxy_monitor: Mutex::new(ProxyMonitorState::default()),
         setup_required: AtomicBool::new(setup_required),
+        tcp_tunnel: tcp_tunnel::TunnelManager::new(),
     });
+
+    // Apply initial TCP tunnel config (best-effort).
+    {
+        let cfg = app_state.config.lock().await;
+        app_state.tcp_tunnel.apply_config(&cfg.tcp_tunnels).await;
+    }
 
     // DNS health monitor (best-effort). It updates config.dns_active and restarts sing-box when needed.
     {
@@ -3914,6 +4483,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/dns/status", get(get_dns_status))
         .route("/api/dns/check", post(check_dns_now))
         .route("/api/dns/switch", post(switch_dns_active))
+        // TCP reverse tunnels (SSH -R)
+        .route("/api/tcp-tunnels", get(get_tcp_tunnels))
+        .route("/api/tcp-tunnels", post(create_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}", put(update_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}", delete(delete_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}/start", post(start_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}/stop", post(stop_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}/restart", post(restart_tcp_tunnel))
+        .route("/api/tcp-tunnels/{id}/test", post(test_tcp_tunnel))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
