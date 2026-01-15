@@ -77,11 +77,11 @@ sudo ./miao --sub ./sub
 | `selections` | 记住的节点选择（selector -> node） | `{}` |
 | `proxy_pool` | 代理候选节点池（按顺序优先级，2+ 时启用自动切换） | - |
 | `nodes` | 手动配置的节点 (JSON 格式) | - |
-| `terminal` | Web Terminal (gotty) 配置 | - |
+| `terminals` | Web Terminal (gotty) 配置列表 | - |
 
 ### Web Terminal (gotty)
 
-启用后会在独立端口启动 gotty（默认 `127.0.0.1:7681`），登录认证由 miao 配置。可在 `config.yaml` 中设置端口、地址、命令和额外参数（见 `config.yaml.example`）；面板里留空认证不会清空，需勾选“清除认证”。
+启用后会在独立端口启动 gotty（默认 `127.0.0.1:7681`），登录认证由 miao 配置。可在 `config.yaml` 中配置多个终端节点，支持独立端口、地址、命令和额外参数（见 `config.yaml.example`）；面板里留空认证不会清空，需勾选“清除认证”。默认额外参数为 `-w --enable-idle-alert`。
 
 > 默认规则会让所有 `tcp/22`（SSH）直连，避免代理出口对 22 端口的限制导致 SSH 断连。
 

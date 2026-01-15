@@ -88,6 +88,10 @@ fn default_terminal_command() -> String {
     "/bin/bash".to_string()
 }
 
+fn default_terminal_extra_args() -> Vec<String> {
+    vec!["-w".to_string(), "--enable-idle-alert".to_string()]
+}
+
 fn default_tcp_tunnel_backoff() -> TcpTunnelBackoff {
     TcpTunnelBackoff {
         base_ms: 1_000,
@@ -198,7 +202,7 @@ struct TcpTunnelSetConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-struct TerminalConfig {
+struct TerminalConfigLegacy {
     enabled: bool,
     addr: String,
     port: u16,
@@ -213,9 +217,9 @@ struct TerminalConfig {
     extra_args: Vec<String>,
 }
 
-impl Default for TerminalConfig {
+impl Default for TerminalConfigLegacy {
     fn default() -> Self {
-        TerminalConfig {
+        TerminalConfigLegacy {
             enabled: false,
             addr: default_terminal_addr(),
             port: default_terminal_port(),
@@ -223,15 +227,47 @@ impl Default for TerminalConfig {
             command_args: Vec::new(),
             auth_username: None,
             auth_password: None,
-            extra_args: Vec::new(),
+            extra_args: default_terminal_extra_args(),
         }
     }
 }
 
-fn redact_terminal_config(config: &TerminalConfig) -> TerminalConfig {
-    let mut redacted = config.clone();
-    redacted.auth_password = None;
-    redacted
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct TerminalNodeConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+    addr: String,
+    port: u16,
+    command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    command_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_args: Vec<String>,
+}
+
+impl Default for TerminalNodeConfig {
+    fn default() -> Self {
+        TerminalNodeConfig {
+            id: String::new(),
+            name: None,
+            enabled: false,
+            addr: default_terminal_addr(),
+            port: default_terminal_port(),
+            command: default_terminal_command(),
+            command_args: Vec::new(),
+            auth_username: None,
+            auth_password: None,
+            extra_args: default_terminal_extra_args(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -242,8 +278,10 @@ struct Config {
     sing_box_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,  // 登录密码
-    #[serde(default)]
-    terminal: TerminalConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal: Option<TerminalConfigLegacy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    terminals: Vec<TerminalNodeConfig>,
     #[serde(default)]
     selections: HashMap<String, String>, // selector group -> node name
     #[serde(default)]
@@ -679,29 +717,55 @@ struct StatusData {
     uptime_secs: Option<u64>,
 }
 
-#[derive(Serialize)]
-struct TerminalStatusData {
+#[derive(Serialize, Clone)]
+struct TerminalRuntimeStatus {
     running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     uptime_secs: Option<u64>,
-    config: TerminalConfig,
 }
 
-#[derive(Deserialize)]
-struct TerminalConfigRequest {
+#[derive(Serialize)]
+struct TerminalItem {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
     addr: String,
     port: u16,
     command: String,
-    #[serde(default)]
     command_args: Vec<String>,
+    auth_username: Option<String>,
+    auth_password: Option<String>,
+    extra_args: Vec<String>,
+    status: TerminalRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct TerminalListResponse {
+    items: Vec<TerminalItem>,
+}
+
+#[derive(Deserialize)]
+struct TerminalUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    addr: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    command_args: Option<Vec<String>>,
     #[serde(default)]
     auth_username: Option<String>,
     #[serde(default)]
     auth_password: Option<String>,
     #[serde(default)]
-    extra_args: Vec<String>,
+    extra_args: Option<Vec<String>>,
     #[serde(default)]
     restart: bool,
     #[serde(default)]
@@ -835,7 +899,7 @@ struct GottyProcess {
 
 lazy_static! {
     static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
-    static ref GOTTY_PROCESS: Mutex<Option<GottyProcess>> = Mutex::new(None);
+    static ref GOTTY_PROCESSES: Mutex<HashMap<String, GottyProcess>> = Mutex::new(HashMap::new());
 }
 
 // ============================================================================
@@ -925,37 +989,65 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
     ))
 }
 
-async fn get_terminal_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<ApiResponse<TerminalStatusData>> {
-    let mut lock = GOTTY_PROCESS.lock().await;
-    let (running, pid, uptime_secs) = if let Some(ref mut proc) = *lock {
+async fn get_terminal_runtime_status(id: &str) -> TerminalRuntimeStatus {
+    let mut lock = GOTTY_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
         match proc.child.try_wait() {
             Ok(Some(_)) => {
-                *lock = None;
-                (false, None, None)
+                lock.remove(id);
+                TerminalRuntimeStatus {
+                    running: false,
+                    pid: None,
+                    uptime_secs: None,
+                }
             }
-            Ok(None) => {
-                let uptime = proc.started_at.elapsed().as_secs();
-                (true, proc.child.id(), Some(uptime))
+            Ok(None) => TerminalRuntimeStatus {
+                running: true,
+                pid: proc.child.id(),
+                uptime_secs: Some(proc.started_at.elapsed().as_secs()),
+            },
+            Err(_) => {
+                lock.remove(id);
+                TerminalRuntimeStatus {
+                    running: false,
+                    pid: None,
+                    uptime_secs: None,
+                }
             }
-            Err(_) => (false, None, None),
         }
     } else {
-        (false, None, None)
-    };
+        TerminalRuntimeStatus {
+            running: false,
+            pid: None,
+            uptime_secs: None,
+        }
+    }
+}
 
-    let config = { state.config.lock().await.terminal.clone() };
+fn build_terminal_item(cfg: TerminalNodeConfig, status: TerminalRuntimeStatus) -> TerminalItem {
+    TerminalItem {
+        id: cfg.id,
+        name: cfg.name,
+        enabled: cfg.enabled,
+        addr: cfg.addr,
+        port: cfg.port,
+        command: cfg.command,
+        command_args: cfg.command_args,
+        auth_username: cfg.auth_username,
+        auth_password: cfg.auth_password,
+        extra_args: cfg.extra_args,
+        status,
+    }
+}
 
-    Json(ApiResponse::success(
-        if running { "running" } else { "stopped" },
-        TerminalStatusData {
-            running,
-            pid,
-            uptime_secs,
-            config: redact_terminal_config(&config),
-        },
-    ))
+async fn get_terminals(State(state): State<Arc<AppState>>) -> Json<ApiResponse<TerminalListResponse>> {
+    let terminals = { state.config.lock().await.terminals.clone() };
+    let mut items = Vec::with_capacity(terminals.len());
+    for t in terminals {
+        let status = get_terminal_runtime_status(&t.id).await;
+        items.push(build_terminal_item(t, status));
+    }
+    Json(ApiResponse::success("Terminals", TerminalListResponse { items }))
 }
 
 /// POST /api/service/start - Start sing-box
@@ -1012,123 +1104,100 @@ async fn restart_service(
     Ok(Json(ApiResponse::success_no_data("sing-box restarted")))
 }
 
-async fn start_terminal(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let config = { state.config.lock().await.terminal.clone() };
-    if config.command.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("terminal command is required")),
-        ));
-    }
-    if config.port == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("terminal port is required")),
-        ));
-    }
+fn normalize_terminal_request(
+    req: TerminalUpsertRequest,
+    id: String,
+    existing: Option<&TerminalNodeConfig>,
+) -> Result<TerminalNodeConfig, String> {
+    let mut cfg = existing
+        .cloned()
+        .unwrap_or_else(|| terminal_node_default(id.clone()));
+    cfg.id = id;
 
-    match start_terminal_internal(&config).await {
-        Ok(_) => {
-            let mut config_guard = state.config.lock().await;
-            config_guard.terminal.enabled = true;
-            if let Err(e) = save_config(&config_guard).await {
-                eprintln!("Failed to save config after terminal start: {}", e);
-            }
-            Ok(Json(ApiResponse::success_no_data("terminal started")))
+    if let Some(name) = req.name {
+        let trimmed = name.trim();
+        cfg.name = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(enabled) = req.enabled {
+        cfg.enabled = enabled;
+    }
+    if let Some(addr) = req.addr {
+        let trimmed = addr.trim();
+        cfg.addr = if trimmed.is_empty() {
+            default_terminal_addr()
+        } else {
+            trimmed.to_string()
+        };
+    }
+    if let Some(port) = req.port {
+        if port == 0 {
+            return Err("terminal port is required".to_string());
         }
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!("Failed to start: {}", e))),
-        )),
+        cfg.port = port;
     }
-}
-
-async fn stop_terminal(
-    State(state): State<Arc<AppState>>,
-) -> Json<ApiResponse<()>> {
-    stop_terminal_internal().await;
-    let mut config_guard = state.config.lock().await;
-    config_guard.terminal.enabled = false;
-    if let Err(e) = save_config(&config_guard).await {
-        eprintln!("Failed to save config after terminal stop: {}", e);
+    if let Some(command) = req.command {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err("terminal command is required".to_string());
+        }
+        cfg.command = trimmed.to_string();
     }
-    Json(ApiResponse::success_no_data("terminal stopped"))
-}
-
-async fn update_terminal_config(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<TerminalConfigRequest>,
-) -> Result<Json<ApiResponse<TerminalConfig>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let addr = req.addr.trim();
-    let command = req.command.trim();
-    if command.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("terminal command is required")),
-        ));
+    if let Some(command_args) = req.command_args {
+        cfg.command_args = command_args
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
     }
-    if req.port == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error("terminal port is required")),
-        ));
-    }
-
-    let mut config_guard = state.config.lock().await;
-    let mut terminal = config_guard.terminal.clone();
-    terminal.addr = if addr.is_empty() {
-        default_terminal_addr()
-    } else {
-        addr.to_string()
-    };
-    terminal.port = req.port;
-    terminal.command = command.to_string();
-    terminal.command_args = req
-        .command_args
-        .into_iter()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .collect();
     if req.clear_auth {
-        terminal.auth_username = None;
-        terminal.auth_password = None;
+        cfg.auth_username = None;
+        cfg.auth_password = None;
     } else {
         if let Some(username) = req.auth_username {
             let trimmed = username.trim().to_string();
-            terminal.auth_username = if trimmed.is_empty() { None } else { Some(trimmed) };
+            cfg.auth_username = if trimmed.is_empty() { None } else { Some(trimmed) };
         }
         if let Some(password) = req.auth_password {
             let trimmed = password.trim().to_string();
-            terminal.auth_password = if trimmed.is_empty() { None } else { Some(trimmed) };
+            cfg.auth_password = if trimmed.is_empty() { None } else { Some(trimmed) };
         }
     }
-    terminal.extra_args = req
-        .extra_args
-        .into_iter()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .collect();
-    config_guard.terminal = terminal.clone();
-
-    if let Err(e) = save_config(&config_guard).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-        ));
+    if let Some(extra_args) = req.extra_args {
+        cfg.extra_args = extra_args
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
     }
 
-    if req.restart {
-        stop_terminal_internal().await;
-        if let Err(e) = start_terminal_internal(&terminal).await {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
-            ));
+    if cfg.command.trim().is_empty() {
+        return Err("terminal command is required".to_string());
+    }
+    if cfg.port == 0 {
+        return Err("terminal port is required".to_string());
+    }
+
+    Ok(cfg)
+}
+
+async fn create_terminal(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TerminalUpsertRequest>,
+) -> Result<Json<ApiResponse<TerminalItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let id = generate_terminal_id();
+    let mut cfg = normalize_terminal_request(req, id.clone(), None)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(err) = terminal_bind_conflict(&cfg.id, &cfg, &config_guard.terminals) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
         }
-        terminal.enabled = true;
-        config_guard.terminal.enabled = true;
+        config_guard.terminals.push(cfg.clone());
         if let Err(e) = save_config(&config_guard).await {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1137,10 +1206,217 @@ async fn update_terminal_config(
         }
     }
 
+    if cfg.enabled {
+        if let Err(e) = start_terminal_internal(&cfg.id, &cfg).await {
+            let mut config_guard = state.config.lock().await;
+            if let Some(t) = config_guard.terminals.iter_mut().find(|t| t.id == cfg.id) {
+                t.enabled = false;
+                cfg.enabled = false;
+            }
+            let _ = save_config(&config_guard).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to start: {}", e))),
+            ));
+        }
+    }
+
+    let status = get_terminal_runtime_status(&cfg.id).await;
     Ok(Json(ApiResponse::success(
-        "terminal config updated",
-        redact_terminal_config(&terminal),
+        "Terminal created",
+        build_terminal_item(cfg, status),
     )))
+}
+
+async fn update_terminal(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<TerminalUpsertRequest>,
+) -> Result<Json<ApiResponse<TerminalItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let existing = {
+        let config_guard = state.config.lock().await;
+        config_guard
+            .terminals
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+    };
+    let Some(existing) = existing else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+    };
+
+    let restart = req.restart;
+    let mut cfg = normalize_terminal_request(req, id.clone(), Some(&existing))
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(err) = terminal_bind_conflict(&cfg.id, &cfg, &config_guard.terminals) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        let Some(pos) = config_guard.terminals.iter().position(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        };
+        config_guard.terminals[pos] = cfg.clone();
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    let restart = restart && cfg.enabled;
+    if restart {
+        cfg.enabled = true;
+        {
+            let mut config_guard = state.config.lock().await;
+            if let Some(t) = config_guard.terminals.iter_mut().find(|t| t.id == id) {
+                t.enabled = true;
+            }
+            let _ = save_config(&config_guard).await;
+        }
+        let _ = stop_terminal_internal(&cfg.id).await;
+        if let Err(e) = start_terminal_internal(&cfg.id, &cfg).await {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+            ));
+        }
+    } else {
+        let status = get_terminal_runtime_status(&cfg.id).await;
+        if cfg.enabled && !status.running {
+            if let Err(e) = start_terminal_internal(&cfg.id, &cfg).await {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(format!("Failed to start: {}", e))),
+                ));
+            }
+        }
+        if !cfg.enabled && status.running {
+            let _ = stop_terminal_internal(&cfg.id).await;
+        }
+    }
+
+    let status = get_terminal_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success(
+        "Terminal updated",
+        build_terminal_item(cfg, status),
+    )))
+}
+
+async fn delete_terminal(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config_guard = state.config.lock().await;
+        let before = config_guard.terminals.len();
+        config_guard.terminals.retain(|t| t.id != id);
+        if config_guard.terminals.len() == before {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        }
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    let _ = stop_terminal_internal(&id).await;
+    Ok(Json(ApiResponse::success_no_data("Terminal deleted")))
+}
+
+async fn start_terminal(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(t) = config_guard.terminals.iter().find(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        };
+        if let Some(err) = terminal_bind_conflict(&id, t, &config_guard.terminals) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        t.clone()
+    };
+    if let Err(e) = start_terminal_internal(&cfg.id, &cfg).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to start: {}", e))),
+        ));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(t) = config_guard.terminals.iter_mut().find(|t| t.id == id) {
+            t.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+                ));
+            }
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("terminal started")))
+}
+
+async fn stop_terminal(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config_guard = state.config.lock().await;
+        let Some(t) = config_guard.terminals.iter_mut().find(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        };
+        t.enabled = false;
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    let _ = stop_terminal_internal(&id).await;
+    Ok(Json(ApiResponse::success_no_data("terminal stopped")))
+}
+
+async fn restart_terminal(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(t) = config_guard.terminals.iter().find(|t| t.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        };
+        if let Some(err) = terminal_bind_conflict(&id, t, &config_guard.terminals) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        t.clone()
+    };
+    let _ = stop_terminal_internal(&id).await;
+    if let Err(e) = start_terminal_internal(&cfg.id, &cfg).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+        ));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(t) = config_guard.terminals.iter_mut().find(|t| t.id == id) {
+            t.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+                ));
+            }
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("terminal restarted")))
 }
 
 /// POST /api/connectivity - Test connectivity to a single site
@@ -2631,6 +2907,87 @@ fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
 
 fn generate_tunnel_id() -> String {
     format!("t-{}", uuid::Uuid::new_v4())
+}
+
+fn generate_terminal_id() -> String {
+    format!("term-{}", uuid::Uuid::new_v4())
+}
+
+fn terminal_legacy_is_default(cfg: &TerminalConfigLegacy) -> bool {
+    cfg.enabled == false
+        && cfg.addr == default_terminal_addr()
+        && cfg.port == default_terminal_port()
+        && cfg.command == default_terminal_command()
+        && cfg.command_args.is_empty()
+        && cfg.auth_username.is_none()
+        && cfg.auth_password.is_none()
+        && (cfg.extra_args.is_empty() || cfg.extra_args == default_terminal_extra_args())
+}
+
+fn terminal_node_default(id: String) -> TerminalNodeConfig {
+    let mut cfg = TerminalNodeConfig::default();
+    cfg.id = id;
+    cfg
+}
+
+fn terminal_bind_conflict(
+    id: &str,
+    cfg: &TerminalNodeConfig,
+    terminals: &[TerminalNodeConfig],
+) -> Option<String> {
+    let addr = if cfg.addr.trim().is_empty() {
+        "127.0.0.1"
+    } else {
+        cfg.addr.as_str()
+    };
+    let port = cfg.port;
+    for t in terminals {
+        if t.id == id {
+            continue;
+        }
+        if t.port != port {
+            continue;
+        }
+        let other_addr = if t.addr.trim().is_empty() {
+            "127.0.0.1"
+        } else {
+            t.addr.as_str()
+        };
+        let conflicts = addr == other_addr || addr == "0.0.0.0" || other_addr == "0.0.0.0";
+        if conflicts {
+            let name = t.name.clone().unwrap_or_else(|| t.id.clone());
+            return Some(format!("terminal port already in use by {}", name));
+        }
+    }
+    None
+}
+
+fn migrate_terminals(config: &mut Config) {
+    if !config.terminals.is_empty() {
+        for t in &mut config.terminals {
+            if t.id.trim().is_empty() {
+                t.id = generate_terminal_id();
+            }
+        }
+        config.terminal = None;
+        return;
+    }
+    let legacy = config.terminal.take();
+    let Some(legacy) = legacy else {
+        return;
+    };
+    if legacy.enabled || !terminal_legacy_is_default(&legacy) {
+        let mut node = terminal_node_default(generate_terminal_id());
+        node.enabled = legacy.enabled;
+        node.addr = legacy.addr;
+        node.port = legacy.port;
+        node.command = legacy.command;
+        node.command_args = legacy.command_args;
+        node.auth_username = legacy.auth_username;
+        node.auth_password = legacy.auth_password;
+        node.extra_args = legacy.extra_args;
+        config.terminals.push(node);
+    }
 }
 
 fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTunnelConfig, String> {
@@ -4843,13 +5200,15 @@ async fn stop_sing_internal_and_wait() {
 }
 
 async fn start_terminal_internal(
-    config: &TerminalConfig,
+    id: &str,
+    config: &TerminalNodeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut lock = GOTTY_PROCESS.lock().await;
-    if let Some(ref mut proc) = *lock {
+    let mut lock = GOTTY_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
         if proc.child.try_wait()?.is_none() {
             return Err("terminal already running".into());
         }
+        lock.remove(id);
     }
 
     let gotty_path = extract_gotty()?;
@@ -4891,32 +5250,37 @@ async fn start_terminal_internal(
         return Err(format!("gotty exited immediately with code {}", code).into());
     }
 
-    *lock = Some(GottyProcess {
-        child,
-        started_at: Instant::now(),
-    });
+    lock.insert(
+        id.to_string(),
+        GottyProcess {
+            child,
+            started_at: Instant::now(),
+        },
+    );
     Ok(())
 }
 
-async fn stop_terminal_internal() {
-    let mut lock = GOTTY_PROCESS.lock().await;
-    if let Some(ref mut proc) = *lock {
-        if proc.child.try_wait().ok().flatten().is_none() {
-            if let Some(pid) = proc.child.id() {
-                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-                for _ in 0..30 {
-                    sleep(Duration::from_millis(100)).await;
-                    if proc.child.try_wait().ok().flatten().is_some() {
-                        break;
-                    }
+async fn stop_terminal_internal(id: &str) -> Result<(), String> {
+    let mut lock = GOTTY_PROCESSES.lock().await;
+    let Some(proc) = lock.get_mut(id) else {
+        return Ok(());
+    };
+    if proc.child.try_wait().ok().flatten().is_none() {
+        if let Some(pid) = proc.child.id() {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            for _ in 0..30 {
+                sleep(Duration::from_millis(100)).await;
+                if proc.child.try_wait().ok().flatten().is_some() {
+                    break;
                 }
-                if proc.child.try_wait().ok().flatten().is_none() {
-                    proc.child.start_kill().ok();
-                }
+            }
+            if proc.child.try_wait().ok().flatten().is_none() {
+                proc.child.start_kill().ok();
             }
         }
     }
-    *lock = None;
+    lock.remove(id);
+    Ok(())
 }
 
 async fn gen_config(
@@ -5600,14 +5964,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     println!("Reading configuration...");
-    let (config, setup_required) = match tokio::fs::read_to_string("config.yaml").await {
+    let (mut config, setup_required) = match tokio::fs::read_to_string("config.yaml").await {
         Ok(text) => (serde_yaml::from_str::<Config>(&text)?, false),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
             Config {
                 port: Some(DEFAULT_PORT),
                 sing_box_home: None,
                 password: None,
-                terminal: TerminalConfig::default(),
+                terminal: None,
+                terminals: vec![],
                 selections: HashMap::new(),
                 nodes: vec![],
                 dns_active: None,
@@ -5630,6 +5995,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ),
         Err(e) => return Err(e.into()),
     };
+
+    migrate_terminals(&mut config);
 
     let port = config.port.unwrap_or(DEFAULT_PORT);
 
@@ -5673,8 +6040,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
 
-        if config.terminal.enabled {
-            match start_terminal_internal(&config.terminal).await {
+        for terminal in &config.terminals {
+            if !terminal.enabled {
+                continue;
+            }
+            match start_terminal_internal(&terminal.id, terminal).await {
                 Ok(_) => println!("gotty started successfully"),
                 Err(e) => eprintln!("Failed to start gotty: {}", e),
             }
@@ -5732,10 +6102,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
         .route("/api/service/restart", post(restart_service))
-        .route("/api/terminal/status", get(get_terminal_status))
-        .route("/api/terminal/start", post(start_terminal))
-        .route("/api/terminal/stop", post(stop_terminal))
-        .route("/api/terminal/config", put(update_terminal_config))
+        .route("/api/terminals", get(get_terminals))
+        .route("/api/terminals", post(create_terminal))
+        .route("/api/terminals/{id}", put(update_terminal).delete(delete_terminal))
+        .route("/api/terminals/{id}/start", post(start_terminal))
+        .route("/api/terminals/{id}/stop", post(stop_terminal))
+        .route("/api/terminals/{id}/restart", post(restart_terminal))
         // Connectivity test
         .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)
