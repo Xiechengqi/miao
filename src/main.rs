@@ -72,8 +72,20 @@ fn default_connect_timeout_ms() -> u64 {
     5_000
 }
 
+fn default_tunnel_set_connect_timeout_ms() -> u64 {
+    10_000
+}
+
 fn default_keepalive_interval_ms() -> u64 {
     10_000
+}
+
+fn default_tunnel_set_start_batch_size() -> u64 {
+    5
+}
+
+fn default_tunnel_set_start_batch_interval_ms() -> u64 {
+    500
 }
 
 fn default_terminal_addr() -> String {
@@ -195,6 +207,12 @@ struct TcpTunnelSetConfig {
     scan_interval_ms: u64,
     #[serde(default)]
     debounce_ms: u64,
+    #[serde(default = "default_tunnel_set_connect_timeout_ms")]
+    connect_timeout_ms: u64,
+    #[serde(default = "default_tunnel_set_start_batch_size")]
+    start_batch_size: u64,
+    #[serde(default = "default_tunnel_set_start_batch_interval_ms")]
+    start_batch_interval_ms: u64,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ssh_host_ips: Vec<String>,
@@ -513,6 +531,12 @@ struct TcpTunnelSetCreateRequest {
     scan_interval_ms: Option<u64>,
     #[serde(default)]
     debounce_ms: Option<u64>,
+    #[serde(default)]
+    connect_timeout_ms: Option<u64>,
+    #[serde(default)]
+    start_batch_size: Option<u64>,
+    #[serde(default)]
+    start_batch_interval_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -530,6 +554,9 @@ struct TcpTunnelSetDetailResponse {
     exclude_ports: Vec<u16>,
     scan_interval_ms: u64,
     debounce_ms: u64,
+    connect_timeout_ms: u64,
+    start_batch_size: u64,
+    start_batch_interval_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -3593,6 +3620,9 @@ async fn get_tcp_tunnel_set(
             exclude_ports: set.exclude_ports,
             scan_interval_ms: set.scan_interval_ms,
             debounce_ms: set.debounce_ms,
+            connect_timeout_ms: set.connect_timeout_ms,
+            start_batch_size: set.start_batch_size,
+            start_batch_interval_ms: set.start_batch_interval_ms,
         },
     )))
 }
@@ -3826,6 +3856,13 @@ async fn update_tcp_tunnel_set(
         exclude_ports: req.exclude_ports.unwrap_or_else(|| existing.exclude_ports.clone()),
         scan_interval_ms: req.scan_interval_ms.unwrap_or(existing.scan_interval_ms),
         debounce_ms: req.debounce_ms.unwrap_or(existing.debounce_ms),
+        connect_timeout_ms: req
+            .connect_timeout_ms
+            .unwrap_or(existing.connect_timeout_ms),
+        start_batch_size: req.start_batch_size.unwrap_or(existing.start_batch_size),
+        start_batch_interval_ms: req
+            .start_batch_interval_ms
+            .unwrap_or(existing.start_batch_interval_ms),
         ssh_host_ips: resolved_ips.clone(),
     };
 
@@ -3848,6 +3885,7 @@ async fn update_tcp_tunnel_set(
                     t.strict_host_key_checking = updated.strict_host_key_checking;
                     t.host_key_fingerprint = updated.host_key_fingerprint.clone();
                     t.allow_public_bind = updated.remote_bind_addr == "0.0.0.0";
+                    t.connect_timeout_ms = updated.connect_timeout_ms;
                     t.ssh_host_ips = resolved_ips.clone();
                 }
             }
@@ -3882,6 +3920,15 @@ async fn create_tcp_tunnel_set(
     let exclude_ports = req.exclude_ports.unwrap_or_default();
     let scan_interval_ms = req.scan_interval_ms.unwrap_or(3_000);
     let debounce_ms = req.debounce_ms.unwrap_or(8_000);
+    let connect_timeout_ms = req
+        .connect_timeout_ms
+        .unwrap_or_else(default_tunnel_set_connect_timeout_ms);
+    let start_batch_size = req
+        .start_batch_size
+        .unwrap_or_else(default_tunnel_set_start_batch_size);
+    let start_batch_interval_ms = req
+        .start_batch_interval_ms
+        .unwrap_or_else(default_tunnel_set_start_batch_interval_ms);
 
     if strict_host_key_checking && host_key_fingerprint.trim().is_empty() {
         return Err((
@@ -3924,6 +3971,9 @@ async fn create_tcp_tunnel_set(
             exclude_ports,
             scan_interval_ms,
             debounce_ms,
+            connect_timeout_ms,
+            start_batch_size,
+            start_batch_interval_ms,
             ssh_host_ips: resolved_ips,
         });
         if let Err(e) = save_config(&config).await {
@@ -4005,7 +4055,7 @@ async fn test_tcp_tunnel_set(
         strict_host_key_checking: set.strict_host_key_checking,
         host_key_fingerprint: set.host_key_fingerprint.clone(),
         allow_public_bind: set.remote_bind_addr == "0.0.0.0",
-        connect_timeout_ms: default_connect_timeout_ms(),
+        connect_timeout_ms: set.connect_timeout_ms,
         keepalive_interval_ms: default_keepalive_interval_ms(),
         reconnect_backoff_ms: default_tcp_tunnel_backoff(),
         managed_by: None,

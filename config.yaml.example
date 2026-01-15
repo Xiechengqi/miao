@@ -133,3 +133,6 @@ nodes:
 #     exclude_ports: [443, 6161]
 #     scan_interval_ms: 3000
 #     debounce_ms: 8000
+#     connect_timeout_ms: 10000
+#     start_batch_size: 5
+#     start_batch_interval_ms: 500

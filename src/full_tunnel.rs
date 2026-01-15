@@ -190,65 +190,86 @@ async fn run_set_loop(
         }
 
         // Add new ports: only if no existing managed tunnel for this set+port
-        let to_add: Vec<u16> = ports_now
+        let mut to_add: Vec<u16> = ports_now
             .iter()
             .filter(|p| !managed_map.contains_key(p))
             .cloned()
             .collect();
 
         if !to_add.is_empty() {
-            let mut changed = false;
-            {
-                let mut cfg = state.config.lock().await;
-                for p in to_add {
-                    // set-dimension existence check is enough; do not touch existing entries
-                    let exists = cfg.tcp_tunnels.iter().any(|t| {
-                        matches!(
-                            &t.managed_by,
-                            Some(TcpTunnelManagedBy::FullTunnel {
-                                set_id,
-                                managed_port
-                            }) if set_id == &set_cfg.id && *managed_port == p
-                        )
-                    });
-                    if exists {
-                        continue;
-                    }
+            to_add.sort_unstable();
+            let batch_size = set_cfg.start_batch_size.max(1).min(128) as usize;
+            let batch_interval_ms = set_cfg.start_batch_interval_ms.min(60_000);
+            let batch_interval = Duration::from_millis(batch_interval_ms);
 
-                    let id = crate::generate_tunnel_id();
-                    cfg.tcp_tunnels.push(TcpTunnelConfig {
-                        id,
-                        name: None,
-                        enabled: set_cfg.enabled,
-                        local_addr: "127.0.0.1".to_string(),
-                        local_port: p,
-                        remote_bind_addr: set_cfg.remote_bind_addr.clone(),
-                        remote_port: p,
-                        ssh_host: set_cfg.ssh_host.clone(),
-                        ssh_port: set_cfg.ssh_port,
-                        username: set_cfg.username.clone(),
-                        auth: set_cfg.auth.clone(),
-                        strict_host_key_checking: set_cfg.strict_host_key_checking,
-                        host_key_fingerprint: set_cfg.host_key_fingerprint.clone(),
-                        allow_public_bind: set_cfg.remote_bind_addr == "0.0.0.0",
-                        connect_timeout_ms: 5_000,
-                        keepalive_interval_ms: 10_000,
-                        reconnect_backoff_ms: crate::default_tcp_tunnel_backoff(),
-                        managed_by: Some(TcpTunnelManagedBy::FullTunnel {
-                            set_id: set_cfg.id.clone(),
-                            managed_port: p,
-                        }),
-                        ssh_host_ips: set_cfg.ssh_host_ips.clone(),
-                    });
-                    changed = true;
+            let mut idx = 0usize;
+            while idx < to_add.len() {
+                let end = (idx + batch_size).min(to_add.len());
+                let chunk = &to_add[idx..end];
+                let mut changed = false;
+                {
+                    let mut cfg = state.config.lock().await;
+                    for p in chunk {
+                        // set-dimension existence check is enough; do not touch existing entries
+                        let exists = cfg.tcp_tunnels.iter().any(|t| {
+                            matches!(
+                                &t.managed_by,
+                                Some(TcpTunnelManagedBy::FullTunnel {
+                                    set_id,
+                                    managed_port
+                                }) if set_id == &set_cfg.id && *managed_port == *p
+                            )
+                        });
+                        if exists {
+                            continue;
+                        }
+
+                        let id = crate::generate_tunnel_id();
+                        cfg.tcp_tunnels.push(TcpTunnelConfig {
+                            id,
+                            name: None,
+                            enabled: set_cfg.enabled,
+                            local_addr: "127.0.0.1".to_string(),
+                            local_port: *p,
+                            remote_bind_addr: set_cfg.remote_bind_addr.clone(),
+                            remote_port: *p,
+                            ssh_host: set_cfg.ssh_host.clone(),
+                            ssh_port: set_cfg.ssh_port,
+                            username: set_cfg.username.clone(),
+                            auth: set_cfg.auth.clone(),
+                            strict_host_key_checking: set_cfg.strict_host_key_checking,
+                            host_key_fingerprint: set_cfg.host_key_fingerprint.clone(),
+                            allow_public_bind: set_cfg.remote_bind_addr == "0.0.0.0",
+                            connect_timeout_ms: set_cfg.connect_timeout_ms,
+                            keepalive_interval_ms: 10_000,
+                            reconnect_backoff_ms: crate::default_tcp_tunnel_backoff(),
+                            managed_by: Some(TcpTunnelManagedBy::FullTunnel {
+                                set_id: set_cfg.id.clone(),
+                                managed_port: *p,
+                            }),
+                            ssh_host_ips: set_cfg.ssh_host_ips.clone(),
+                        });
+                        changed = true;
+                    }
+                    if changed {
+                        let _ = save_config(&cfg).await;
+                    }
                 }
                 if changed {
-                    let _ = save_config(&cfg).await;
+                    let tunnels = { state.config.lock().await.tcp_tunnels.clone() };
+                    state.tcp_tunnel.apply_config(&tunnels).await;
                 }
-            }
-            if changed {
-                let tunnels = { state.config.lock().await.tcp_tunnels.clone() };
-                state.tcp_tunnel.apply_config(&tunnels).await;
+
+                idx = end;
+                if idx < to_add.len() {
+                    tokio::select! {
+                        _ = sleep(batch_interval) => {},
+                        _ = stop_rx.changed() => {},
+                    }
+                    if *stop_rx.borrow() {
+                        break;
+                    }
+                }
             }
         }
 
