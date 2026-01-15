@@ -238,6 +238,7 @@ async fn run_set_loop(
                             set_id: set_cfg.id.clone(),
                             managed_port: p,
                         }),
+                        ssh_host_ips: set_cfg.ssh_host_ips.clone(),
                     });
                     changed = true;
                 }
