@@ -2998,6 +2998,162 @@ async fn restart_tcp_tunnel_set(
     Ok(Json(ApiResponse::success_no_data("Set restarted")))
 }
 
+async fn update_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<TcpTunnelSetCreateRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let existing = {
+        let config = state.config.lock().await;
+        config
+            .tcp_tunnel_sets
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+    };
+    let Some(existing) = existing else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+    };
+    if existing.enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Set must be stopped before editing")),
+        ));
+    }
+
+    let mut auth = req.auth;
+    match (&existing.auth, &mut auth) {
+        (TcpTunnelAuth::Password { password: old }, TcpTunnelAuth::Password { password: new }) => {
+            if new.is_empty() {
+                *new = old.clone();
+            }
+        }
+        (
+            TcpTunnelAuth::PrivateKeyPath {
+                path: old_path,
+                passphrase: old_pass,
+            },
+            TcpTunnelAuth::PrivateKeyPath {
+                path: new_path,
+                passphrase: new_pass,
+            },
+        ) => {
+            if new_path.is_empty() {
+                *new_path = old_path.clone();
+            }
+            if new_pass.is_none() {
+                *new_pass = old_pass.clone();
+            }
+        }
+        _ => {}
+    }
+
+    match &auth {
+        TcpTunnelAuth::Password { password } if password.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("password is required")),
+            ));
+        }
+        TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("private key path is required")),
+            ));
+        }
+        _ => {}
+    }
+
+    let ssh_host = req.ssh_host.trim().to_string();
+    if ssh_host.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("ssh_host is required"))));
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("username is required"))));
+    }
+
+    let strict_host_key_checking = req
+        .strict_host_key_checking
+        .unwrap_or(existing.strict_host_key_checking);
+    let host_key_fingerprint = req
+        .host_key_fingerprint
+        .unwrap_or_else(|| existing.host_key_fingerprint.clone());
+    if strict_host_key_checking && host_key_fingerprint.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "host_key_fingerprint is required when strict_host_key_checking is true",
+            )),
+        ));
+    }
+
+    let name = match req.name {
+        Some(n) => {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(n)
+            }
+        }
+        None => existing.name.clone(),
+    };
+
+    let updated = TcpTunnelSetConfig {
+        id: existing.id.clone(),
+        name,
+        enabled: req.enabled.unwrap_or(existing.enabled),
+        remote_bind_addr: req
+            .remote_bind_addr
+            .unwrap_or_else(|| existing.remote_bind_addr.clone()),
+        ssh_host,
+        ssh_port: req.ssh_port.unwrap_or(existing.ssh_port),
+        username,
+        auth: auth.clone(),
+        strict_host_key_checking,
+        host_key_fingerprint: host_key_fingerprint.clone(),
+        exclude_ports: req.exclude_ports.unwrap_or_else(|| existing.exclude_ports.clone()),
+        scan_interval_ms: req.scan_interval_ms.unwrap_or(existing.scan_interval_ms),
+        debounce_ms: req.debounce_ms.unwrap_or(existing.debounce_ms),
+    };
+
+    {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.tcp_tunnel_sets.iter().position(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        };
+        config.tcp_tunnel_sets[pos] = updated.clone();
+
+        for t in config.tcp_tunnels.iter_mut() {
+            if let Some(TcpTunnelManagedBy::FullTunnel { set_id, .. }) = &t.managed_by {
+                if set_id == &id {
+                    t.enabled = updated.enabled;
+                    t.remote_bind_addr = updated.remote_bind_addr.clone();
+                    t.ssh_host = updated.ssh_host.clone();
+                    t.ssh_port = updated.ssh_port;
+                    t.username = updated.username.clone();
+                    t.auth = auth.clone();
+                    t.strict_host_key_checking = updated.strict_host_key_checking;
+                    t.host_key_fingerprint = updated.host_key_fingerprint.clone();
+                    t.allow_public_bind = updated.remote_bind_addr == "0.0.0.0";
+                }
+            }
+        }
+
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    apply_tunnels_from_config(&state).await;
+    apply_full_tunnel_sets_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Set updated")))
+}
+
 async fn create_tcp_tunnel_set(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TcpTunnelSetCreateRequest>,
@@ -5217,7 +5373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnels/bulk/stop", post(bulk_stop_tcp_tunnels))
         .route("/api/tcp-tunnel/overview", get(get_tcp_tunnel_overview))
         .route("/api/tcp-tunnel-sets", post(create_tcp_tunnel_set))
-        .route("/api/tcp-tunnel-sets/{id}", get(get_tcp_tunnel_set).delete(delete_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}", get(get_tcp_tunnel_set).put(update_tcp_tunnel_set).delete(delete_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/start", post(start_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/stop", post(stop_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/restart", post(restart_tcp_tunnel_set))

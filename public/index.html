@@ -1715,7 +1715,7 @@
                         暂无 TCP 穿透配置
                     </div>
                     <div v-else>
-                        <div v-for="t in displayedTcpItems" :key="t.id" class="list-item" @click="handleTcpItemClick(t)">
+                        <div v-for="t in pagedTcpItems" :key="t.id" class="list-item" @click="handleTcpItemClick(t)">
                             <div style="flex: 1;">
                                 <div class="list-item-text" style="white-space: normal;">
                                     <strong>{{ t.name || t.id }}</strong>
@@ -1762,11 +1762,17 @@
                                             <path d="M3 12h4l3 8 4-16 3 8h4" />
                                         </svg>
                                     </button>
-                                    <button class="btn-icon" @click.stop="openFullSetDetails(t)" :disabled="loading"
+                                    <button class="btn-icon" v-if="t.enabled" @click.stop="openFullSetDetails(t)" :disabled="loading"
                                         title="查看" aria-label="查看">
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                                             <circle cx="12" cy="12" r="3"></circle>
+                                        </svg>
+                                    </button>
+                                    <button class="btn-icon" v-else @click.stop="openFullSetModal(t)" :disabled="loading"
+                                        title="编辑" aria-label="编辑">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7 21H3v-4L17 3z" />
                                         </svg>
                                     </button>
                                     <button class="btn-icon" @click.stop="copyFullSet(t)" :disabled="loading"
@@ -1821,6 +1827,28 @@
                                     </button>
                                 </template>
                             </div>
+                        </div>
+                        <div class="node-actions" style="justify-content: flex-end; width: 100%; margin-top: 0.75rem;">
+                            <div class="tab-container" style="margin: 0; padding: 2px; gap: 2px;">
+                                <button class="tab-btn" :class="{ active: tcpPageSize === 10 }" @click="tcpPageSize = 10">10</button>
+                                <button class="tab-btn" :class="{ active: tcpPageSize === 20 }" @click="tcpPageSize = 20">20</button>
+                                <button class="tab-btn" :class="{ active: tcpPageSize === 50 }" @click="tcpPageSize = 50">50</button>
+                            </div>
+                            <button class="btn-custom btn-secondary-custom btn-sm-custom"
+                                @click="tcpCurrentPage = Math.max(1, tcpCurrentPage - 1)"
+                                :disabled="tcpCurrentPage <= 1">
+                                <i class="bi bi-chevron-left"></i>
+                                上一页
+                            </button>
+                            <div style="opacity: 0.8; font-size: 0.85rem;">
+                                第 {{ tcpCurrentPage }} / {{ tcpTotalPages }} 页
+                            </div>
+                            <button class="btn-custom btn-secondary-custom btn-sm-custom"
+                                @click="tcpCurrentPage = Math.min(tcpTotalPages, tcpCurrentPage + 1)"
+                                :disabled="tcpCurrentPage >= tcpTotalPages">
+                                下一页
+                                <i class="bi bi-chevron-right"></i>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -2288,7 +2316,7 @@
                     <div class="modal-content" style="max-width: 860px;">
                         <div class="modal-title">
                             <i class="bi bi-arrow-left-right"></i>
-                            添加全穿透
+                            {{ editingFullSetId ? '编辑全穿透' : '添加全穿透' }}
                             <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="showFullSetModal = false">
                                 <i class="bi bi-x-lg"></i>
                             </button>
@@ -2351,7 +2379,8 @@
                             </div>
                             <div class="form-group" v-if="newFullSet.auth_type === 'password'">
                                 <label class="form-label">密码</label>
-                                <input type="password" class="form-input" v-model="newFullSet.password" placeholder="密码">
+                                <input type="password" class="form-input" v-model="newFullSet.password"
+                                    :placeholder="editingFullSetId ? '留空保持不变' : '密码'">
                             </div>
                             <div class="form-group" v-else>
                                 <label class="form-label">私钥路径</label>
@@ -2361,7 +2390,8 @@
                         <div class="form-row" v-if="newFullSet.auth_type === 'private_key_path'">
                             <div class="form-group">
                                 <label class="form-label">私钥口令（可选）</label>
-                                <input type="password" class="form-input" v-model="newFullSet.private_key_passphrase" placeholder="无口令留空">
+                                <input type="password" class="form-input" v-model="newFullSet.private_key_passphrase"
+                                    :placeholder="editingFullSetId ? '留空保持不变' : '无口令留空'">
                             </div>
                         </div>
 
@@ -2390,8 +2420,8 @@
                             <button class="btn-custom btn-cancel btn-sm-custom" @click="showFullSetModal = false">取消</button>
                             <button class="btn-custom btn-add btn-sm-custom" @click="submitFullSet" :disabled="loading || !canSubmitFullSet">
                                 <span v-if="loading && (loadingAction === 'fullSetSave')" class="spinner" style="width:12px;height:12px;"></span>
-                                <i v-else class="bi bi-plus-lg"></i>
-                                添加
+                                <i v-else :class="['bi', editingFullSetId ? 'bi-check-lg' : 'bi-plus-lg']"></i>
+                                {{ editingFullSetId ? '保存' : '添加' }}
                             </button>
                         </div>
                     </div>
@@ -2554,7 +2584,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
     <script>
-        const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
+        const { createApp, ref, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
 
 	        createApp({
 	            setup() {
@@ -2579,13 +2609,17 @@
 	                const proxyStatus = ref(null);
                     // TCP tunnels (SSH -R)
                 const tcpTunnelsLoaded = ref(false);
-                const tcpTunnelsSupported = ref(false);
+                    const tcpTunnelsSupported = ref(false);
                     const tcpTunnels = ref([]);
                     const tcpViewMode = ref('single'); // single | full
+                    const tcpPageSize = ref(10);
+                    const tcpCurrentPage = ref(1);
                     const showTunnelModal = ref(false);
                     const editingTunnelId = ref(null);
                     const editingTunnelOriginalAuthType = ref(null);
                     const showFullSetModal = ref(false);
+                    const editingFullSetId = ref(null);
+                    const editingFullSetOriginalAuthType = ref(null);
                     const showFullSetDetailModal = ref(false);
                     const fullSetDetailLoading = ref(false);
                     const fullSetDetailItems = ref([]);
@@ -2834,8 +2868,16 @@
                 const canSubmitFullSet = computed(() => {
                     if (!newFullSet.value.ssh_host || !newFullSet.value.username) return false;
                     if (newFullSet.value.strict_host_key_checking && !newFullSet.value.host_key_fingerprint) return false;
-                    if (newFullSet.value.auth_type === 'password') return !!newFullSet.value.password;
-                    return !!newFullSet.value.private_key_path;
+                    const authTypeChanged = !!editingFullSetId.value
+                        && !!editingFullSetOriginalAuthType.value
+                        && newFullSet.value.auth_type !== editingFullSetOriginalAuthType.value;
+
+                    if (newFullSet.value.auth_type === 'password') {
+                        if (!editingFullSetId.value) return !!newFullSet.value.password;
+                        return authTypeChanged ? !!newFullSet.value.password : true;
+                    }
+                    if (!editingFullSetId.value) return !!newFullSet.value.private_key_path;
+                    return authTypeChanged ? !!newFullSet.value.private_key_path : true;
                 });
 
                 const displayedTcpItems = computed(() => {
@@ -2843,10 +2885,34 @@
                     return (tcpTunnels.value || []).filter(t => (mode === 'full' ? t.mode === 'full' : t.mode !== 'full'));
                 });
 
-                const allTcpEnabled = computed(() => {
-                    const items = displayedTcpItems.value || [];
-                    if (!items.length) return false;
-                    return items.every(i => !!i.enabled);
+                const tcpTotalPages = computed(() => {
+                    const total = displayedTcpItems.value.length;
+                    const size = Math.max(1, Number(tcpPageSize.value) || 10);
+                    return Math.max(1, Math.ceil(total / size));
+                });
+
+                const pagedTcpItems = computed(() => {
+                    const size = Math.max(1, Number(tcpPageSize.value) || 10);
+                    const page = Math.max(1, Math.min(tcpCurrentPage.value, tcpTotalPages.value));
+                    const start = (page - 1) * size;
+                    return displayedTcpItems.value.slice(start, start + size);
+                });
+
+                    const allTcpEnabled = computed(() => {
+                        const items = displayedTcpItems.value || [];
+                        if (!items.length) return false;
+                        return items.every(i => !!i.enabled);
+                    });
+
+                const clampTcpPage = () => {
+                    const maxPage = tcpTotalPages.value;
+                    if (tcpCurrentPage.value > maxPage) tcpCurrentPage.value = maxPage;
+                    if (tcpCurrentPage.value < 1) tcpCurrentPage.value = 1;
+                };
+
+                watch([tcpViewMode, displayedTcpItems, tcpPageSize], () => {
+                    tcpCurrentPage.value = 1;
+                    clampTcpPage();
                 });
 
                 // 过滤只显示 selector 类型的代理组
@@ -3208,25 +3274,63 @@
                         showTunnelModal.value = true;
                     };
 
-                    const openFullSetModal = () => {
-                        newFullSet.value = {
-                            name: '',
-                            enabled: true,
-                            remote_bind_addr: '127.0.0.1',
-                            scan_interval_ms: 3000,
-                            debounce_ms: 8000,
-                            ssh_host: '',
-                            ssh_port: 22,
-                            username: 'root',
-                            auth_type: 'password',
-                            password: '',
-                            private_key_path: '',
-                            private_key_passphrase: '',
-                            strict_host_key_checking: true,
-                            host_key_fingerprint: '',
-                            exclude_ports_text: '',
-                        };
-                        showFullSetModal.value = true;
+                    const openFullSetModal = async (t) => {
+                        if (!t) {
+                            editingFullSetId.value = null;
+                            editingFullSetOriginalAuthType.value = null;
+                            newFullSet.value = {
+                                name: '',
+                                enabled: true,
+                                remote_bind_addr: '127.0.0.1',
+                                scan_interval_ms: 3000,
+                                debounce_ms: 8000,
+                                ssh_host: '',
+                                ssh_port: 22,
+                                username: 'root',
+                                auth_type: 'password',
+                                password: '',
+                                private_key_path: '',
+                                private_key_passphrase: '',
+                                strict_host_key_checking: true,
+                                host_key_fingerprint: '',
+                                exclude_ports_text: '',
+                            };
+                            showFullSetModal.value = true;
+                            return;
+                        }
+
+                        if (loading.value) return;
+                        loading.value = true;
+                        loadingAction.value = 'fullSetLoad';
+                        try {
+                            const data = await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(t.id)}`);
+                            const s = data.data || {};
+                            editingFullSetId.value = s.id || t.id;
+                            editingFullSetOriginalAuthType.value = s.auth?.type || null;
+                            newFullSet.value = {
+                                name: s.name || '',
+                                enabled: !!s.enabled,
+                                remote_bind_addr: s.remote_bind_addr || '127.0.0.1',
+                                scan_interval_ms: s.scan_interval_ms || 3000,
+                                debounce_ms: s.debounce_ms || 8000,
+                                ssh_host: s.ssh_host || '',
+                                ssh_port: s.ssh_port || 22,
+                                username: s.username || 'root',
+                                auth_type: s.auth?.type || 'password',
+                                password: '',
+                                private_key_path: (s.auth?.type === 'private_key_path' ? (s.auth?.path || '') : ''),
+                                private_key_passphrase: '',
+                                strict_host_key_checking: s.strict_host_key_checking !== undefined ? !!s.strict_host_key_checking : true,
+                                host_key_fingerprint: s.host_key_fingerprint || '',
+                                exclude_ports_text: (s.exclude_ports || []).join(','),
+                            };
+                            showFullSetModal.value = true;
+                        } catch (e) {
+                            showToast(`获取全穿透配置失败: ${e.message || e}`, 'error');
+                        } finally {
+                            loading.value = false;
+                            loadingAction.value = '';
+                        }
                     };
 
                     const parsePortList = (text) => {
@@ -3253,14 +3357,22 @@
                         loading.value = true;
                         loadingAction.value = 'fullSetSave';
                         try {
+                            const authTypeChanged = !!editingFullSetId.value
+                                && !!editingFullSetOriginalAuthType.value
+                                && newFullSet.value.auth_type !== editingFullSetOriginalAuthType.value;
+
                             const auth = newFullSet.value.auth_type === 'password'
                                 ? {
                                     type: 'password',
-                                    password: newFullSet.value.password || '',
+                                    password: (editingFullSetId.value && !authTypeChanged)
+                                        ? (newFullSet.value.password || '')
+                                        : (newFullSet.value.password || ''),
                                 }
                                 : {
                                     type: 'private_key_path',
-                                    path: newFullSet.value.private_key_path || '',
+                                    path: (editingFullSetId.value && !authTypeChanged)
+                                        ? (newFullSet.value.private_key_path || '')
+                                        : (newFullSet.value.private_key_path || ''),
                                     passphrase: newFullSet.value.private_key_passphrase
                                         ? newFullSet.value.private_key_passphrase
                                         : null,
@@ -3281,12 +3393,21 @@
                                 debounce_ms: Number(newFullSet.value.debounce_ms || 8000),
                             };
 
-                            await apiFetch('/api/tcp-tunnel-sets', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(body),
-                            });
-                            showToast('全穿透已添加', 'success');
+                            if (editingFullSetId.value) {
+                                await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(editingFullSetId.value)}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(body),
+                                });
+                                showToast('全穿透已更新', 'success');
+                            } else {
+                                await apiFetch('/api/tcp-tunnel-sets', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(body),
+                                });
+                                showToast('全穿透已添加', 'success');
+                            }
                             showFullSetModal.value = false;
                             await fetchTcpTunnels();
                         } catch (e) {
@@ -3331,9 +3452,12 @@
                     };
 
                     const handleTcpItemClick = (t) => {
-                        if (t && t.mode === 'full') {
+                        if (!t || t.mode !== 'full') return;
+                        if (t.enabled) {
                             openFullSetDetails(t);
+                            return;
                         }
+                        openFullSetModal(t);
                     };
 
                     const confirmDeleteFullSet = (t) => {
@@ -4190,8 +4314,9 @@
 		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 		                    proxyStatus,
                             tcpTunnelsLoaded, tcpTunnelsSupported, tcpTunnels,
-                            tcpViewMode, displayedTcpItems, allTcpEnabled, toggleAllTcp,
-                            showFullSetModal, newFullSet, canSubmitFullSet,
+                            tcpViewMode, displayedTcpItems, pagedTcpItems, tcpTotalPages, tcpPageSize, tcpCurrentPage,
+                            allTcpEnabled, toggleAllTcp,
+                            showFullSetModal, editingFullSetId, editingFullSetOriginalAuthType, newFullSet, canSubmitFullSet,
                             showFullSetDetailModal, fullSetDetailLoading, fullSetDetailItems, fullSetDetailSet, fullSetDetailConfig,
                             openFullSetModal, submitFullSet, openFullSetDetails, closeFullSetDetail,
                             handleTcpItemClick, confirmDeleteFullSet, copyFullSet, testFullSet,
