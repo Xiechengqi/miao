@@ -1853,6 +1853,75 @@
                     </div>
                 </div>
 
+                <!-- Web Terminal - 全宽 -->
+                <div class="glass-card layout-full">
+                    <div class="card-header-custom">
+                        <i class="bi bi-terminal"></i>
+                        <span>Web Terminal</span>
+                        <button class="btn-custom btn-add btn-sm-custom" @click="openTerminalModal(null)"
+                            :disabled="loading" style="margin-left: auto;">
+                            <i class="bi bi-plus-lg"></i>
+                            添加
+                        </button>
+                    </div>
+
+                    <div v-if="!terminalsLoaded" class="empty-state">
+                        <i class="bi bi-hourglass-split" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        正在加载...
+                    </div>
+                    <div v-else-if="terminals.length === 0" class="empty-state">
+                        <i class="bi bi-terminal" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        暂无 Web Terminal 配置
+                    </div>
+                    <div v-else>
+                        <div v-for="t in terminals" :key="t.id" class="list-item">
+                            <div style="flex: 1;">
+                                <div class="list-item-text" style="white-space: normal;">
+                                    <strong>{{ t.name || t.id }}</strong>
+                                    <span class="node-type-badge"
+                                        :class="t.status.running ? 'dns-badge-ok' : 'dns-badge-unknown'">
+                                        {{ t.status.running ? 'running' : 'stopped' }}
+                                    </span>
+                                </div>
+                                <div class="node-info">
+                                    地址: {{ t.addr }}:{{ t.port }}
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    命令: {{ t.command }} <span v-if="t.command_args && t.command_args.length">{{ t.command_args.join(' ') }}</span>
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    认证: {{ t.auth_username || '-' }} / {{ t.auth_password || '-' }}
+                                </div>
+                                <div class="node-info" v-if="t.status.running" style="opacity: 0.85;">
+                                    PID: {{ t.status.pid || '-' }} · 运行: {{ formatUptime(t.status.uptime_secs) }}
+                                </div>
+                            </div>
+                            <div class="node-actions">
+                                <button class="btn-icon" @click.stop="openTerminal(t)" :disabled="!terminalUrl(t)"
+                                    title="打开" aria-label="打开">
+                                    <i class="bi bi-box-arrow-up-right"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="restartTerminal(t)" :disabled="loading"
+                                    title="重启" aria-label="重启">
+                                    <i class="bi bi-arrow-repeat"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="toggleTerminal(t)" :disabled="loading"
+                                    :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
+                                    <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="openTerminalModal(t)" :disabled="loading"
+                                    title="编辑" aria-label="编辑">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn-icon btn-icon-danger" @click.stop="confirmDeleteTerminal(t)" :disabled="loading"
+                                    title="删除" aria-label="删除">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 左列 -->
                 <div class="layout-column">
 
@@ -1945,75 +2014,6 @@
 
                 <!-- 右列 -->
                 <div class="layout-column">
-
-                    <!-- Web Terminal -->
-                    <div class="glass-card">
-                        <div class="card-header-custom">
-                            <i class="bi bi-terminal"></i>
-                            <span>Web Terminal</span>
-                            <button class="btn-custom btn-add btn-sm-custom" @click="openTerminalModal(null)"
-                                :disabled="loading" style="margin-left: auto;">
-                                <i class="bi bi-plus-lg"></i>
-                                添加
-                            </button>
-                        </div>
-
-                        <div v-if="!terminalsLoaded" class="empty-state">
-                            <i class="bi bi-hourglass-split" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
-                            正在加载...
-                        </div>
-                        <div v-else-if="terminals.length === 0" class="empty-state">
-                            <i class="bi bi-terminal" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
-                            暂无 Web Terminal 配置
-                        </div>
-                        <div v-else>
-                            <div v-for="t in terminals" :key="t.id" class="list-item">
-                                <div style="flex: 1;">
-                                    <div class="list-item-text" style="white-space: normal;">
-                                        <strong>{{ t.name || t.id }}</strong>
-                                        <span class="node-type-badge"
-                                            :class="t.status.running ? 'dns-badge-ok' : 'dns-badge-unknown'">
-                                            {{ t.status.running ? 'running' : 'stopped' }}
-                                        </span>
-                                    </div>
-                                    <div class="node-info">
-                                        地址: {{ t.addr }}:{{ t.port }}
-                                    </div>
-                            <div class="node-info" style="opacity: 0.85;">
-                                命令: {{ t.command }} <span v-if="t.command_args && t.command_args.length">{{ t.command_args.join(' ') }}</span>
-                            </div>
-                            <div class="node-info" style="opacity: 0.85;">
-                                认证: {{ t.auth_username || '-' }} / {{ t.auth_password || '-' }}
-                            </div>
-                                    <div class="node-info" v-if="t.status.running" style="opacity: 0.85;">
-                                        PID: {{ t.status.pid || '-' }} · 运行: {{ formatUptime(t.status.uptime_secs) }}
-                                    </div>
-                                </div>
-                                <div class="node-actions">
-                                    <button class="btn-icon" @click.stop="openTerminal(t)" :disabled="!terminalUrl(t)"
-                                        title="打开" aria-label="打开">
-                                        <i class="bi bi-box-arrow-up-right"></i>
-                                    </button>
-                                    <button class="btn-icon" @click.stop="restartTerminal(t)" :disabled="loading"
-                                        title="重启" aria-label="重启">
-                                        <i class="bi bi-arrow-repeat"></i>
-                                    </button>
-                                    <button class="btn-icon" @click.stop="toggleTerminal(t)" :disabled="loading"
-                                        :title="t.enabled ? '停止' : '启动'" :aria-label="t.enabled ? '停止' : '启动'">
-                                        <i :class="['bi', t.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
-                                    </button>
-                                    <button class="btn-icon" @click.stop="openTerminalModal(t)" :disabled="loading"
-                                        title="编辑" aria-label="编辑">
-                                        <i class="bi bi-pencil"></i>
-                                    </button>
-                                    <button class="btn-icon btn-icon-danger" @click.stop="confirmDeleteTerminal(t)" :disabled="loading"
-                                        title="删除" aria-label="删除">
-                                        <i class="bi bi-trash"></i>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
 
 	                    <!-- 订阅文件管理 -->
 	                    <div class="glass-card">
