@@ -832,8 +832,7 @@ async fn start_service(
     match start_sing_internal(&state.sing_box_home).await {
         Ok(_) => {
             let config = state.config.lock().await;
-            let node_type_by_tag = state.node_type_by_tag.lock().await;
-            let _ = apply_saved_selections(&config, Some(&*node_type_by_tag)).await;
+            let _ = apply_saved_selections(&config).await;
             Ok(Json(ApiResponse::success_no_data(
                 "sing-box started successfully",
             )))
@@ -2084,7 +2083,7 @@ async fn test_node(
 async fn get_dns_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (stored_active, raw_candidates, interval_ms, fail_threshold, cooldown_ms, proxy_selection) = {
+    let (stored_active, raw_candidates, interval_ms, fail_threshold, cooldown_ms) = {
         let config = state.config.lock().await;
         (
             config
@@ -2098,20 +2097,11 @@ async fn get_dns_status(
             config.dns_check_interval_ms.unwrap_or(180_000),
             config.dns_fail_threshold.unwrap_or(3),
             config.dns_cooldown_ms.unwrap_or(300_000),
-            config
-                .selections
-                .get("proxy")
-                .cloned()
-                .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
         )
     };
 
-    let proxy_is_ssh = {
-        let node_type_by_tag = state.node_type_by_tag.lock().await;
-        proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
-    };
-    let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
-    let active = sanitize_dns_active(&stored_active, proxy_is_ssh);
+    let candidates = normalize_dns_candidates(raw_candidates);
+    let active = sanitize_dns_active(&stored_active);
 
     let now = Instant::now();
     let monitor = state.dns_monitor.lock().await;
@@ -2158,7 +2148,7 @@ async fn get_dns_status(
 async fn check_dns_now(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (stored_active, fail_threshold, cooldown_ms, proxy_selection) = {
+    let (stored_active, fail_threshold, cooldown_ms) = {
         let config = state.config.lock().await;
         (
             config
@@ -2167,18 +2157,9 @@ async fn check_dns_now(
                 .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
             config.dns_fail_threshold.unwrap_or(3),
             config.dns_cooldown_ms.unwrap_or(300_000),
-            config
-                .selections
-                .get("proxy")
-                .cloned()
-                .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
         )
     };
-    let proxy_is_ssh = {
-        let node_type_by_tag = state.node_type_by_tag.lock().await;
-        proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
-    };
-    let active = sanitize_dns_active(&stored_active, proxy_is_ssh);
+    let active = sanitize_dns_active(&stored_active);
     let candidates = vec![active];
     let _ = run_dns_checks(
         &state,
@@ -2195,25 +2176,14 @@ async fn switch_dns_active(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DnsSwitchRequest>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (raw_candidates, proxy_selection) = {
+    let raw_candidates = {
         let config = state.config.lock().await;
-        (
-            config
+        config
             .dns_candidates
             .clone()
-            .unwrap_or_else(default_dns_candidates),
-            config
-                .selections
-                .get("proxy")
-                .cloned()
-                .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
-        )
+            .unwrap_or_else(default_dns_candidates)
     };
-    let proxy_is_ssh = {
-        let node_type_by_tag = state.node_type_by_tag.lock().await;
-        proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
-    };
-    let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
+    let candidates = normalize_dns_candidates(raw_candidates);
 
     if !candidates.iter().any(|c| c == &req.tag) {
         return Err((
@@ -3527,55 +3497,13 @@ async fn switch_selector_and_save(
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
 
-    let previous_proxy_selection = if group == "proxy" {
-        let config = state.config.lock().await;
-        config.selections.get("proxy").cloned()
-    } else {
-        None
-    };
-
     clash_switch_selector_resilient(&client, group, desired).await?;
-
-    let mut dns_selection: Option<String> = None;
-    if group == "proxy" {
-        let is_ssh = {
-            let node_type_by_tag = state.node_type_by_tag.lock().await;
-            node_type_by_tag
-                .get(desired)
-                .map(|t| t == "ssh")
-                .unwrap_or(false)
-        };
-        let target = if is_ssh { "direct" } else { "proxy" };
-        match clash_switch_selector_resilient(&client, "_dns", target).await {
-            Ok(()) => {
-                dns_selection = Some(target.to_string());
-            }
-            Err(e) => {
-                if is_ssh {
-                    if let Some(previous) = previous_proxy_selection {
-                        if let Err(rollback_err) = clash_switch_selector(&client, "proxy", &previous).await
-                        {
-                            eprintln!("Failed to rollback proxy selector: {}", rollback_err);
-                        }
-                    }
-                    return Err(format!(
-                        "Switched proxy to SSH, but failed to switch DNS selector to direct: {}",
-                        e
-                    ));
-                }
-                eprintln!("Failed to switch _dns selector: {}", e);
-            }
-        }
-    }
 
     {
         let mut config = state.config.lock().await;
         config
             .selections
             .insert(group.to_string(), desired.to_string());
-        if let Some(dns_selection) = dns_selection {
-            config.selections.insert("_dns".to_string(), dns_selection);
-        }
         if let Err(e) = save_config(&config).await {
             return Err(format!("Failed to save config: {}", e));
         }
@@ -3722,10 +3650,7 @@ fn is_supported_dns_tag(tag: &str) -> bool {
     matches!(tag, "dns-direct" | "doh-cf" | "doh-google")
 }
 
-fn sanitize_dns_active(configured: &str, proxy_is_ssh: bool) -> String {
-    if proxy_is_ssh {
-        return "dns-direct".to_string();
-    }
+fn sanitize_dns_active(configured: &str) -> String {
     if configured == "dns-direct" {
         return DEFAULT_DNS_ACTIVE.to_string();
     }
@@ -3928,21 +3853,7 @@ async fn run_dns_checks(
     healthy
 }
 
-fn proxy_is_ssh(
-    proxy_selection: Option<&String>,
-    node_type_by_tag: &HashMap<String, String>,
-) -> bool {
-    proxy_selection
-        .and_then(|name| node_type_by_tag.get(name))
-        .map(|t| t == "ssh")
-        .unwrap_or(false)
-}
-
-fn normalize_dns_candidates(raw: Vec<String>, proxy_is_ssh: bool) -> Vec<String> {
-    if proxy_is_ssh {
-        return vec!["dns-direct".to_string()];
-    }
-
+fn normalize_dns_candidates(raw: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(raw.len() + 1);
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -3958,7 +3869,7 @@ fn normalize_dns_candidates(raw: Vec<String>, proxy_is_ssh: bool) -> Vec<String>
         }
     }
 
-    // Always keep Cloudflare as the ultimate fallback for non-ssh.
+    // Always keep Cloudflare as the ultimate fallback.
     if !seen.contains(DEFAULT_DNS_ACTIVE) {
         out.push(DEFAULT_DNS_ACTIVE.to_string());
     }
@@ -3967,7 +3878,7 @@ fn normalize_dns_candidates(raw: Vec<String>, proxy_is_ssh: bool) -> Vec<String>
 
 async fn dns_health_monitor(state: Arc<AppState>) {
     loop {
-        let (raw_candidates, interval_ms, fail_threshold, cooldown_ms, proxy_selection) = {
+        let (raw_candidates, interval_ms, fail_threshold, cooldown_ms) = {
             let config = state.config.lock().await;
             (
                 config
@@ -3977,20 +3888,10 @@ async fn dns_health_monitor(state: Arc<AppState>) {
                 config.dns_check_interval_ms.unwrap_or(180_000),
                 config.dns_fail_threshold.unwrap_or(3),
                 config.dns_cooldown_ms.unwrap_or(300_000),
-                config
-                    .selections
-                    .get("proxy")
-                    .cloned()
-                    .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned())),
             )
         };
 
-        let proxy_is_ssh = {
-            let node_type_by_tag = state.node_type_by_tag.lock().await;
-            proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag)
-        };
-
-        let candidates = normalize_dns_candidates(raw_candidates, proxy_is_ssh);
+        let candidates = normalize_dns_candidates(raw_candidates);
         let _ = run_dns_checks(
             &state,
             &candidates,
@@ -4197,10 +4098,7 @@ async fn proxy_health_monitor(state: Arc<AppState>) {
     }
 }
 
-async fn apply_saved_selections(
-    config: &Config,
-    node_type_by_tag: Option<&HashMap<String, String>>,
-) -> Result<(), String> {
+async fn apply_saved_selections(config: &Config) -> Result<(), String> {
     let proxy_selection = config
         .selections
         .get("proxy")
@@ -4214,21 +4112,12 @@ async fn apply_saved_selections(
     let client = reqwest::Client::new();
 
     let mut ordered: Vec<(String, String)> = Vec::with_capacity(config.selections.len() + 1);
-    let proxy_is_ssh = proxy_selection
-        .as_ref()
-        .and_then(|name| node_type_by_tag.and_then(|m| m.get(name)))
-        .map(|t| t == "ssh")
-        .unwrap_or(false);
 
-    let desired_dns_selection = if proxy_is_ssh {
-        "direct".to_string()
-    } else {
-        config
-            .selections
-            .get("_dns")
-            .cloned()
-            .unwrap_or_else(|| "proxy".to_string())
-    };
+    let desired_dns_selection = config
+        .selections
+        .get("_dns")
+        .cloned()
+        .unwrap_or_else(|| "proxy".to_string());
 
     if proxy_selection.is_some() || config.selections.contains_key("_dns") {
         ordered.push(("_dns".to_string(), desired_dns_selection));
@@ -4326,8 +4215,7 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
     start_sing_internal(&state.sing_box_home)
         .await
         .map_err(|e| format!("Failed to restart sing-box: {}", e))?;
-    let node_type_by_tag = state.node_type_by_tag.lock().await;
-    let _ = apply_saved_selections(&config_clone, Some(&*node_type_by_tag)).await;
+    let _ = apply_saved_selections(&config_clone).await;
     println!("sing-box restarted successfully");
     Ok(())
 }
@@ -4573,16 +4461,8 @@ async fn gen_config(
 
     let mut sing_box_config = get_config_template();
     if let Some(dns) = sing_box_config.get_mut("dns") {
-        let node_type_by_tag = build_node_type_map(config, subs);
-        let proxy_selection = config
-            .selections
-            .get("proxy")
-            .cloned()
-            .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned()));
-        let proxy_is_ssh = proxy_is_ssh(proxy_selection.as_ref(), &node_type_by_tag);
-
         let configured = config.dns_active.as_deref().unwrap_or(DEFAULT_DNS_ACTIVE);
-        let active = sanitize_dns_active(configured, proxy_is_ssh);
+        let active = sanitize_dns_active(configured);
         dns["final"] = serde_json::Value::String(active);
     }
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
@@ -5269,7 +5149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // Start sing-box
                 match start_sing_internal(&sing_box_home).await {
                     Ok(_) => {
-                        let _ = apply_saved_selections(&config, Some(&node_type_by_tag)).await;
+                        let _ = apply_saved_selections(&config).await;
                         println!("sing-box started successfully")
                     }
                     Err(e) => eprintln!("Failed to start sing-box: {}", e),

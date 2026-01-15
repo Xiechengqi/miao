@@ -31,11 +31,10 @@ nodes:
 # dns_active: doh-cf
 #
 # Candidate tags for health checks / failover.
-# For non-ssh nodes, miao will fallback to `doh-cf` when all candidates fail (it won't auto-switch to `dns-direct`).
+# Miao will fallback to `doh-cf` when all candidates fail (it won't auto-switch to `dns-direct`).
 # dns_candidates:
 #   - doh-cf
 #   - doh-google
-#   # Note: `dns-direct` will only be used automatically when the active `proxy` node type is `ssh`.
 #   # If you want to use UDP DNS (IP DNS), run a local DNS forwarder and point sing-box to it (see README).
 #
 # Health check interval and thresholds (milliseconds).
