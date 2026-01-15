@@ -1946,6 +1946,102 @@
                 <!-- 右列 -->
                 <div class="layout-column">
 
+                    <!-- Web Terminal -->
+                    <div class="glass-card">
+                        <div class="card-header-custom">
+                            <i class="bi bi-terminal"></i>
+                            <span>Web Terminal</span>
+                            <button class="btn-custom btn-secondary-custom btn-sm-custom" @click="openTerminal"
+                                :disabled="!terminalUrl" style="margin-left: auto;">
+                                <i class="bi bi-box-arrow-up-right"></i>
+                                打开
+                            </button>
+                            <button class="btn-custom btn-secondary-custom btn-sm-custom"
+                                @click="terminalStatus.running ? stopTerminal() : startTerminal()"
+                                :disabled="terminalAction === 'start' || terminalAction === 'stop'">
+                                <span v-if="terminalAction" class="spinner" style="width:12px;height:12px;"></span>
+                                <i v-else class="bi" :class="terminalStatus.running ? 'bi-stop-circle' : 'bi-play-circle'"></i>
+                                {{ terminalStatus.running ? '停止' : '启动' }}
+                            </button>
+                        </div>
+
+                        <div class="d-flex align-items-center flex-wrap gap-3" style="margin-bottom: 0.75rem;">
+                            <div :class="['status-indicator', terminalStatus.running ? 'status-running' : 'status-stopped']">
+                                <span class="status-dot"></span>
+                                {{ terminalStatus.running ? '运行中' : '已停止' }}
+                            </div>
+                            <div class="status-item" v-if="terminalStatus.running">
+                                <span class="status-label">进程 ID</span>
+                                <span class="status-value">{{ terminalStatus.pid || '-' }}</span>
+                            </div>
+                            <div class="status-item" v-if="terminalStatus.running">
+                                <span class="status-label">运行时间</span>
+                                <span class="status-value">{{ formatUptime(terminalStatus.uptime_secs) }}</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">地址</span>
+                                <span class="status-value">{{ terminalConfig.addr }}:{{ terminalConfig.port }}</span>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">绑定地址</label>
+                                <input type="text" class="form-input" v-model="terminalConfig.addr" placeholder="127.0.0.1">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">端口</label>
+                                <input type="number" class="form-input" v-model.number="terminalConfig.port" min="1" max="65535">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">启动命令</label>
+                                <input type="text" class="form-input" v-model="terminalConfig.command" placeholder="/bin/bash">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">命令参数</label>
+                                <input type="text" class="form-input" v-model="terminalCommandArgsText" placeholder="-l">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">认证用户名</label>
+                                <input type="text" class="form-input" v-model="terminalConfig.auth_username" placeholder="留空保持不变">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">认证密码</label>
+                                <input type="password" class="form-input" v-model="terminalConfig.auth_password" placeholder="留空保持不变">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">额外参数</label>
+                                <input type="text" class="form-input" v-model="terminalExtraArgsText" placeholder="--permit-write --reconnect">
+                            </div>
+                            <div class="form-group" style="display:flex; flex-direction: column; justify-content: flex-end; gap: 0.4rem;">
+                                <label class="form-label" style="display:flex; align-items:center; gap:0.5rem; margin: 0;">
+                                    <input type="checkbox" v-model="terminalRestartOnSave">
+                                    保存后重启
+                                </label>
+                                <label class="form-label" style="display:flex; align-items:center; gap:0.5rem; margin: 0;">
+                                    <input type="checkbox" v-model="terminalClearAuth">
+                                    清除认证
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="node-actions" style="justify-content: flex-end;">
+                            <button class="btn-custom btn-add" @click="saveTerminalConfig" :disabled="terminalSaving">
+                                <span v-if="terminalSaving" class="spinner" style="width:12px;height:12px;"></span>
+                                <span v-else>保存配置</span>
+                            </button>
+                        </div>
+                    </div>
+
 	                    <!-- 订阅文件管理 -->
 	                    <div class="glass-card">
 	                        <div class="card-header-custom">
@@ -2600,12 +2696,28 @@
 	                const loggingIn = ref(false);
 	                const loginError = ref('');
 
-		                // 状态
-		                const status = ref({ running: false, pid: null, uptime_secs: null });
+	                // 状态
+	                const status = ref({ running: false, pid: null, uptime_secs: null });
 	                    const dnsStatus = ref(null);
 	                    const dnsSelected = ref('');
 	                    const checkingDns = ref(false);
 	                    const switchingDns = ref(false);
+                    const terminalStatus = ref({ running: false, pid: null, uptime_secs: null });
+                    const terminalConfig = ref({
+                        addr: '127.0.0.1',
+                        port: 7681,
+                        command: '/bin/bash',
+                        command_args: [],
+                        auth_username: '',
+                        auth_password: '',
+                        extra_args: [],
+                    });
+                    const terminalCommandArgsText = ref('');
+                    const terminalExtraArgsText = ref('');
+                    const terminalRestartOnSave = ref(true);
+                    const terminalSaving = ref(false);
+                    const terminalAction = ref('');
+                    const terminalClearAuth = ref(false);
 	                const proxyStatus = ref(null);
                     // TCP tunnels (SSH -R)
                 const tcpTunnelsLoaded = ref(false);
@@ -2880,6 +2992,22 @@
                     return authTypeChanged ? !!newFullSet.value.private_key_path : true;
                 });
 
+                const terminalHost = computed(() => {
+                    const addr = (terminalConfig.value.addr || '').trim();
+                    if (!addr || addr === '0.0.0.0') return window.location.hostname;
+                    return addr;
+                });
+
+                const terminalUrl = computed(() => {
+                    const port = Number(terminalConfig.value.port) || 0;
+                    if (!port) return '';
+                    const hasTls = (terminalConfig.value.extra_args || []).some(arg =>
+                        arg.startsWith('--tls') || arg.startsWith('--tls-cert')
+                    );
+                    const scheme = hasTls ? 'https' : 'http';
+                    return `${scheme}://${terminalHost.value}:${port}`;
+                });
+
                 const displayedTcpItems = computed(() => {
                     const mode = tcpViewMode.value;
                     return (tcpTunnels.value || []).filter(t => (mode === 'full' ? t.mode === 'full' : t.mode !== 'full'));
@@ -2990,6 +3118,29 @@
 	                    }
 	                    return data;
 	                };
+
+                const splitArgsText = (text) => {
+                    if (!text) return [];
+                    return text
+                        .split(/\s+/)
+                        .map(v => v.trim())
+                        .filter(v => v.length > 0);
+                };
+
+                const applyTerminalConfig = (cfg) => {
+                    if (!cfg) return;
+                            terminalConfig.value = {
+                                addr: cfg.addr || '127.0.0.1',
+                                port: cfg.port || 7681,
+                                command: cfg.command || '/bin/bash',
+                                command_args: cfg.command_args || [],
+                                auth_username: cfg.auth_username || '',
+                                auth_password: '',
+                                extra_args: cfg.extra_args || [],
+                            };
+                    terminalCommandArgsText.value = (terminalConfig.value.command_args || []).join(' ');
+                    terminalExtraArgsText.value = (terminalConfig.value.extra_args || []).join(' ');
+                };
 
 	                const fetchSetupStatus = async () => {
 	                    try {
@@ -3393,15 +3544,16 @@
                                 debounce_ms: Number(newFullSet.value.debounce_ms || 8000),
                             };
 
+                            let res = null;
                             if (editingFullSetId.value) {
-                                await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(editingFullSetId.value)}`, {
+                                res = await apiFetch(`/api/tcp-tunnel-sets/${encodeURIComponent(editingFullSetId.value)}`, {
                                     method: 'PUT',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(body),
                                 });
                                 showToast('全穿透已更新', 'success');
                             } else {
-                                await apiFetch('/api/tcp-tunnel-sets', {
+                                res = await apiFetch('/api/tcp-tunnel-sets', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(body),
@@ -3410,6 +3562,15 @@
                             }
                             showFullSetModal.value = false;
                             await fetchTcpTunnels();
+                            if (res?.data?.restart_required) {
+                                showConfirm(
+                                    '需要重启 sing-box',
+                                    '检测到穿透 SSH 主机 IP 变更，需要重启 sing-box 以应用直连规则，是否现在重启？',
+                                    async () => {
+                                        await restartService();
+                                    }
+                                );
+                            }
                         } catch (e) {
                             showToast(`保存失败: ${e.message || e}`, 'error');
                         } finally {
@@ -3563,15 +3724,16 @@
                         loadingAction.value = 'tunnelSave';
                         try {
                             const body = buildTunnelRequest();
+                            let res = null;
                             if (editingTunnelId.value) {
-                                await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(editingTunnelId.value)}`, {
+                                res = await apiFetch(`/api/tcp-tunnels/${encodeURIComponent(editingTunnelId.value)}`, {
                                     method: 'PUT',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(body),
                                 });
                                 showToast('TCP 穿透已更新', 'success');
                             } else {
-                                await apiFetch('/api/tcp-tunnels', {
+                                res = await apiFetch('/api/tcp-tunnels', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(body),
@@ -3580,6 +3742,15 @@
                             }
                             showTunnelModal.value = false;
                             await fetchTcpTunnels();
+                            if (res?.data?.restart_required) {
+                                showConfirm(
+                                    '需要重启 sing-box',
+                                    '检测到穿透 SSH 主机 IP 变更，需要重启 sing-box 以应用直连规则，是否现在重启？',
+                                    async () => {
+                                        await restartService();
+                                    }
+                                );
+                            }
                         } catch (e) {
                             showToast(`保存失败: ${e.message || e}`, 'error');
                         } finally {
@@ -3931,15 +4102,86 @@
 	                };
 
 	                // 获取状态
-	                const fetchStatus = async () => {
-	                    try {
-	                        const data = await apiFetch('/api/status');
-	                        if (data.data) {
-	                            status.value = data.data;
-	                            updatePageTitle(data.data.running);
-	                        }
-	                    } catch (e) { console.error('获取状态失败:', e); }
-	                };
+                const fetchStatus = async () => {
+                    try {
+                        const data = await apiFetch('/api/status');
+                        if (data.data) {
+                            status.value = data.data;
+                            updatePageTitle(data.data.running);
+                        }
+                    } catch (e) { console.error('获取状态失败:', e); }
+                };
+
+                const fetchTerminalStatus = async () => {
+                    try {
+                        const data = await apiFetch('/api/terminal/status');
+                        if (data.data) {
+                            terminalStatus.value = {
+                                running: data.data.running,
+                                pid: data.data.pid,
+                                uptime_secs: data.data.uptime_secs,
+                            };
+                            applyTerminalConfig(data.data.config);
+                        }
+                    } catch (e) { console.error('获取终端状态失败:', e); }
+                };
+
+                const startTerminal = async () => {
+                    if (terminalAction.value) return;
+                    terminalAction.value = 'start';
+                    try {
+                        await apiCall('terminal/start', 'POST', null, 'terminalStart');
+                        showToast('终端已启动', 'success');
+                        await fetchTerminalStatus();
+                    } catch (e) { }
+                    terminalAction.value = '';
+                };
+
+                const stopTerminal = async () => {
+                    if (terminalAction.value) return;
+                    terminalAction.value = 'stop';
+                    try {
+                        await apiCall('terminal/stop', 'POST', null, 'terminalStop');
+                        showToast('终端已停止', 'success');
+                        await fetchTerminalStatus();
+                    } catch (e) { }
+                    terminalAction.value = '';
+                };
+
+                const saveTerminalConfig = async () => {
+                    if (terminalSaving.value) return;
+                    terminalSaving.value = true;
+                    try {
+                        const authUsername = (terminalConfig.value.auth_username || '').trim();
+                        const authPassword = (terminalConfig.value.auth_password || '').trim();
+                        const payload = {
+                            addr: (terminalConfig.value.addr || '').trim(),
+                            port: Number(terminalConfig.value.port) || 0,
+                            command: (terminalConfig.value.command || '').trim(),
+                            command_args: splitArgsText(terminalCommandArgsText.value),
+                            auth_username: authUsername ? authUsername : null,
+                            auth_password: authPassword ? authPassword : null,
+                            extra_args: splitArgsText(terminalExtraArgsText.value),
+                            restart: terminalRestartOnSave.value && terminalStatus.value.running,
+                            clear_auth: terminalClearAuth.value,
+                        };
+                        const data = await apiFetch('/api/terminal/config', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        applyTerminalConfig(data.data);
+                        terminalClearAuth.value = false;
+                        showToast('终端配置已保存', 'success');
+                        await fetchTerminalStatus();
+                    } catch (e) { }
+                    terminalSaving.value = false;
+                };
+
+                const openTerminal = () => {
+                    if (!terminalUrl.value) return;
+                    window.open(terminalUrl.value, '_blank', 'noopener');
+                };
 
 		                // 获取订阅文件列表
 		                const fetchSubFiles = async () => {
@@ -3982,6 +4224,14 @@
                         showToast('服务已停止', 'success');
                         await fetchStatus();
                     } catch (e) { console.error('停止服务失败:', e); }
+                };
+
+                const restartService = async () => {
+                    try {
+                        await apiCall('service/restart', 'POST', null, 'restart');
+                        showToast('sing-box 已重启', 'success');
+                        await fetchStatus();
+                    } catch (e) { }
                 };
 
                 // 切换服务状态
@@ -4264,6 +4514,7 @@
                     loadDelays();
 
                     await fetchStatus();
+                    await fetchTerminalStatus();
                     await fetchDnsStatus();
                     await fetchTcpTunnels();
 	                    await fetchSubFiles();
@@ -4277,6 +4528,7 @@
                     // 定时刷新状态
                     statusInterval = setInterval(async () => {
 	                        await fetchStatus();
+                            await fetchTerminalStatus();
 	                        await fetchDnsStatus();
                             await fetchTcpTunnels();
 	                        if (status.value.running) {
@@ -4310,8 +4562,12 @@
 		                    // 认证相关
 		                    authenticated, loginPassword, loggingIn, loginError,
 	                    handleLogin, handleLogout,
-	                // 状态
-		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns, subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
+	                    // 状态
+		                    status, dnsStatus, dnsSelected, checkingDns, switchingDns,
+                            terminalStatus, terminalConfig, terminalCommandArgsText, terminalExtraArgsText,
+                            terminalRestartOnSave, terminalSaving, terminalAction, terminalClearAuth, terminalUrl,
+                            fetchTerminalStatus, startTerminal, stopTerminal, saveTerminalConfig, openTerminal,
+                            subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 		                    proxyStatus,
                             tcpTunnelsLoaded, tcpTunnelsSupported, tcpTunnels,
                             tcpViewMode, displayedTcpItems, pagedTcpItems, tcpTotalPages, tcpPageSize, tcpCurrentPage,
@@ -4340,7 +4596,7 @@
                     getConnectivityClass, formatConnectivityDelay,
                     // 其他
                     showToast, getToastIcon,
-                    startService, stopService, toggleService,
+                    startService, stopService, restartService, toggleService,
 	                    submitNode, openEditNode, testNodeFromModal, testManualNode, deleteNode, confirmDeleteNode,
                         formatNodeType, getNodeTypeClass,
 	                    fetchDnsStatus, checkDnsNow, switchDnsActive, getDnsBadgeClass, dnsHealthTitle,

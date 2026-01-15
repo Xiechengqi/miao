@@ -11,6 +11,7 @@
 - **国内外自动分流** - 基于 geosite/geoip 规则，国内直连、国外代理
 - **Web 管理面板** - 节点管理、订阅文件管理、实时流量监控、测速
 - **TCP 穿透 (SSH -R)** - 将本机 TCP 端口映射到远程服务器端口（可选特性 `tcp_tunnel`）
+- **Web Terminal** - 内置 gotty 提供浏览器终端（可选）
 - **节点候选池 + 自动切换** - 支持 Ctrl/⌘ 多选候选节点，后端定时健康检查失败自动切换
 - **自动更新** - 支持从 GitHub 一键更新到最新版本
 - **OpenWrt 支持** - 自动安装所需内核模块
@@ -76,6 +77,11 @@ sudo ./miao --sub ./sub
 | `selections` | 记住的节点选择（selector -> node） | `{}` |
 | `proxy_pool` | 代理候选节点池（按顺序优先级，2+ 时启用自动切换） | - |
 | `nodes` | 手动配置的节点 (JSON 格式) | - |
+| `terminal` | Web Terminal (gotty) 配置 | - |
+
+### Web Terminal (gotty)
+
+启用后会在独立端口启动 gotty（默认 `127.0.0.1:7681`），登录认证由 miao 配置。可在 `config.yaml` 中设置端口、地址、命令和额外参数（见 `config.yaml.example`）；面板里留空认证不会清空，需勾选“清除认证”。
 
 > 默认规则会让所有 `tcp/22`（SSH）直连，避免代理出口对 22 端口的限制导致 SSH 断连。
 

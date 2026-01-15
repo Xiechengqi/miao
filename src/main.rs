@@ -15,8 +15,9 @@ use lazy_static::lazy_static;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -39,6 +40,13 @@ const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-amd64");
 
 #[cfg(target_arch = "aarch64")]
 const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-arm64");
+
+// Embed gotty binary based on target architecture
+#[cfg(target_arch = "x86_64")]
+const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-amd64");
+
+#[cfg(target_arch = "aarch64")]
+const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-arm64");
 
 // ============================================================================
 // Data Structures
@@ -66,6 +74,18 @@ fn default_connect_timeout_ms() -> u64 {
 
 fn default_keepalive_interval_ms() -> u64 {
     10_000
+}
+
+fn default_terminal_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_terminal_port() -> u16 {
+    DEFAULT_TERMINAL_PORT
+}
+
+fn default_terminal_command() -> String {
+    "/bin/bash".to_string()
 }
 
 fn default_tcp_tunnel_backoff() -> TcpTunnelBackoff {
@@ -131,6 +151,9 @@ struct TcpTunnelConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed_by: Option<TcpTunnelManagedBy>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ssh_host_ips: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -168,6 +191,47 @@ struct TcpTunnelSetConfig {
     scan_interval_ms: u64,
     #[serde(default)]
     debounce_ms: u64,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ssh_host_ips: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct TerminalConfig {
+    enabled: bool,
+    addr: String,
+    port: u16,
+    command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    command_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_args: Vec<String>,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig {
+            enabled: false,
+            addr: default_terminal_addr(),
+            port: default_terminal_port(),
+            command: default_terminal_command(),
+            command_args: Vec::new(),
+            auth_username: None,
+            auth_password: None,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+fn redact_terminal_config(config: &TerminalConfig) -> TerminalConfig {
+    let mut redacted = config.clone();
+    redacted.auth_password = None;
+    redacted
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -178,6 +242,8 @@ struct Config {
     sing_box_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,  // 登录密码
+    #[serde(default)]
+    terminal: TerminalConfig,
     #[serde(default)]
     selections: HashMap<String, String>, // selector group -> node name
     #[serde(default)]
@@ -220,6 +286,7 @@ struct Config {
 }
 
 const DEFAULT_PORT: u16 = 6161;
+const DEFAULT_TERMINAL_PORT: u16 = 7681;
 const DEFAULT_DNS_ACTIVE: &str = "doh-cf";
 
 // JWT 密钥（生产环境应使用环境变量）
@@ -281,6 +348,12 @@ struct TcpTunnelItem {
     keepalive_interval_ms: u64,
     reconnect_backoff_ms: TcpTunnelBackoff,
     status: tcp_tunnel::TunnelRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelSaveResponse {
+    item: TcpTunnelItem,
+    restart_required: bool,
 }
 
 #[derive(Serialize)]
@@ -419,6 +492,11 @@ struct TcpTunnelSetDetailResponse {
     exclude_ports: Vec<u16>,
     scan_interval_ms: u64,
     debounce_ms: u64,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelSetSaveResponse {
+    restart_required: bool,
 }
 
 fn generate_tunnel_set_id() -> String {
@@ -601,6 +679,35 @@ struct StatusData {
     uptime_secs: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct TerminalStatusData {
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+    config: TerminalConfig,
+}
+
+#[derive(Deserialize)]
+struct TerminalConfigRequest {
+    addr: String,
+    port: u16,
+    command: String,
+    #[serde(default)]
+    command_args: Vec<String>,
+    #[serde(default)]
+    auth_username: Option<String>,
+    #[serde(default)]
+    auth_password: Option<String>,
+    #[serde(default)]
+    extra_args: Vec<String>,
+    #[serde(default)]
+    restart: bool,
+    #[serde(default)]
+    clear_auth: bool,
+}
+
 #[derive(Serialize, Clone)]
 struct ConnectivityResult {
     name: String,
@@ -721,8 +828,14 @@ struct SingBoxProcess {
     started_at: Instant,
 }
 
+struct GottyProcess {
+    child: tokio::process::Child,
+    started_at: Instant,
+}
+
 lazy_static! {
     static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
+    static ref GOTTY_PROCESS: Mutex<Option<GottyProcess>> = Mutex::new(None);
 }
 
 // ============================================================================
@@ -812,6 +925,39 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
     ))
 }
 
+async fn get_terminal_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<TerminalStatusData>> {
+    let mut lock = GOTTY_PROCESS.lock().await;
+    let (running, pid, uptime_secs) = if let Some(ref mut proc) = *lock {
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                (false, None, None)
+            }
+            Ok(None) => {
+                let uptime = proc.started_at.elapsed().as_secs();
+                (true, proc.child.id(), Some(uptime))
+            }
+            Err(_) => (false, None, None),
+        }
+    } else {
+        (false, None, None)
+    };
+
+    let config = { state.config.lock().await.terminal.clone() };
+
+    Json(ApiResponse::success(
+        if running { "running" } else { "stopped" },
+        TerminalStatusData {
+            running,
+            pid,
+            uptime_secs,
+            config: redact_terminal_config(&config),
+        },
+    ))
+}
+
 /// POST /api/service/start - Start sing-box
 async fn start_service(
     State(state): State<Arc<AppState>>,
@@ -848,6 +994,153 @@ async fn start_service(
 async fn stop_service() -> Json<ApiResponse<()>> {
     stop_sing_internal().await;
     Json(ApiResponse::success_no_data("sing-box stopped"))
+}
+
+/// POST /api/service/restart - Restart sing-box with regenerated config
+async fn restart_service(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !sing_box_running().await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("sing-box is not running")),
+        ));
+    }
+    regenerate_and_restart(state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e))))?;
+    Ok(Json(ApiResponse::success_no_data("sing-box restarted")))
+}
+
+async fn start_terminal(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let config = { state.config.lock().await.terminal.clone() };
+    if config.command.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("terminal command is required")),
+        ));
+    }
+    if config.port == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("terminal port is required")),
+        ));
+    }
+
+    match start_terminal_internal(&config).await {
+        Ok(_) => {
+            let mut config_guard = state.config.lock().await;
+            config_guard.terminal.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                eprintln!("Failed to save config after terminal start: {}", e);
+            }
+            Ok(Json(ApiResponse::success_no_data("terminal started")))
+        }
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to start: {}", e))),
+        )),
+    }
+}
+
+async fn stop_terminal(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<()>> {
+    stop_terminal_internal().await;
+    let mut config_guard = state.config.lock().await;
+    config_guard.terminal.enabled = false;
+    if let Err(e) = save_config(&config_guard).await {
+        eprintln!("Failed to save config after terminal stop: {}", e);
+    }
+    Json(ApiResponse::success_no_data("terminal stopped"))
+}
+
+async fn update_terminal_config(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TerminalConfigRequest>,
+) -> Result<Json<ApiResponse<TerminalConfig>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let addr = req.addr.trim();
+    let command = req.command.trim();
+    if command.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("terminal command is required")),
+        ));
+    }
+    if req.port == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("terminal port is required")),
+        ));
+    }
+
+    let mut config_guard = state.config.lock().await;
+    let mut terminal = config_guard.terminal.clone();
+    terminal.addr = if addr.is_empty() {
+        default_terminal_addr()
+    } else {
+        addr.to_string()
+    };
+    terminal.port = req.port;
+    terminal.command = command.to_string();
+    terminal.command_args = req
+        .command_args
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    if req.clear_auth {
+        terminal.auth_username = None;
+        terminal.auth_password = None;
+    } else {
+        if let Some(username) = req.auth_username {
+            let trimmed = username.trim().to_string();
+            terminal.auth_username = if trimmed.is_empty() { None } else { Some(trimmed) };
+        }
+        if let Some(password) = req.auth_password {
+            let trimmed = password.trim().to_string();
+            terminal.auth_password = if trimmed.is_empty() { None } else { Some(trimmed) };
+        }
+    }
+    terminal.extra_args = req
+        .extra_args
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    config_guard.terminal = terminal.clone();
+
+    if let Err(e) = save_config(&config_guard).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+        ));
+    }
+
+    if req.restart {
+        stop_terminal_internal().await;
+        if let Err(e) = start_terminal_internal(&terminal).await {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+            ));
+        }
+        terminal.enabled = true;
+        config_guard.terminal.enabled = true;
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    Ok(Json(ApiResponse::success(
+        "terminal config updated",
+        redact_terminal_config(&terminal),
+    )))
 }
 
 /// POST /api/connectivity - Test connectivity to a single site
@@ -2383,7 +2676,74 @@ fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTu
         keepalive_interval_ms,
         reconnect_backoff_ms,
         managed_by: None,
+        ssh_host_ips: Vec::new(),
     })
+}
+
+fn normalize_ip_list(ips: impl IntoIterator<Item = IpAddr>) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for ip in ips {
+        set.insert(ip);
+    }
+    set.into_iter().map(|ip| ip.to_string()).collect()
+}
+
+async fn resolve_ssh_host_ips(host: &str, port: u16) -> Vec<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return vec![ip.to_string()];
+    }
+    match tokio::net::lookup_host((host, port)).await {
+        Ok(addrs) => normalize_ip_list(addrs.map(|addr| addr.ip())),
+        Err(e) => {
+            eprintln!("Failed to resolve ssh_host {}: {}", host, e);
+            Vec::new()
+        }
+    }
+}
+
+fn collect_tunnel_ssh_ips(config: &Config) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for t in &config.tcp_tunnels {
+        for ip in &t.ssh_host_ips {
+            if let Ok(addr) = ip.parse::<IpAddr>() {
+                set.insert(addr);
+            }
+        }
+    }
+    for s in &config.tcp_tunnel_sets {
+        for ip in &s.ssh_host_ips {
+            if let Ok(addr) = ip.parse::<IpAddr>() {
+                set.insert(addr);
+            }
+        }
+    }
+    set.into_iter().map(|ip| ip.to_string()).collect()
+}
+
+fn ip_to_cidr(ip: &str) -> Option<String> {
+    let addr = ip.parse::<IpAddr>().ok()?;
+    let suffix = if matches!(addr, IpAddr::V4(_)) { 32 } else { 128 };
+    Some(format!("{}/{}", addr, suffix))
+}
+
+async fn sing_box_running() -> bool {
+    let mut lock = SING_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    } else {
+        false
+    }
 }
 
 async fn apply_tunnels_from_config(state: &Arc<AppState>) {
@@ -2450,10 +2810,13 @@ async fn get_tcp_tunnels(
 async fn create_tcp_tunnel(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TcpTunnelUpsertRequest>,
-) -> Result<Json<ApiResponse<TcpTunnelItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<TcpTunnelSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let id = req.id.clone().unwrap_or_else(generate_tunnel_id);
-    let cfg = normalize_tcp_tunnel(req, id.clone())
+    let mut cfg = normalize_tcp_tunnel(req, id.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+    let resolved_ips = resolve_ssh_host_ips(&cfg.ssh_host, cfg.ssh_port).await;
+    cfg.ssh_host_ips = resolved_ips.clone();
+    let restart_required = !resolved_ips.is_empty() && sing_box_running().await;
 
     // Require secrets on create.
     match &cfg.auth {
@@ -2494,25 +2857,28 @@ async fn create_tcp_tunnel(
     let status = state.tcp_tunnel.get_status(&cfg.id).await.unwrap_or_default();
     Ok(Json(ApiResponse::success(
         "Tunnel created",
-        TcpTunnelItem {
-            id: cfg.id,
-            name: cfg.name,
-            enabled: cfg.enabled,
-            local_addr: cfg.local_addr,
-            local_port: cfg.local_port,
-            remote_bind_addr: cfg.remote_bind_addr,
-            remote_port: cfg.remote_port,
-            ssh_host: cfg.ssh_host,
-            ssh_port: cfg.ssh_port,
-            username: cfg.username,
-            auth: redact_tunnel_auth(&cfg.auth),
-            strict_host_key_checking: cfg.strict_host_key_checking,
-            host_key_fingerprint: cfg.host_key_fingerprint,
-            allow_public_bind: cfg.allow_public_bind,
-            connect_timeout_ms: cfg.connect_timeout_ms,
-            keepalive_interval_ms: cfg.keepalive_interval_ms,
-            reconnect_backoff_ms: cfg.reconnect_backoff_ms,
-            status,
+        TcpTunnelSaveResponse {
+            item: TcpTunnelItem {
+                id: cfg.id,
+                name: cfg.name,
+                enabled: cfg.enabled,
+                local_addr: cfg.local_addr,
+                local_port: cfg.local_port,
+                remote_bind_addr: cfg.remote_bind_addr,
+                remote_port: cfg.remote_port,
+                ssh_host: cfg.ssh_host,
+                ssh_port: cfg.ssh_port,
+                username: cfg.username,
+                auth: redact_tunnel_auth(&cfg.auth),
+                strict_host_key_checking: cfg.strict_host_key_checking,
+                host_key_fingerprint: cfg.host_key_fingerprint,
+                allow_public_bind: cfg.allow_public_bind,
+                connect_timeout_ms: cfg.connect_timeout_ms,
+                keepalive_interval_ms: cfg.keepalive_interval_ms,
+                reconnect_backoff_ms: cfg.reconnect_backoff_ms,
+                status,
+            },
+            restart_required,
         },
     )))
 }
@@ -2521,7 +2887,7 @@ async fn update_tcp_tunnel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<TcpTunnelUpsertRequest>,
-) -> Result<Json<ApiResponse<TcpTunnelItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<TcpTunnelSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let existing = {
         let config = state.config.lock().await;
         config
@@ -2581,6 +2947,13 @@ async fn update_tcp_tunnel(
         _ => {}
     }
 
+    let mut resolved_ips = resolve_ssh_host_ips(&cfg.ssh_host, cfg.ssh_port).await;
+    if resolved_ips.is_empty() {
+        resolved_ips = existing.ssh_host_ips.clone();
+    }
+    let restart_required = resolved_ips != existing.ssh_host_ips && sing_box_running().await;
+    cfg.ssh_host_ips = resolved_ips;
+
     {
         let mut config = state.config.lock().await;
         let Some(pos) = config.tcp_tunnels.iter().position(|t| t.id == id) else {
@@ -2599,25 +2972,28 @@ async fn update_tcp_tunnel(
     let status = state.tcp_tunnel.get_status(&cfg.id).await.unwrap_or_default();
     Ok(Json(ApiResponse::success(
         "Tunnel updated",
-        TcpTunnelItem {
-            id: cfg.id,
-            name: cfg.name,
-            enabled: cfg.enabled,
-            local_addr: cfg.local_addr,
-            local_port: cfg.local_port,
-            remote_bind_addr: cfg.remote_bind_addr,
-            remote_port: cfg.remote_port,
-            ssh_host: cfg.ssh_host,
-            ssh_port: cfg.ssh_port,
-            username: cfg.username,
-            auth: redact_tunnel_auth(&cfg.auth),
-            strict_host_key_checking: cfg.strict_host_key_checking,
-            host_key_fingerprint: cfg.host_key_fingerprint,
-            allow_public_bind: cfg.allow_public_bind,
-            connect_timeout_ms: cfg.connect_timeout_ms,
-            keepalive_interval_ms: cfg.keepalive_interval_ms,
-            reconnect_backoff_ms: cfg.reconnect_backoff_ms,
-            status,
+        TcpTunnelSaveResponse {
+            item: TcpTunnelItem {
+                id: cfg.id,
+                name: cfg.name,
+                enabled: cfg.enabled,
+                local_addr: cfg.local_addr,
+                local_port: cfg.local_port,
+                remote_bind_addr: cfg.remote_bind_addr,
+                remote_port: cfg.remote_port,
+                ssh_host: cfg.ssh_host,
+                ssh_port: cfg.ssh_port,
+                username: cfg.username,
+                auth: redact_tunnel_auth(&cfg.auth),
+                strict_host_key_checking: cfg.strict_host_key_checking,
+                host_key_fingerprint: cfg.host_key_fingerprint,
+                allow_public_bind: cfg.allow_public_bind,
+                connect_timeout_ms: cfg.connect_timeout_ms,
+                keepalive_interval_ms: cfg.keepalive_interval_ms,
+                reconnect_backoff_ms: cfg.reconnect_backoff_ms,
+                status,
+            },
+            restart_required,
         },
     )))
 }
@@ -2972,7 +3348,7 @@ async fn update_tcp_tunnel_set(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<TcpTunnelSetCreateRequest>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<TcpTunnelSetSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let existing = {
         let config = state.config.lock().await;
         config
@@ -3043,6 +3419,13 @@ async fn update_tcp_tunnel_set(
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("username is required"))));
     }
 
+    let ssh_port = req.ssh_port.unwrap_or(existing.ssh_port);
+    let mut resolved_ips = resolve_ssh_host_ips(&ssh_host, ssh_port).await;
+    if resolved_ips.is_empty() {
+        resolved_ips = existing.ssh_host_ips.clone();
+    }
+    let restart_required = resolved_ips != existing.ssh_host_ips && sing_box_running().await;
+
     let strict_host_key_checking = req
         .strict_host_key_checking
         .unwrap_or(existing.strict_host_key_checking);
@@ -3078,7 +3461,7 @@ async fn update_tcp_tunnel_set(
             .remote_bind_addr
             .unwrap_or_else(|| existing.remote_bind_addr.clone()),
         ssh_host,
-        ssh_port: req.ssh_port.unwrap_or(existing.ssh_port),
+        ssh_port,
         username,
         auth: auth.clone(),
         strict_host_key_checking,
@@ -3086,6 +3469,7 @@ async fn update_tcp_tunnel_set(
         exclude_ports: req.exclude_ports.unwrap_or_else(|| existing.exclude_ports.clone()),
         scan_interval_ms: req.scan_interval_ms.unwrap_or(existing.scan_interval_ms),
         debounce_ms: req.debounce_ms.unwrap_or(existing.debounce_ms),
+        ssh_host_ips: resolved_ips.clone(),
     };
 
     {
@@ -3107,6 +3491,7 @@ async fn update_tcp_tunnel_set(
                     t.strict_host_key_checking = updated.strict_host_key_checking;
                     t.host_key_fingerprint = updated.host_key_fingerprint.clone();
                     t.allow_public_bind = updated.remote_bind_addr == "0.0.0.0";
+                    t.ssh_host_ips = resolved_ips.clone();
                 }
             }
         }
@@ -3121,13 +3506,16 @@ async fn update_tcp_tunnel_set(
 
     apply_tunnels_from_config(&state).await;
     apply_full_tunnel_sets_from_config(&state).await;
-    Ok(Json(ApiResponse::success_no_data("Set updated")))
+    Ok(Json(ApiResponse::success(
+        "Set updated",
+        TcpTunnelSetSaveResponse { restart_required },
+    )))
 }
 
 async fn create_tcp_tunnel_set(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TcpTunnelSetCreateRequest>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<TcpTunnelSetSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let id = generate_tunnel_set_id();
     let enabled = req.enabled.unwrap_or(false);
     let remote_bind_addr = req.remote_bind_addr.unwrap_or_else(default_remote_bind_addr);
@@ -3160,6 +3548,9 @@ async fn create_tcp_tunnel_set(
         _ => {}
     }
 
+    let resolved_ips = resolve_ssh_host_ips(&req.ssh_host, ssh_port).await;
+    let restart_required = !resolved_ips.is_empty() && sing_box_running().await;
+
     {
         let mut config = state.config.lock().await;
         config.tcp_tunnel_sets.push(TcpTunnelSetConfig {
@@ -3176,6 +3567,7 @@ async fn create_tcp_tunnel_set(
             exclude_ports,
             scan_interval_ms,
             debounce_ms,
+            ssh_host_ips: resolved_ips,
         });
         if let Err(e) = save_config(&config).await {
             return Err((
@@ -3186,7 +3578,10 @@ async fn create_tcp_tunnel_set(
     }
 
     apply_full_tunnel_sets_from_config(&state).await;
-    Ok(Json(ApiResponse::success_no_data("Set created")))
+    Ok(Json(ApiResponse::success(
+        "Set created",
+        TcpTunnelSetSaveResponse { restart_required },
+    )))
 }
 
 async fn copy_tcp_tunnel_set(
@@ -3257,6 +3652,7 @@ async fn test_tcp_tunnel_set(
         keepalive_interval_ms: default_keepalive_interval_ms(),
         reconnect_backoff_ms: default_tcp_tunnel_backoff(),
         managed_by: None,
+        ssh_host_ips: set.ssh_host_ips.clone(),
     };
 
     match state.tcp_tunnel.test_ssh_only(&cfg).await {
@@ -4240,6 +4636,21 @@ fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync
     Ok(current_dir)
 }
 
+/// Extract embedded gotty binary to current working directory
+fn extract_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let current_dir = std::env::current_dir()?;
+    let gotty_path = current_dir.join("gotty");
+
+    if !gotty_path.exists() {
+        println!("Extracting embedded gotty binary to {:?}", gotty_path);
+        fs::write(&gotty_path, GOTTY_BINARY)?;
+        fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755))?;
+        println!("gotty binary extracted successfully");
+    }
+
+    Ok(gotty_path)
+}
+
 async fn check_and_install_openwrt_dependencies(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !PathBuf::from("/etc/openwrt_release").exists() {
@@ -4431,6 +4842,83 @@ async fn stop_sing_internal_and_wait() {
     *lock = None;
 }
 
+async fn start_terminal_internal(
+    config: &TerminalConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lock = GOTTY_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait()?.is_none() {
+            return Err("terminal already running".into());
+        }
+    }
+
+    let gotty_path = extract_gotty()?;
+    println!("Starting gotty from: {:?}", gotty_path);
+
+    let mut command = tokio::process::Command::new(&gotty_path);
+    command
+        .arg("-a")
+        .arg(&config.addr)
+        .arg("-p")
+        .arg(config.port.to_string());
+
+    if let (Some(user), Some(pass)) = (&config.auth_username, &config.auth_password) {
+        if !user.trim().is_empty() && !pass.trim().is_empty() {
+            command.arg("-c").arg(format!("{}:{}", user, pass));
+        }
+    }
+
+    for arg in &config.extra_args {
+        command.arg(arg);
+    }
+
+    command.arg(&config.command);
+    for arg in &config.command_args {
+        command.arg(arg);
+    }
+
+    let mut child = command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    let pid = child.id();
+    println!("gotty process spawned with PID: {:?}", pid);
+
+    sleep(Duration::from_millis(300)).await;
+    if let Some(exit_status) = child.try_wait()? {
+        let code = exit_status.code().unwrap_or(-1);
+        return Err(format!("gotty exited immediately with code {}", code).into());
+    }
+
+    *lock = Some(GottyProcess {
+        child,
+        started_at: Instant::now(),
+    });
+    Ok(())
+}
+
+async fn stop_terminal_internal() {
+    let mut lock = GOTTY_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait().ok().flatten().is_none() {
+            if let Some(pid) = proc.child.id() {
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                for _ in 0..30 {
+                    sleep(Duration::from_millis(100)).await;
+                    if proc.child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                }
+                if proc.child.try_wait().ok().flatten().is_none() {
+                    proc.child.start_kill().ok();
+                }
+            }
+        }
+    }
+    *lock = None;
+}
+
 async fn gen_config(
     config: &Config,
     sing_box_home: &str,
@@ -4477,6 +4965,26 @@ async fn gen_config(
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
         arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
+    }
+    if let Some(rules) = sing_box_config
+        .get_mut("route")
+        .and_then(|route| route.get_mut("rules"))
+        .and_then(|value| value.as_array_mut())
+    {
+        let ip_cidrs: Vec<String> = collect_tunnel_ssh_ips(config)
+            .into_iter()
+            .filter_map(|ip| ip_to_cidr(&ip))
+            .collect();
+        if !ip_cidrs.is_empty() {
+            rules.insert(
+                2,
+                serde_json::json!({
+                    "ip_cidr": ip_cidrs,
+                    "action": "route",
+                    "outbound": "direct"
+                }),
+            );
+        }
     }
 
     let config_output_loc = format!("{}/config.json", sing_box_home);
@@ -5099,6 +5607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 port: Some(DEFAULT_PORT),
                 sing_box_home: None,
                 password: None,
+                terminal: TerminalConfig::default(),
                 selections: HashMap::new(),
                 nodes: vec![],
                 dns_active: None,
@@ -5164,6 +5673,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
 
+        if config.terminal.enabled {
+            match start_terminal_internal(&config.terminal).await {
+                Ok(_) => println!("gotty started successfully"),
+                Err(e) => eprintln!("Failed to start gotty: {}", e),
+            }
+        }
+
     } else {
         println!("No config.yaml found, entering setup mode at http://localhost:{}", port);
     }
@@ -5215,6 +5731,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/status", get(get_status))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
+        .route("/api/service/restart", post(restart_service))
+        .route("/api/terminal/status", get(get_terminal_status))
+        .route("/api/terminal/start", post(start_terminal))
+        .route("/api/terminal/stop", post(stop_terminal))
+        .route("/api/terminal/config", put(update_terminal_config))
         // Connectivity test
         .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)

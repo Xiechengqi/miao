@@ -9,6 +9,21 @@
 # Web login password (optional, default: "admin")
 # password: admin
 
+# Web terminal (gotty) (optional)
+# terminal:
+#   enabled: false
+#   addr: "127.0.0.1"
+#   port: 7681
+#   command: "/bin/bash"
+#   # command_args:
+#   #   - "-l"
+#   # auth_username: "admin"
+#   # auth_password: "changeme"
+#   # 留空 auth_username/auth_password 将保持现有认证不变（清空请在面板勾选“清除认证”）
+#   # extra_args:
+#   #   - "--permit-write"
+#   #   - "--reconnect"
+
 # Remembered node selections (optional)
 # Key is selector group name, value is selected node name.
 # selections:
