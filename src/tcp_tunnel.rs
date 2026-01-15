@@ -227,6 +227,22 @@ impl TunnelManager {
         #[cfg(not(feature = "tcp_tunnel"))]
         unreachable!();
     }
+
+    pub async fn test_ssh_only(&self, cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
+        if !cfg!(feature = "tcp_tunnel") {
+            let _ = cfg;
+            return Err((
+                "NOT_SUPPORTED".to_string(),
+                "tcp_tunnel feature not enabled".to_string(),
+            ));
+        }
+        #[cfg(feature = "tcp_tunnel")]
+        {
+            return test_ssh_only_once(cfg).await;
+        }
+        #[cfg(not(feature = "tcp_tunnel"))]
+        unreachable!();
+    }
 }
 
 async fn spawn_tunnel(cfg: TcpTunnelConfig) -> TunnelHandle {
@@ -693,5 +709,101 @@ async fn test_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
         .cancel_tcpip_forward(cfg.remote_bind_addr.clone(), cfg.remote_port as u32)
         .await;
     let _ = session.disconnect(russh::Disconnect::ByApplication, "test done", "en").await;
+    Ok(())
+}
+
+#[cfg(feature = "tcp_tunnel")]
+async fn test_ssh_only_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
+    use crate::TcpTunnelAuth;
+    use russh::client;
+    use russh::keys::key::PrivateKeyWithHashAlg;
+    use russh::keys::load_secret_key;
+    use std::borrow::Cow;
+
+    if cfg.ssh_host.trim().is_empty() {
+        return Err(("SSH_HOST_MISSING".to_string(), "ssh_host is required".to_string()));
+    }
+    if cfg.username.trim().is_empty() {
+        return Err(("USERNAME_MISSING".to_string(), "username is required".to_string()));
+    }
+    if cfg.strict_host_key_checking && cfg.host_key_fingerprint.trim().is_empty() {
+        return Err((
+            "HOSTKEY_MISSING".to_string(),
+            "host_key_fingerprint is required".to_string(),
+        ));
+    }
+    match &cfg.auth {
+        TcpTunnelAuth::Password { password } if password.is_empty() => {
+            return Err(("AUTH_MISSING".to_string(), "password is required".to_string()));
+        }
+        TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
+            return Err((
+                "AUTH_MISSING".to_string(),
+                "private key path is required".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    let status = Arc::new(RwLock::new(TunnelRuntimeStatus::default()));
+    let handler = TunnelClientHandler::new(cfg.clone(), status.clone());
+
+    let client_cfg = client::Config {
+        nodelay: true,
+        inactivity_timeout: None,
+        preferred: russh::Preferred {
+            kex: Cow::Owned(vec![
+                russh::kex::CURVE25519_PRE_RFC_8731,
+                russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+            ]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let client_cfg = Arc::new(client_cfg);
+    let addr = (cfg.ssh_host.as_str(), cfg.ssh_port);
+    let connect_timeout = Duration::from_millis(cfg.connect_timeout_ms);
+    let mut session = tokio::time::timeout(connect_timeout, client::connect(client_cfg, addr, handler))
+        .await
+        .map_err(|_| ("SSH_CONNECT_TIMEOUT".to_string(), "connect timeout".to_string()))?
+        .map_err(|e| ("SSH_CONNECT_FAILED".to_string(), format!("{e:?}")))?;
+
+    let auth_ok = match &cfg.auth {
+        TcpTunnelAuth::Password { password } => tokio::time::timeout(
+            connect_timeout,
+            session.authenticate_password(cfg.username.clone(), password.clone()),
+        )
+        .await
+        .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+        .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?,
+        TcpTunnelAuth::PrivateKeyPath { path, passphrase } => {
+            let key = load_secret_key(path, passphrase.as_deref())
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
+            let rsa_hash = tokio::time::timeout(connect_timeout, session.best_supported_rsa_hash())
+                .await
+                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?
+                .flatten();
+            tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_publickey(
+                    cfg.username.clone(),
+                    PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
+                ),
+            )
+            .await
+            .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+            .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?
+        }
+    };
+
+    if !auth_ok.success() {
+        return Err(("AUTH_FAILED".to_string(), "authentication failed".to_string()));
+    }
+
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "test done", "en")
+        .await;
     Ok(())
 }

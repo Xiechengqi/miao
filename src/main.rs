@@ -404,6 +404,23 @@ struct TcpTunnelSetCreateRequest {
     debounce_ms: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct TcpTunnelSetDetailResponse {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    remote_bind_addr: String,
+    ssh_host: String,
+    ssh_port: u16,
+    username: String,
+    auth: TcpTunnelAuthPublic,
+    strict_host_key_checking: bool,
+    host_key_fingerprint: String,
+    exclude_ports: Vec<u16>,
+    scan_interval_ms: u64,
+    debounce_ms: u64,
+}
+
 fn generate_tunnel_set_id() -> String {
     format!("s-{}", uuid::Uuid::new_v4())
 }
@@ -2409,6 +2426,32 @@ async fn apply_full_tunnel_sets_from_config(state: &Arc<AppState>) {
     state.full_tunnel.sync_from_config(state.clone(), sets).await;
 }
 
+fn build_tcp_tunnel_item(
+    t: TcpTunnelConfig,
+    status: tcp_tunnel::TunnelRuntimeStatus,
+) -> TcpTunnelItem {
+    TcpTunnelItem {
+        id: t.id,
+        name: t.name,
+        enabled: t.enabled,
+        local_addr: t.local_addr,
+        local_port: t.local_port,
+        remote_bind_addr: t.remote_bind_addr,
+        remote_port: t.remote_port,
+        ssh_host: t.ssh_host,
+        ssh_port: t.ssh_port,
+        username: t.username,
+        auth: redact_tunnel_auth(&t.auth),
+        strict_host_key_checking: t.strict_host_key_checking,
+        host_key_fingerprint: t.host_key_fingerprint,
+        allow_public_bind: t.allow_public_bind,
+        connect_timeout_ms: t.connect_timeout_ms,
+        keepalive_interval_ms: t.keepalive_interval_ms,
+        reconnect_backoff_ms: t.reconnect_backoff_ms,
+        status,
+    }
+}
+
 async fn get_tcp_tunnels(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<TcpTunnelListResponse>> {
@@ -2417,31 +2460,15 @@ async fn get_tcp_tunnels(
 
     let mut items = Vec::with_capacity(tunnels.len());
     for t in tunnels {
+        if matches!(&t.managed_by, Some(TcpTunnelManagedBy::FullTunnel { .. })) {
+            continue;
+        }
         let status = state
             .tcp_tunnel
             .get_status(&t.id)
             .await
             .unwrap_or_default();
-        items.push(TcpTunnelItem {
-            id: t.id,
-            name: t.name,
-            enabled: t.enabled,
-            local_addr: t.local_addr,
-            local_port: t.local_port,
-            remote_bind_addr: t.remote_bind_addr,
-            remote_port: t.remote_port,
-            ssh_host: t.ssh_host,
-            ssh_port: t.ssh_port,
-            username: t.username,
-            auth: redact_tunnel_auth(&t.auth),
-            strict_host_key_checking: t.strict_host_key_checking,
-            host_key_fingerprint: t.host_key_fingerprint,
-            allow_public_bind: t.allow_public_bind,
-            connect_timeout_ms: t.connect_timeout_ms,
-            keepalive_interval_ms: t.keepalive_interval_ms,
-            reconnect_backoff_ms: t.reconnect_backoff_ms,
-            status,
-        });
+        items.push(build_tcp_tunnel_item(t, status));
     }
 
     Json(ApiResponse::success(
@@ -2755,6 +2782,9 @@ async fn get_tcp_tunnel_overview(
     let mut items: Vec<TcpTunnelOverviewItem> = Vec::with_capacity(tunnels.len() + sets.len());
 
     for t in tunnels {
+        if matches!(&t.managed_by, Some(TcpTunnelManagedBy::FullTunnel { .. })) {
+            continue;
+        }
         let status = state
             .tcp_tunnel
             .get_status(&t.id)
@@ -2827,6 +2857,81 @@ async fn get_tcp_tunnel_overview(
         "TCP tunnel overview",
         TcpTunnelOverviewResponse { supported, items },
     ))
+}
+
+async fn get_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<TcpTunnelSetDetailResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let set = {
+        let config = state.config.lock().await;
+        config
+            .tcp_tunnel_sets
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+    };
+    let Some(set) = set else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+    };
+    Ok(Json(ApiResponse::success(
+        "Set detail",
+        TcpTunnelSetDetailResponse {
+            id: set.id,
+            name: set.name,
+            enabled: set.enabled,
+            remote_bind_addr: set.remote_bind_addr,
+            ssh_host: set.ssh_host,
+            ssh_port: set.ssh_port,
+            username: set.username,
+            auth: redact_tunnel_auth(&set.auth),
+            strict_host_key_checking: set.strict_host_key_checking,
+            host_key_fingerprint: set.host_key_fingerprint,
+            exclude_ports: set.exclude_ports,
+            scan_interval_ms: set.scan_interval_ms,
+            debounce_ms: set.debounce_ms,
+        },
+    )))
+}
+
+async fn get_tcp_tunnel_set_tunnels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<TcpTunnelListResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let (supported, tunnels) = {
+        let config = state.config.lock().await;
+        let exists = config.tcp_tunnel_sets.iter().any(|s| s.id == id);
+        if !exists {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        }
+        let tunnels: Vec<TcpTunnelConfig> = config
+            .tcp_tunnels
+            .iter()
+            .filter(|t| {
+                matches!(
+                    &t.managed_by,
+                    Some(TcpTunnelManagedBy::FullTunnel { set_id, .. }) if set_id == &id
+                )
+            })
+            .cloned()
+            .collect();
+        (state.tcp_tunnel.supported(), tunnels)
+    };
+
+    let mut items = Vec::with_capacity(tunnels.len());
+    for t in tunnels {
+        let status = state
+            .tcp_tunnel
+            .get_status(&t.id)
+            .await
+            .unwrap_or_default();
+        items.push(build_tcp_tunnel_item(t, status));
+    }
+
+    Ok(Json(ApiResponse::success(
+        "Set tunnels",
+        TcpTunnelListResponse { supported, items },
+    )))
 }
 
 async fn start_tcp_tunnel_set(
@@ -2956,6 +3061,88 @@ async fn create_tcp_tunnel_set(
 
     apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set created")))
+}
+
+async fn copy_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(existing) = config.tcp_tunnel_sets.iter().find(|s| s.id == id).cloned() else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+        };
+        let mut cloned = existing.clone();
+        cloned.id = generate_tunnel_set_id();
+        cloned.enabled = false;
+        cloned.name = existing.name.as_ref().and_then(|n| {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("{trimmed}-copy"))
+            }
+        });
+        config.tcp_tunnel_sets.push(cloned.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    };
+
+    apply_full_tunnel_sets_from_config(&state).await;
+    Ok(Json(ApiResponse::success_no_data("Set copied")))
+}
+
+async fn test_tcp_tunnel_set(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<TcpTunnelTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let set = {
+        let config = state.config.lock().await;
+        config
+            .tcp_tunnel_sets
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+    };
+    let Some(set) = set else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
+    };
+
+    let cfg = TcpTunnelConfig {
+        id: "test".to_string(),
+        name: None,
+        enabled: true,
+        local_addr: "127.0.0.1".to_string(),
+        local_port: 0,
+        remote_bind_addr: set.remote_bind_addr.clone(),
+        remote_port: 0,
+        ssh_host: set.ssh_host.clone(),
+        ssh_port: set.ssh_port,
+        username: set.username.clone(),
+        auth: set.auth.clone(),
+        strict_host_key_checking: set.strict_host_key_checking,
+        host_key_fingerprint: set.host_key_fingerprint.clone(),
+        allow_public_bind: set.remote_bind_addr == "0.0.0.0",
+        connect_timeout_ms: default_connect_timeout_ms(),
+        keepalive_interval_ms: default_keepalive_interval_ms(),
+        reconnect_backoff_ms: default_tcp_tunnel_backoff(),
+        managed_by: None,
+    };
+
+    match state.tcp_tunnel.test_ssh_only(&cfg).await {
+        Ok(()) => Ok(Json(ApiResponse::success(
+            "Set test ok",
+            TcpTunnelTestResponse { ok: true },
+        ))),
+        Err((code, message)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("{code}: {message}"))),
+        )),
+    }
 }
 
 async fn delete_tcp_tunnel_set(
@@ -5030,10 +5217,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnels/bulk/stop", post(bulk_stop_tcp_tunnels))
         .route("/api/tcp-tunnel/overview", get(get_tcp_tunnel_overview))
         .route("/api/tcp-tunnel-sets", post(create_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}", get(get_tcp_tunnel_set).delete(delete_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/start", post(start_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/stop", post(stop_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/restart", post(restart_tcp_tunnel_set))
-        .route("/api/tcp-tunnel-sets/{id}", delete(delete_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}/tunnels", get(get_tcp_tunnel_set_tunnels))
+        .route("/api/tcp-tunnel-sets/{id}/copy", post(copy_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets/{id}/test", post(test_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/bulk/start", post(bulk_start_tcp_tunnel_sets))
         .route("/api/tcp-tunnel-sets/bulk/stop", post(bulk_stop_tcp_tunnel_sets))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
