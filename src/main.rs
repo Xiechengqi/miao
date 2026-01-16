@@ -3138,7 +3138,7 @@ async fn create_tcp_tunnel(
     Json(req): Json<TcpTunnelUpsertRequest>,
 ) -> Result<Json<ApiResponse<TcpTunnelSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let id = req.id.clone().unwrap_or_else(generate_tunnel_id);
-    let mut cfg = normalize_tcp_tunnel(req, id.clone())
+    let cfg = normalize_tcp_tunnel(req, id.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
 
     // Require secrets on create.
