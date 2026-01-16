@@ -3627,15 +3627,6 @@
                             }
                             showFullSetModal.value = false;
                             await fetchTcpTunnels();
-                            if (res?.data?.restart_required) {
-                                showConfirm(
-                                    '需要重启 sing-box',
-                                    '检测到穿透 SSH 主机 IP 变更，需要重启 sing-box 以应用直连规则，是否现在重启？',
-                                    async () => {
-                                        await restartService();
-                                    }
-                                );
-                            }
                         } catch (e) {
                             showToast(`保存失败: ${e.message || e}`, 'error');
                         } finally {
@@ -3807,15 +3798,6 @@
                             }
                             showTunnelModal.value = false;
                             await fetchTcpTunnels();
-                            if (res?.data?.restart_required) {
-                                showConfirm(
-                                    '需要重启 sing-box',
-                                    '检测到穿透 SSH 主机 IP 变更，需要重启 sing-box 以应用直连规则，是否现在重启？',
-                                    async () => {
-                                        await restartService();
-                                    }
-                                );
-                            }
                         } catch (e) {
                             showToast(`保存失败: ${e.message || e}`, 'error');
                         } finally {

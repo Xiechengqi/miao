@@ -15,9 +15,8 @@ use lazy_static::lazy_static;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -168,8 +167,6 @@ struct TcpTunnelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed_by: Option<TcpTunnelManagedBy>,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    ssh_host_ips: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -214,8 +211,6 @@ struct TcpTunnelSetConfig {
     #[serde(default = "default_tunnel_set_start_batch_interval_ms")]
     start_batch_interval_ms: u64,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    ssh_host_ips: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -409,7 +404,6 @@ struct TcpTunnelItem {
 #[derive(Serialize)]
 struct TcpTunnelSaveResponse {
     item: TcpTunnelItem,
-    restart_required: bool,
 }
 
 #[derive(Serialize)]
@@ -561,7 +555,6 @@ struct TcpTunnelSetDetailResponse {
 
 #[derive(Serialize)]
 struct TcpTunnelSetSaveResponse {
-    restart_required: bool,
 }
 
 fn generate_tunnel_set_id() -> String {
@@ -3060,58 +3053,7 @@ fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTu
         keepalive_interval_ms,
         reconnect_backoff_ms,
         managed_by: None,
-        ssh_host_ips: Vec::new(),
     })
-}
-
-fn normalize_ip_list(ips: impl IntoIterator<Item = IpAddr>) -> Vec<String> {
-    let mut set = BTreeSet::new();
-    for ip in ips {
-        set.insert(ip);
-    }
-    set.into_iter().map(|ip| ip.to_string()).collect()
-}
-
-async fn resolve_ssh_host_ips(host: &str, port: u16) -> Vec<String> {
-    let host = host.trim();
-    if host.is_empty() {
-        return Vec::new();
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return vec![ip.to_string()];
-    }
-    match tokio::net::lookup_host((host, port)).await {
-        Ok(addrs) => normalize_ip_list(addrs.map(|addr| addr.ip())),
-        Err(e) => {
-            eprintln!("Failed to resolve ssh_host {}: {}", host, e);
-            Vec::new()
-        }
-    }
-}
-
-fn collect_tunnel_ssh_ips(config: &Config) -> Vec<String> {
-    let mut set = BTreeSet::new();
-    for t in &config.tcp_tunnels {
-        for ip in &t.ssh_host_ips {
-            if let Ok(addr) = ip.parse::<IpAddr>() {
-                set.insert(addr);
-            }
-        }
-    }
-    for s in &config.tcp_tunnel_sets {
-        for ip in &s.ssh_host_ips {
-            if let Ok(addr) = ip.parse::<IpAddr>() {
-                set.insert(addr);
-            }
-        }
-    }
-    set.into_iter().map(|ip| ip.to_string()).collect()
-}
-
-fn ip_to_cidr(ip: &str) -> Option<String> {
-    let addr = ip.parse::<IpAddr>().ok()?;
-    let suffix = if matches!(addr, IpAddr::V4(_)) { 32 } else { 128 };
-    Some(format!("{}/{}", addr, suffix))
 }
 
 async fn sing_box_running() -> bool {
@@ -3198,9 +3140,6 @@ async fn create_tcp_tunnel(
     let id = req.id.clone().unwrap_or_else(generate_tunnel_id);
     let mut cfg = normalize_tcp_tunnel(req, id.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
-    let resolved_ips = resolve_ssh_host_ips(&cfg.ssh_host, cfg.ssh_port).await;
-    cfg.ssh_host_ips = resolved_ips.clone();
-    let restart_required = !resolved_ips.is_empty() && sing_box_running().await;
 
     // Require secrets on create.
     match &cfg.auth {
@@ -3262,7 +3201,6 @@ async fn create_tcp_tunnel(
                 reconnect_backoff_ms: cfg.reconnect_backoff_ms,
                 status,
             },
-            restart_required,
         },
     )))
 }
@@ -3331,13 +3269,6 @@ async fn update_tcp_tunnel(
         _ => {}
     }
 
-    let mut resolved_ips = resolve_ssh_host_ips(&cfg.ssh_host, cfg.ssh_port).await;
-    if resolved_ips.is_empty() {
-        resolved_ips = existing.ssh_host_ips.clone();
-    }
-    let restart_required = resolved_ips != existing.ssh_host_ips && sing_box_running().await;
-    cfg.ssh_host_ips = resolved_ips;
-
     {
         let mut config = state.config.lock().await;
         let Some(pos) = config.tcp_tunnels.iter().position(|t| t.id == id) else {
@@ -3377,7 +3308,6 @@ async fn update_tcp_tunnel(
                 reconnect_backoff_ms: cfg.reconnect_backoff_ms,
                 status,
             },
-            restart_required,
         },
     )))
 }
@@ -3807,11 +3737,6 @@ async fn update_tcp_tunnel_set(
     }
 
     let ssh_port = req.ssh_port.unwrap_or(existing.ssh_port);
-    let mut resolved_ips = resolve_ssh_host_ips(&ssh_host, ssh_port).await;
-    if resolved_ips.is_empty() {
-        resolved_ips = existing.ssh_host_ips.clone();
-    }
-    let restart_required = resolved_ips != existing.ssh_host_ips && sing_box_running().await;
 
     let strict_host_key_checking = req
         .strict_host_key_checking
@@ -3863,7 +3788,6 @@ async fn update_tcp_tunnel_set(
         start_batch_interval_ms: req
             .start_batch_interval_ms
             .unwrap_or(existing.start_batch_interval_ms),
-        ssh_host_ips: resolved_ips.clone(),
     };
 
     {
@@ -3886,7 +3810,6 @@ async fn update_tcp_tunnel_set(
                     t.host_key_fingerprint = updated.host_key_fingerprint.clone();
                     t.allow_public_bind = updated.remote_bind_addr == "0.0.0.0";
                     t.connect_timeout_ms = updated.connect_timeout_ms;
-                    t.ssh_host_ips = resolved_ips.clone();
                 }
             }
         }
@@ -3903,7 +3826,7 @@ async fn update_tcp_tunnel_set(
     apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success(
         "Set updated",
-        TcpTunnelSetSaveResponse { restart_required },
+        TcpTunnelSetSaveResponse {},
     )))
 }
 
@@ -3952,9 +3875,6 @@ async fn create_tcp_tunnel_set(
         _ => {}
     }
 
-    let resolved_ips = resolve_ssh_host_ips(&req.ssh_host, ssh_port).await;
-    let restart_required = !resolved_ips.is_empty() && sing_box_running().await;
-
     {
         let mut config = state.config.lock().await;
         config.tcp_tunnel_sets.push(TcpTunnelSetConfig {
@@ -3974,7 +3894,6 @@ async fn create_tcp_tunnel_set(
             connect_timeout_ms,
             start_batch_size,
             start_batch_interval_ms,
-            ssh_host_ips: resolved_ips,
         });
         if let Err(e) = save_config(&config).await {
             return Err((
@@ -3987,7 +3906,7 @@ async fn create_tcp_tunnel_set(
     apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success(
         "Set created",
-        TcpTunnelSetSaveResponse { restart_required },
+        TcpTunnelSetSaveResponse {},
     )))
 }
 
@@ -4059,7 +3978,6 @@ async fn test_tcp_tunnel_set(
         keepalive_interval_ms: default_keepalive_interval_ms(),
         reconnect_backoff_ms: default_tcp_tunnel_backoff(),
         managed_by: None,
-        ssh_host_ips: set.ssh_host_ips.clone(),
     };
 
     match state.tcp_tunnel.test_ssh_only(&cfg).await {
@@ -5380,27 +5298,6 @@ async fn gen_config(
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
         arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
     }
-    if let Some(rules) = sing_box_config
-        .get_mut("route")
-        .and_then(|route| route.get_mut("rules"))
-        .and_then(|value| value.as_array_mut())
-    {
-        let ip_cidrs: Vec<String> = collect_tunnel_ssh_ips(config)
-            .into_iter()
-            .filter_map(|ip| ip_to_cidr(&ip))
-            .collect();
-        if !ip_cidrs.is_empty() {
-            rules.insert(
-                2,
-                serde_json::json!({
-                    "ip_cidr": ip_cidrs,
-                    "action": "route",
-                    "outbound": "direct"
-                }),
-            );
-        }
-    }
-
     let config_output_loc = format!("{}/config.json", sing_box_home);
     tokio::fs::write(
         &config_output_loc,
