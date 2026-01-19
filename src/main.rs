@@ -3169,6 +3169,12 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     }
     let _ = fs::remove_file(temp_path);
 
+    // Mark embedded binaries for forced re-extraction on next start.
+    if let Ok(current_dir) = std::env::current_dir() {
+        let _ = fs::write(current_dir.join(".force_extract_sing_box"), b"1");
+        let _ = fs::write(current_dir.join(".force_extract_gotty"), b"1");
+    }
+
     println!("Upgrade successful! Restarting...");
 
     // 10. Restart:
@@ -6113,12 +6119,14 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
 fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let current_dir = std::env::current_dir()?;
     let sing_box_path = current_dir.join("sing-box");
+    let force_marker = current_dir.join(".force_extract_sing_box");
 
-    if !sing_box_path.exists() {
+    if force_marker.exists() || !sing_box_path.exists() {
         println!("Extracting embedded sing-box binary to {:?}", sing_box_path);
         fs::write(&sing_box_path, SING_BOX_BINARY)?;
         fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755))?;
         println!("sing-box binary extracted successfully");
+        let _ = fs::remove_file(&force_marker);
     }
 
     let dashboard_dir = current_dir.join("dashboard");
@@ -6133,12 +6141,14 @@ fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync
 fn extract_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let current_dir = std::env::current_dir()?;
     let gotty_path = current_dir.join("gotty");
+    let force_marker = current_dir.join(".force_extract_gotty");
 
-    if !gotty_path.exists() {
+    if force_marker.exists() || !gotty_path.exists() {
         println!("Extracting embedded gotty binary to {:?}", gotty_path);
         fs::write(&gotty_path, GOTTY_BINARY)?;
         fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755))?;
         println!("gotty binary extracted successfully");
+        let _ = fs::remove_file(&force_marker);
     }
 
     Ok(gotty_path)
