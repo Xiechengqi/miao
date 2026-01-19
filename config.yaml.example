@@ -26,6 +26,34 @@
 #     #   - "-w"
 #     #   - "--enable-idle-alert"
 
+# VNC Sessions (KasmVNC) (optional)
+# vnc_sessions:
+#   - id: "vnc-1"
+#     name: "Chromium VNC"
+#     enabled: false
+#     addr: "0.0.0.0"
+#     port: 7900
+#     display: ":10"
+#     resolution: "1920x1080"
+#     depth: 24
+#     frame_rate: 24
+#     view_only: false
+#     password: "kasmvnc"
+
+# Desktop Apps (optional)
+# apps:
+#   - id: "app-1"
+#     name: "Chromium"
+#     enabled: false
+#     vnc_session_id: "vnc-1"   # 绑定到 VNC，会自动使用该 DISPLAY
+#     # display: ":10"          # 不绑定 VNC 时手动指定 DISPLAY
+#     command: "chromium"
+#     args:
+#       - "--no-sandbox"
+#       - "--no-first-run"
+#     env:
+#       CHROMIUM_USER_DATA_DIR: "/app/chromium"
+
 # Remembered node selections (optional)
 # Key is selector group name, value is selected node name.
 # selections:

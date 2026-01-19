@@ -16,6 +16,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path as StdPath, PathBuf};
@@ -25,6 +26,7 @@ use std::time::Instant;
 use tokio_tungstenite::connect_async;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+use tokio::io::AsyncWriteExt;
 use base64::Engine;
 
 mod tcp_tunnel;
@@ -101,6 +103,30 @@ fn default_terminal_command() -> String {
 
 fn default_terminal_extra_args() -> Vec<String> {
     vec!["-w".to_string(), "--enable-idle-alert".to_string()]
+}
+
+fn default_vnc_addr() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_vnc_port() -> u16 {
+    DEFAULT_VNC_PORT
+}
+
+fn default_vnc_display() -> String {
+    ":10".to_string()
+}
+
+fn default_vnc_resolution() -> String {
+    "1920x1080".to_string()
+}
+
+fn default_vnc_depth() -> u16 {
+    24
+}
+
+fn default_vnc_frame_rate() -> u16 {
+    24
 }
 
 fn default_tcp_tunnel_backoff() -> TcpTunnelBackoff {
@@ -283,6 +309,79 @@ impl Default for TerminalNodeConfig {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct VncSessionConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+    addr: String,
+    port: u16,
+    display: String,
+    resolution: String,
+    depth: u16,
+    frame_rate: u16,
+    #[serde(default)]
+    view_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+}
+
+impl Default for VncSessionConfig {
+    fn default() -> Self {
+        VncSessionConfig {
+            id: String::new(),
+            name: None,
+            enabled: false,
+            addr: default_vnc_addr(),
+            port: default_vnc_port(),
+            display: default_vnc_display(),
+            resolution: default_vnc_resolution(),
+            depth: default_vnc_depth(),
+            frame_rate: default_vnc_frame_rate(),
+            view_only: false,
+            password: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct AppConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vnc_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
+    #[serde(default)]
+    command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    args: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    env: HashMap<String, String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        AppConfig {
+            id: String::new(),
+            name: None,
+            enabled: false,
+            vnc_session_id: None,
+            display: None,
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +394,10 @@ struct Config {
     terminal: Option<TerminalConfigLegacy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     terminals: Vec<TerminalNodeConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vnc_sessions: Vec<VncSessionConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apps: Vec<AppConfig>,
     #[serde(default)]
     selections: HashMap<String, String>, // selector group -> node name
     #[serde(default)]
@@ -338,7 +441,12 @@ struct Config {
 
 const DEFAULT_PORT: u16 = 6161;
 const DEFAULT_TERMINAL_PORT: u16 = 7681;
+const DEFAULT_VNC_PORT: u16 = 7900;
 const DEFAULT_DNS_ACTIVE: &str = "doh-cf";
+const KASMVNC_USER: &str = "user";
+const KASMVNC_HTTPD_DIR: &str = "/usr/share/kasmvnc/www";
+const KASMVNC_DEFAULTS_JS: &str = "/usr/share/kasmvnc/www/kasmvnc-defaults.js";
+const KASMVNC_BASE_HOME: &str = "/app/kasmvnc";
 
 // JWT 密钥（生产环境应使用环境变量）
 const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
@@ -746,6 +854,24 @@ struct TerminalRuntimeStatus {
     uptime_secs: Option<u64>,
 }
 
+#[derive(Serialize, Clone)]
+struct VncRuntimeStatus {
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+}
+
+#[derive(Serialize, Clone)]
+struct AppRuntimeStatus {
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct TerminalItem {
     id: String,
@@ -762,8 +888,47 @@ struct TerminalItem {
 }
 
 #[derive(Serialize)]
+struct VncSessionItem {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    addr: String,
+    port: u16,
+    display: String,
+    resolution: String,
+    depth: u16,
+    frame_rate: u16,
+    view_only: bool,
+    password: Option<String>,
+    status: VncRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct AppItem {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    vnc_session_id: Option<String>,
+    display: Option<String>,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    status: AppRuntimeStatus,
+}
+
+#[derive(Serialize)]
 struct TerminalListResponse {
     items: Vec<TerminalItem>,
+}
+
+#[derive(Serialize)]
+struct VncSessionListResponse {
+    items: Vec<VncSessionItem>,
+}
+
+#[derive(Serialize)]
+struct AppListResponse {
+    items: Vec<AppItem>,
 }
 
 #[derive(Deserialize)]
@@ -790,6 +955,67 @@ struct TerminalUpsertRequest {
     restart: bool,
     #[serde(default)]
     clear_auth: bool,
+}
+
+#[derive(Deserialize)]
+struct VncSessionUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    addr: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    display: Option<String>,
+    #[serde(default)]
+    resolution: Option<String>,
+    #[serde(default)]
+    depth: Option<u16>,
+    #[serde(default)]
+    frame_rate: Option<u16>,
+    #[serde(default)]
+    view_only: Option<bool>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    restart: bool,
+}
+
+#[derive(Deserialize)]
+struct AppUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    vnc_session_id: Option<String>,
+    #[serde(default)]
+    display: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    restart: bool,
+}
+
+#[derive(Serialize)]
+struct AppTemplateItem {
+    id: String,
+    name: String,
+    description: String,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct AppTemplateListResponse {
+    items: Vec<AppTemplateItem>,
 }
 
 #[derive(Serialize, Clone)]
@@ -917,9 +1143,22 @@ struct GottyProcess {
     started_at: Instant,
 }
 
+struct VncProcess {
+    child: tokio::process::Child,
+    started_at: Instant,
+    display: String,
+}
+
+struct AppProcess {
+    child: tokio::process::Child,
+    started_at: Instant,
+}
+
 lazy_static! {
     static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
     static ref GOTTY_PROCESSES: Mutex<HashMap<String, GottyProcess>> = Mutex::new(HashMap::new());
+    static ref VNC_PROCESSES: Mutex<HashMap<String, VncProcess>> = Mutex::new(HashMap::new());
+    static ref APP_PROCESSES: Mutex<HashMap<String, AppProcess>> = Mutex::new(HashMap::new());
 }
 
 // ============================================================================
@@ -1044,6 +1283,76 @@ async fn get_terminal_runtime_status(id: &str) -> TerminalRuntimeStatus {
     }
 }
 
+async fn get_vnc_runtime_status(id: &str) -> VncRuntimeStatus {
+    let mut lock = VNC_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                lock.remove(id);
+                VncRuntimeStatus {
+                    running: false,
+                    pid: None,
+                    uptime_secs: None,
+                }
+            }
+            Ok(None) => VncRuntimeStatus {
+                running: true,
+                pid: proc.child.id(),
+                uptime_secs: Some(proc.started_at.elapsed().as_secs()),
+            },
+            Err(_) => {
+                lock.remove(id);
+                VncRuntimeStatus {
+                    running: false,
+                    pid: None,
+                    uptime_secs: None,
+                }
+            }
+        }
+    } else {
+        VncRuntimeStatus {
+            running: false,
+            pid: None,
+            uptime_secs: None,
+        }
+    }
+}
+
+async fn get_app_runtime_status(id: &str) -> AppRuntimeStatus {
+    let mut lock = APP_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                lock.remove(id);
+                AppRuntimeStatus {
+                    running: false,
+                    pid: None,
+                    uptime_secs: None,
+                }
+            }
+            Ok(None) => AppRuntimeStatus {
+                running: true,
+                pid: proc.child.id(),
+                uptime_secs: Some(proc.started_at.elapsed().as_secs()),
+            },
+            Err(_) => {
+                lock.remove(id);
+                AppRuntimeStatus {
+                    running: false,
+                    pid: None,
+                    uptime_secs: None,
+                }
+            }
+        }
+    } else {
+        AppRuntimeStatus {
+            running: false,
+            pid: None,
+            uptime_secs: None,
+        }
+    }
+}
+
 fn build_terminal_item(cfg: TerminalNodeConfig, status: TerminalRuntimeStatus) -> TerminalItem {
     TerminalItem {
         id: cfg.id,
@@ -1060,6 +1369,37 @@ fn build_terminal_item(cfg: TerminalNodeConfig, status: TerminalRuntimeStatus) -
     }
 }
 
+fn build_vnc_session_item(cfg: VncSessionConfig, status: VncRuntimeStatus) -> VncSessionItem {
+    VncSessionItem {
+        id: cfg.id,
+        name: cfg.name,
+        enabled: cfg.enabled,
+        addr: cfg.addr,
+        port: cfg.port,
+        display: cfg.display,
+        resolution: cfg.resolution,
+        depth: cfg.depth,
+        frame_rate: cfg.frame_rate,
+        view_only: cfg.view_only,
+        password: cfg.password,
+        status,
+    }
+}
+
+fn build_app_item(cfg: AppConfig, status: AppRuntimeStatus) -> AppItem {
+    AppItem {
+        id: cfg.id,
+        name: cfg.name,
+        enabled: cfg.enabled,
+        vnc_session_id: cfg.vnc_session_id,
+        display: cfg.display,
+        command: cfg.command,
+        args: cfg.args,
+        env: cfg.env,
+        status,
+    }
+}
+
 async fn get_terminals(State(state): State<Arc<AppState>>) -> Json<ApiResponse<TerminalListResponse>> {
     let terminals = { state.config.lock().await.terminals.clone() };
     let mut items = Vec::with_capacity(terminals.len());
@@ -1068,6 +1408,558 @@ async fn get_terminals(State(state): State<Arc<AppState>>) -> Json<ApiResponse<T
         items.push(build_terminal_item(t, status));
     }
     Json(ApiResponse::success("Terminals", TerminalListResponse { items }))
+}
+
+async fn get_vnc_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<VncSessionListResponse>> {
+    let sessions = { state.config.lock().await.vnc_sessions.clone() };
+    let mut items = Vec::with_capacity(sessions.len());
+    for s in sessions {
+        let status = get_vnc_runtime_status(&s.id).await;
+        items.push(build_vnc_session_item(s, status));
+    }
+    Json(ApiResponse::success(
+        "VNC 会话列表",
+        VncSessionListResponse { items },
+    ))
+}
+
+async fn get_apps(State(state): State<Arc<AppState>>) -> Json<ApiResponse<AppListResponse>> {
+    let apps = { state.config.lock().await.apps.clone() };
+    let mut items = Vec::with_capacity(apps.len());
+    for a in apps {
+        let status = get_app_runtime_status(&a.id).await;
+        items.push(build_app_item(a, status));
+    }
+    Json(ApiResponse::success("Apps", AppListResponse { items }))
+}
+
+async fn get_app_templates_handler() -> Json<ApiResponse<AppTemplateListResponse>> {
+    Json(ApiResponse::success(
+        "App templates",
+        AppTemplateListResponse {
+            items: app_templates(),
+        },
+    ))
+}
+
+async fn create_vnc_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<VncSessionUpsertRequest>,
+) -> Result<Json<ApiResponse<VncSessionItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let id = generate_vnc_session_id();
+    let mut cfg = normalize_vnc_session_request(req, id.clone(), None)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(err) = vnc_bind_conflict(&cfg.id, &cfg, &config_guard.vnc_sessions) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        config_guard.vnc_sessions.push(cfg.clone());
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    if cfg.enabled {
+        if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
+            let mut config_guard = state.config.lock().await;
+            if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == cfg.id) {
+                v.enabled = false;
+                cfg.enabled = false;
+            }
+            let _ = save_config(&config_guard).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to start: {}", e))),
+            ));
+        }
+    }
+
+    let status = get_vnc_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success(
+        "VNC 会话已创建",
+        build_vnc_session_item(cfg, status),
+    )))
+}
+
+async fn update_vnc_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<VncSessionUpsertRequest>,
+) -> Result<Json<ApiResponse<VncSessionItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let existing = {
+        let config_guard = state.config.lock().await;
+        config_guard
+            .vnc_sessions
+            .iter()
+            .find(|v| v.id == id)
+            .cloned()
+    };
+    let Some(existing) = existing else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("VNC session not found")),
+        ));
+    };
+
+    let restart = req.restart;
+    let mut cfg = normalize_vnc_session_request(req, id.clone(), Some(&existing))
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(err) = vnc_bind_conflict(&cfg.id, &cfg, &config_guard.vnc_sessions) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        let Some(pos) = config_guard.vnc_sessions.iter().position(|v| v.id == id) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("VNC session not found")),
+            ));
+        };
+        config_guard.vnc_sessions[pos] = cfg.clone();
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    let restart = restart && cfg.enabled;
+    if restart {
+        cfg.enabled = true;
+        {
+            let mut config_guard = state.config.lock().await;
+            if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) {
+                v.enabled = true;
+            }
+            let _ = save_config(&config_guard).await;
+        }
+        let _ = stop_vnc_internal(&cfg.id, &existing.display).await;
+        if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+            ));
+        }
+    } else {
+        let status = get_vnc_runtime_status(&cfg.id).await;
+        if cfg.enabled && !status.running {
+            if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(format!("Failed to start: {}", e))),
+                ));
+            }
+        }
+        if !cfg.enabled && status.running {
+            let _ = stop_vnc_internal(&cfg.id, &existing.display).await;
+        }
+    }
+
+    let status = get_vnc_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success(
+        "VNC 会话已更新",
+        build_vnc_session_item(cfg, status),
+    )))
+}
+
+async fn delete_vnc_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let display = {
+        let mut config_guard = state.config.lock().await;
+        if config_guard
+            .apps
+            .iter()
+            .any(|app| app.vnc_session_id.as_deref() == Some(id.as_str()))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "VNC 会话已绑定应用，无法删除",
+                )),
+            ));
+        }
+        let mut display = None;
+        let before = config_guard.vnc_sessions.len();
+        if let Some(pos) = config_guard.vnc_sessions.iter().position(|v| v.id == id) {
+            display = Some(config_guard.vnc_sessions[pos].display.clone());
+            config_guard.vnc_sessions.remove(pos);
+        }
+        if config_guard.vnc_sessions.len() == before {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("VNC session not found")),
+            ));
+        }
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        display.unwrap_or_else(default_vnc_display)
+    };
+    let _ = stop_vnc_internal(&id, &display).await;
+    Ok(Json(ApiResponse::success_no_data("VNC 会话已删除")))
+}
+
+async fn start_vnc_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(v) = config_guard.vnc_sessions.iter().find(|v| v.id == id) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("VNC session not found")),
+            ));
+        };
+        if let Some(err) = vnc_bind_conflict(&id, v, &config_guard.vnc_sessions) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        v.clone()
+    };
+    if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to start: {}", e))),
+        ));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) {
+            v.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+                ));
+            }
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("VNC 会话已启动")))
+}
+
+async fn stop_vnc_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let display = {
+        let mut config_guard = state.config.lock().await;
+        let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("VNC session not found")),
+            ));
+        };
+        v.enabled = false;
+        let display = v.display.clone();
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        display
+    };
+    let _ = stop_vnc_internal(&id, &display).await;
+    Ok(Json(ApiResponse::success_no_data("VNC 会话已停止")))
+}
+
+async fn restart_vnc_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let (cfg, display) = {
+        let config_guard = state.config.lock().await;
+        let Some(v) = config_guard.vnc_sessions.iter().find(|v| v.id == id) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("VNC session not found")),
+            ));
+        };
+        if let Some(err) = vnc_bind_conflict(&id, v, &config_guard.vnc_sessions) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+        }
+        (v.clone(), v.display.clone())
+    };
+    let _ = stop_vnc_internal(&id, &display).await;
+    if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+        ));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) {
+            v.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+                ));
+            }
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("VNC 会话已重启")))
+}
+
+async fn create_app(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AppUpsertRequest>,
+) -> Result<Json<ApiResponse<AppItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let id = generate_app_id();
+    let mut cfg = normalize_app_request(req, id.clone(), None)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(vnc_id) = &cfg.vnc_session_id {
+            if !config_guard.vnc_sessions.iter().any(|v| v.id == *vnc_id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("VNC 会话不存在")),
+                ));
+            }
+            if let Some(err) = app_vnc_conflict(&cfg.id, vnc_id, &config_guard.apps) {
+                return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+            }
+        }
+        config_guard.apps.push(cfg.clone());
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    if cfg.enabled {
+        let config_snapshot = { state.config.lock().await.clone() };
+        if let Err(e) = start_app_internal(&cfg, &config_snapshot).await {
+            let mut config_guard = state.config.lock().await;
+            if let Some(a) = config_guard.apps.iter_mut().find(|a| a.id == cfg.id) {
+                a.enabled = false;
+                cfg.enabled = false;
+            }
+            let _ = save_config(&config_guard).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to start: {}", e))),
+            ));
+        }
+    }
+
+    let status = get_app_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success(
+        "应用已创建",
+        build_app_item(cfg, status),
+    )))
+}
+
+async fn update_app(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AppUpsertRequest>,
+) -> Result<Json<ApiResponse<AppItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let existing = {
+        let config_guard = state.config.lock().await;
+        config_guard.apps.iter().find(|a| a.id == id).cloned()
+    };
+    let Some(existing) = existing else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+    };
+
+    let restart = req.restart;
+    let mut cfg = normalize_app_request(req, id.clone(), Some(&existing))
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(vnc_id) = &cfg.vnc_session_id {
+            if !config_guard.vnc_sessions.iter().any(|v| v.id == *vnc_id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("VNC 会话不存在")),
+                ));
+            }
+            if let Some(err) = app_vnc_conflict(&cfg.id, vnc_id, &config_guard.apps) {
+                return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
+            }
+        }
+        let Some(pos) = config_guard.apps.iter().position(|a| a.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+        };
+        config_guard.apps[pos] = cfg.clone();
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    let restart = restart && cfg.enabled;
+    if restart {
+        cfg.enabled = true;
+        {
+            let mut config_guard = state.config.lock().await;
+            if let Some(a) = config_guard.apps.iter_mut().find(|a| a.id == id) {
+                a.enabled = true;
+            }
+            let _ = save_config(&config_guard).await;
+        }
+        let _ = stop_app_internal(&cfg.id).await;
+        let config_snapshot = { state.config.lock().await.clone() };
+        if let Err(e) = start_app_internal(&cfg, &config_snapshot).await {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+            ));
+        }
+    } else {
+        let status = get_app_runtime_status(&cfg.id).await;
+        if cfg.enabled && !status.running {
+            let config_snapshot = { state.config.lock().await.clone() };
+            if let Err(e) = start_app_internal(&cfg, &config_snapshot).await {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(format!("Failed to start: {}", e))),
+                ));
+            }
+        }
+        if !cfg.enabled && status.running {
+            let _ = stop_app_internal(&cfg.id).await;
+        }
+    }
+
+    let status = get_app_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success(
+        "应用已更新",
+        build_app_item(cfg, status),
+    )))
+}
+
+async fn delete_app(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config_guard = state.config.lock().await;
+        let before = config_guard.apps.len();
+        config_guard.apps.retain(|a| a.id != id);
+        if config_guard.apps.len() == before {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+        }
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    let _ = stop_app_internal(&id).await;
+    Ok(Json(ApiResponse::success_no_data("应用已删除")))
+}
+
+async fn start_app(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(a) = config_guard.apps.iter().find(|a| a.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+        };
+        a.clone()
+    };
+    let config_snapshot = { state.config.lock().await.clone() };
+    if let Err(e) = start_app_internal(&cfg, &config_snapshot).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to start: {}", e))),
+        ));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(a) = config_guard.apps.iter_mut().find(|a| a.id == id) {
+            a.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+                ));
+            }
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("应用已启动")))
+}
+
+async fn stop_app(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config_guard = state.config.lock().await;
+        let Some(a) = config_guard.apps.iter_mut().find(|a| a.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+        };
+        a.enabled = false;
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+    let _ = stop_app_internal(&id).await;
+    Ok(Json(ApiResponse::success_no_data("应用已停止")))
+}
+
+async fn restart_app(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(a) = config_guard.apps.iter().find(|a| a.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+        };
+        a.clone()
+    };
+    let _ = stop_app_internal(&id).await;
+    let config_snapshot = { state.config.lock().await.clone() };
+    if let Err(e) = start_app_internal(&cfg, &config_snapshot).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+        ));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(a) = config_guard.apps.iter_mut().find(|a| a.id == id) {
+            a.enabled = true;
+            if let Err(e) = save_config(&config_guard).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+                ));
+            }
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("应用已重启")))
 }
 
 /// POST /api/service/start - Start sing-box
@@ -1202,6 +2094,214 @@ fn normalize_terminal_request(
     }
 
     Ok(cfg)
+}
+
+fn normalize_vnc_session_request(
+    req: VncSessionUpsertRequest,
+    id: String,
+    existing: Option<&VncSessionConfig>,
+) -> Result<VncSessionConfig, String> {
+    let mut cfg = existing.cloned().unwrap_or_else(|| {
+        let mut v = VncSessionConfig::default();
+        v.id = id.clone();
+        v
+    });
+    cfg.id = id;
+
+    if let Some(name) = req.name {
+        let trimmed = name.trim();
+        cfg.name = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(enabled) = req.enabled {
+        cfg.enabled = enabled;
+    }
+    if let Some(addr) = req.addr {
+        let trimmed = addr.trim();
+        cfg.addr = if trimmed.is_empty() {
+            default_vnc_addr()
+        } else {
+            trimmed.to_string()
+        };
+    }
+    if let Some(port) = req.port {
+        if port == 0 {
+            return Err("VNC 端口不能为空".to_string());
+        }
+        cfg.port = port;
+    }
+    if let Some(display) = req.display {
+        let trimmed = display.trim();
+        if trimmed.is_empty() {
+            return Err("VNC DISPLAY 不能为空".to_string());
+        }
+        cfg.display = normalize_display_value(trimmed);
+    } else {
+        cfg.display = normalize_display_value(&cfg.display);
+    }
+    if let Some(resolution) = req.resolution {
+        let trimmed = resolution.trim();
+        cfg.resolution = if trimmed.is_empty() {
+            default_vnc_resolution()
+        } else {
+            trimmed.to_string()
+        };
+    }
+    if let Some(depth) = req.depth {
+        if depth == 0 {
+            return Err("VNC 色深必须大于 0".to_string());
+        }
+        cfg.depth = depth;
+    }
+    if let Some(frame_rate) = req.frame_rate {
+        if frame_rate == 0 {
+            return Err("VNC 帧率必须大于 0".to_string());
+        }
+        cfg.frame_rate = frame_rate;
+    }
+    if let Some(view_only) = req.view_only {
+        cfg.view_only = view_only;
+    }
+    if let Some(password) = req.password {
+        let trimmed = password.trim().to_string();
+        cfg.password = if trimmed.is_empty() { None } else { Some(trimmed) };
+    }
+
+    if cfg.port == 0 {
+        return Err("VNC 端口不能为空".to_string());
+    }
+    if cfg.display.trim().is_empty() {
+        return Err("VNC DISPLAY 不能为空".to_string());
+    }
+    if cfg.resolution.trim().is_empty() {
+        return Err("VNC 分辨率不能为空".to_string());
+    }
+
+    Ok(cfg)
+}
+
+fn normalize_app_request(
+    req: AppUpsertRequest,
+    id: String,
+    existing: Option<&AppConfig>,
+) -> Result<AppConfig, String> {
+    let mut cfg = existing.cloned().unwrap_or_else(|| {
+        let mut a = AppConfig::default();
+        a.id = id.clone();
+        a
+    });
+    cfg.id = id;
+
+    if let Some(name) = req.name {
+        let trimmed = name.trim();
+        cfg.name = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(enabled) = req.enabled {
+        cfg.enabled = enabled;
+    }
+    if let Some(vnc_session_id) = req.vnc_session_id {
+        let trimmed = vnc_session_id.trim();
+        cfg.vnc_session_id = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(display) = req.display {
+        let trimmed = display.trim();
+        cfg.display = if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_display_value(trimmed))
+        };
+    }
+    if let Some(command) = req.command {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err("应用启动命令不能为空".to_string());
+        }
+        cfg.command = trimmed.to_string();
+    }
+    if let Some(args) = req.args {
+        cfg.args = args
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
+    }
+    if let Some(env) = req.env {
+        let mut normalized = HashMap::new();
+        for (k, v) in env {
+            let key = k.trim();
+            if key.is_empty() {
+                continue;
+            }
+            normalized.insert(key.to_string(), v.trim().to_string());
+        }
+        cfg.env = normalized;
+    }
+
+    if cfg.command.trim().is_empty() {
+        return Err("应用启动命令不能为空".to_string());
+    }
+    if cfg.vnc_session_id.is_none() {
+        if cfg
+            .display
+            .as_ref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err("未绑定 VNC 时必须填写 DISPLAY".to_string());
+        }
+    }
+
+    Ok(cfg)
+}
+
+fn app_templates() -> Vec<AppTemplateItem> {
+    vec![
+        AppTemplateItem {
+            id: "chromium".to_string(),
+            name: "Chromium".to_string(),
+            description: "Chromium (X11) with common flags".to_string(),
+            command: "chromium".to_string(),
+            args: vec![
+                "--no-sandbox".to_string(),
+                "--no-first-run".to_string(),
+                "--disable-dev-shm-usage".to_string(),
+                "--disable-popup-blocking".to_string(),
+                "--disable-infobars".to_string(),
+                "--disable-gpu".to_string(),
+                "--start-maximized".to_string(),
+                "--no-default-browser-check".to_string(),
+                "--ozone-platform=x11".to_string(),
+                "--password-store=basic".to_string(),
+                "--enable-features=NetworkService,NetworkServiceInProcess,LoadCryptoTokenExtension,PermuteTLSExtensions".to_string(),
+                "--disable-features=FlashDeprecationWarning,EnablePasswordsAccountStorage,CommandLineFlagSecurityWarningsEnabled".to_string(),
+                "--enable-blink-features=IdleDetection,Fledge,Parakeet".to_string(),
+                "--lang=zh-CN".to_string(),
+                "--user-data-dir=/app/chromium".to_string(),
+                "--remote-debugging-port=9222".to_string(),
+                "--simulate-outdated-no-au=Tue, 31 Dec 2099 23:59:59 GMT".to_string(),
+            ],
+            env: HashMap::new(),
+        },
+        AppTemplateItem {
+            id: "cc-switch".to_string(),
+            name: "CCSwitch".to_string(),
+            description: "CCSwitch desktop app".to_string(),
+            command: "cc-switch".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        },
+    ]
 }
 
 async fn create_terminal(
@@ -2933,6 +4033,25 @@ fn generate_terminal_id() -> String {
     format!("term-{}", uuid::Uuid::new_v4())
 }
 
+fn generate_vnc_session_id() -> String {
+    format!("vnc-{}", uuid::Uuid::new_v4())
+}
+
+fn generate_app_id() -> String {
+    format!("app-{}", uuid::Uuid::new_v4())
+}
+
+fn normalize_display_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        ":0".to_string()
+    } else if trimmed.starts_with(':') {
+        trimmed.to_string()
+    } else {
+        format!(":{}", trimmed)
+    }
+}
+
 fn terminal_legacy_is_default(cfg: &TerminalConfigLegacy) -> bool {
     cfg.enabled == false
         && cfg.addr == default_terminal_addr()
@@ -2977,6 +4096,55 @@ fn terminal_bind_conflict(
         if conflicts {
             let name = t.name.clone().unwrap_or_else(|| t.id.clone());
             return Some(format!("terminal port already in use by {}", name));
+        }
+    }
+    None
+}
+
+fn vnc_bind_conflict(
+    id: &str,
+    cfg: &VncSessionConfig,
+    sessions: &[VncSessionConfig],
+) -> Option<String> {
+    let addr = if cfg.addr.trim().is_empty() {
+        "0.0.0.0"
+    } else {
+        cfg.addr.as_str()
+    };
+    let port = cfg.port;
+    let display = normalize_display_value(&cfg.display);
+    for s in sessions {
+        if s.id == id {
+            continue;
+        }
+        if s.port == port {
+            let other_addr = if s.addr.trim().is_empty() {
+                "0.0.0.0"
+            } else {
+                s.addr.as_str()
+            };
+            let conflicts = addr == other_addr || addr == "0.0.0.0" || other_addr == "0.0.0.0";
+            if conflicts {
+                let name = s.name.clone().unwrap_or_else(|| s.id.clone());
+            return Some(format!("VNC 端口已被 {} 使用", name));
+            }
+        }
+        if normalize_display_value(&s.display) == display {
+            let name = s.name.clone().unwrap_or_else(|| s.id.clone());
+            return Some(format!("VNC DISPLAY 已被 {} 使用", name));
+        }
+    }
+    None
+}
+
+fn app_vnc_conflict(id: &str, vnc_session_id: &str, apps: &[AppConfig]) -> Option<String> {
+    for app in apps {
+        if app.id == id {
+            continue;
+        }
+        if app.vnc_session_id.as_deref() == Some(vnc_session_id) {
+            let name = app.name.clone().unwrap_or_else(|| app.id.clone());
+            return Some(format!("VNC 会话已绑定应用 {}", name));
         }
     }
     None
@@ -5251,6 +6419,316 @@ async fn stop_terminal_internal(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn binary_exists(cmd: &str) -> bool {
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    for path in env::split_paths(&paths) {
+        let candidate = path.join(cmd);
+        if let Ok(metadata) = fs::metadata(&candidate) {
+            if metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn ensure_vnc_dependencies() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !binary_exists("vncserver") {
+        return Err("vncserver not found in PATH".into());
+    }
+    if !binary_exists("vncpasswd") {
+        return Err("vncpasswd not found in PATH".into());
+    }
+    if !PathBuf::from(KASMVNC_HTTPD_DIR).exists() {
+        return Err(format!("kasmvnc httpd dir not found: {}", KASMVNC_HTTPD_DIR).into());
+    }
+    Ok(())
+}
+
+fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !PathBuf::from(KASMVNC_DEFAULTS_JS).exists() {
+        let defaults_js = r#"(function() {
+  var defaults = {
+    'enable_ime': true,
+    'resize': 'remote'
+  };
+  for (var key in defaults) {
+    if (localStorage.getItem(key) === null) {
+      localStorage.setItem(key, JSON.stringify(defaults[key]));
+    }
+  }
+})();
+"#;
+        if let Err(e) = fs::write(KASMVNC_DEFAULTS_JS, defaults_js) {
+            eprintln!("Failed to write kasmvnc defaults js: {}", e);
+            return Ok(());
+        }
+        let vnc_html_path = PathBuf::from(KASMVNC_HTTPD_DIR).join("vnc.html");
+        if let Ok(contents) = fs::read_to_string(&vnc_html_path) {
+            if !contents.contains("kasmvnc-defaults.js") {
+                let updated = contents.replace(
+                    "</head>",
+                    "<script src=\"./kasmvnc-defaults.js\"></script></head>",
+                );
+                if let Err(e) = fs::write(&vnc_html_path, updated) {
+                    eprintln!("Failed to inject kasmvnc defaults js: {}", e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn start_vnc_internal(
+    id: &str,
+    config: &VncSessionConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lock = VNC_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
+        if proc.child.try_wait()?.is_none() {
+            return Err("vnc already running".into());
+        }
+        lock.remove(id);
+    }
+
+    ensure_vnc_dependencies()?;
+    ensure_kasmvnc_web_defaults()?;
+
+    let display = normalize_display_value(&config.display);
+    let home_dir = PathBuf::from(KASMVNC_BASE_HOME).join(id);
+    let vnc_dir = home_dir.join(".vnc");
+    fs::create_dir_all(&vnc_dir)?;
+    fs::write(vnc_dir.join(".de-was-selected"), "")?;
+
+    let kasmvnc_yaml = r#"logging:
+  log_writer_name: all
+  log_dest: logfile
+  level: 100
+
+network:
+  udp:
+    public_ip: 127.0.0.1
+  ssl:
+    require_ssl: false
+"#;
+    fs::write(vnc_dir.join("kasmvnc.yaml"), kasmvnc_yaml)?;
+
+    let password = config
+        .password
+        .clone()
+        .unwrap_or_else(|| "kasmvnc".to_string());
+    let password = if password.trim().is_empty() {
+        "kasmvnc".to_string()
+    } else {
+        password
+    };
+
+    let mut pass_cmd = tokio::process::Command::new("vncpasswd");
+    pass_cmd.arg("-u").arg(KASMVNC_USER);
+    if !config.view_only {
+        pass_cmd.arg("-w");
+    }
+    pass_cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .env("HOME", &home_dir);
+    let mut child = pass_cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(format!("{}\n{}\n\n", password, password).as_bytes())
+            .await?;
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err("vncpasswd failed".into());
+    }
+
+    let _ = tokio::process::Command::new("vncserver")
+        .arg("-kill")
+        .arg(&display)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    let mut command = tokio::process::Command::new("vncserver");
+    command
+        .arg(&display)
+        .arg("-fg")
+        .arg("-noxstartup")
+        .arg("-ac")
+        .arg("-depth")
+        .arg(config.depth.to_string())
+        .arg("-geometry")
+        .arg(&config.resolution)
+        .arg("-websocketPort")
+        .arg(config.port.to_string())
+        .arg(format!("-FrameRate={}", config.frame_rate))
+        .arg("-interface")
+        .arg(&config.addr)
+        .arg("-httpd")
+        .arg(KASMVNC_HTTPD_DIR)
+        .env("HOME", &home_dir)
+        .current_dir(&home_dir);
+
+    let mut child = command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    let pid = child.id();
+    println!("kasmvnc process spawned with PID: {:?}", pid);
+
+    sleep(Duration::from_millis(500)).await;
+    if let Some(exit_status) = child.try_wait()? {
+        let code = exit_status.code().unwrap_or(-1);
+        return Err(format!("kasmvnc exited immediately with code {}", code).into());
+    }
+
+    lock.insert(
+        id.to_string(),
+        VncProcess {
+            child,
+            started_at: Instant::now(),
+            display,
+        },
+    );
+    Ok(())
+}
+
+async fn stop_vnc_internal(id: &str, display: &str) -> Result<(), String> {
+    let display = normalize_display_value(display);
+    let _ = tokio::process::Command::new("vncserver")
+        .arg("-kill")
+        .arg(&display)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    let mut lock = VNC_PROCESSES.lock().await;
+    let Some(proc) = lock.get_mut(id) else {
+        return Ok(());
+    };
+    if proc.child.try_wait().ok().flatten().is_none() {
+        if let Some(pid) = proc.child.id() {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            for _ in 0..30 {
+                sleep(Duration::from_millis(100)).await;
+                if proc.child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+            }
+            if proc.child.try_wait().ok().flatten().is_none() {
+                proc.child.start_kill().ok();
+            }
+        }
+    }
+    lock.remove(id);
+    Ok(())
+}
+
+async fn start_app_internal(
+    app: &AppConfig,
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lock = APP_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(&app.id) {
+        if proc.child.try_wait()?.is_none() {
+            return Err("应用已在运行".into());
+        }
+        lock.remove(&app.id);
+    }
+    drop(lock);
+
+    let mut display = app.display.clone();
+    if let Some(vnc_id) = &app.vnc_session_id {
+        let vnc = config
+            .vnc_sessions
+            .iter()
+            .find(|v| v.id == *vnc_id)
+            .cloned()
+            .ok_or_else(|| format!("VNC 会话不存在: {}", vnc_id))?;
+        if let Some(err) = app_vnc_conflict(&app.id, vnc_id, &config.apps) {
+            return Err(err.into());
+        }
+        display = Some(vnc.display.clone());
+        let vnc_status = get_vnc_runtime_status(&vnc.id).await;
+        if !vnc_status.running {
+            if let Some(err) = vnc_bind_conflict(&vnc.id, &vnc, &config.vnc_sessions) {
+                return Err(err.into());
+            }
+            start_vnc_internal(&vnc.id, &vnc).await?;
+        }
+    }
+
+    let display = display.ok_or_else(|| "未绑定 VNC 时必须填写 DISPLAY".to_string())?;
+    let display = normalize_display_value(&display);
+
+    if app.command.trim().is_empty() {
+        return Err("应用启动命令不能为空".into());
+    }
+
+    let mut command = tokio::process::Command::new(&app.command);
+    for arg in &app.args {
+        command.arg(arg);
+    }
+    command.env("DISPLAY", &display);
+    for (k, v) in &app.env {
+        command.env(k, v);
+    }
+
+    let mut child = command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    let pid = child.id();
+    println!("app process spawned with PID: {:?}", pid);
+
+    sleep(Duration::from_millis(300)).await;
+    if let Some(exit_status) = child.try_wait()? {
+        let code = exit_status.code().unwrap_or(-1);
+        return Err(format!("app exited immediately with code {}", code).into());
+    }
+
+    let mut lock = APP_PROCESSES.lock().await;
+    lock.insert(
+        app.id.clone(),
+        AppProcess {
+            child,
+            started_at: Instant::now(),
+        },
+    );
+    Ok(())
+}
+
+async fn stop_app_internal(id: &str) -> Result<(), String> {
+    let mut lock = APP_PROCESSES.lock().await;
+    let Some(proc) = lock.get_mut(id) else {
+        return Ok(());
+    };
+    if proc.child.try_wait().ok().flatten().is_none() {
+        if let Some(pid) = proc.child.id() {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            for _ in 0..30 {
+                sleep(Duration::from_millis(100)).await;
+                if proc.child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+            }
+            if proc.child.try_wait().ok().flatten().is_none() {
+                proc.child.start_kill().ok();
+            }
+        }
+    }
+    lock.remove(id);
+    Ok(())
+}
+
 async fn gen_config(
     config: &Config,
     sing_box_home: &str,
@@ -5997,6 +7475,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
 
+        for vnc in &config.vnc_sessions {
+            if !vnc.enabled {
+                continue;
+            }
+            match start_vnc_internal(&vnc.id, vnc).await {
+                Ok(_) => println!("kasmvnc started successfully"),
+                Err(e) => eprintln!("Failed to start kasmvnc: {}", e),
+            }
+        }
+
+        let config_snapshot = config.clone();
+        for app in &config_snapshot.apps {
+            if !app.enabled {
+                continue;
+            }
+            match start_app_internal(app, &config_snapshot).await {
+                Ok(_) => println!("应用启动成功"),
+                Err(e) => eprintln!("Failed to start app {}: {}", app.id, e),
+            }
+        }
+
     } else {
         println!("No config.yaml found, entering setup mode at http://localhost:{}", port);
     }
@@ -6055,6 +7554,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/terminals/{id}/start", post(start_terminal))
         .route("/api/terminals/{id}/stop", post(stop_terminal))
         .route("/api/terminals/{id}/restart", post(restart_terminal))
+        .route("/api/vnc-sessions", get(get_vnc_sessions))
+        .route("/api/vnc-sessions", post(create_vnc_session))
+        .route("/api/vnc-sessions/{id}", put(update_vnc_session).delete(delete_vnc_session))
+        .route("/api/vnc-sessions/{id}/start", post(start_vnc_session))
+        .route("/api/vnc-sessions/{id}/stop", post(stop_vnc_session))
+        .route("/api/vnc-sessions/{id}/restart", post(restart_vnc_session))
+        .route("/api/apps/templates", get(get_app_templates_handler))
+        .route("/api/apps", get(get_apps))
+        .route("/api/apps", post(create_app))
+        .route("/api/apps/{id}", put(update_app).delete(delete_app))
+        .route("/api/apps/{id}/start", post(start_app))
+        .route("/api/apps/{id}/stop", post(stop_app))
+        .route("/api/apps/{id}/restart", post(restart_app))
         // Connectivity test
         .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)

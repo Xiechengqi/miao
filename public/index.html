@@ -1922,6 +1922,136 @@
                     </div>
                 </div>
 
+                <!-- VNC Sessions - 全宽 -->
+                <div class="glass-card layout-full">
+                    <div class="card-header-custom">
+                        <i class="bi bi-display"></i>
+                        <span>VNC Sessions</span>
+                        <button class="btn-custom btn-add btn-sm-custom" @click="openVncModal(null)"
+                            :disabled="loading" style="margin-left: auto;">
+                            <i class="bi bi-plus-lg"></i>
+                            添加
+                        </button>
+                    </div>
+
+                    <div v-if="!vncSessionsLoaded" class="empty-state">
+                        <i class="bi bi-hourglass-split" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        正在加载...
+                    </div>
+                    <div v-else-if="vncSessions.length === 0" class="empty-state">
+                        <i class="bi bi-display" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        暂无 VNC 会话配置
+                    </div>
+                    <div v-else>
+                        <div v-for="s in vncSessions" :key="s.id" class="list-item">
+                            <div style="flex: 1;">
+                                <div class="list-item-text" style="white-space: normal;">
+                                    <strong>{{ s.name || s.id }}</strong>
+                                    <span class="node-type-badge"
+                                        :class="s.status.running ? 'dns-badge-ok' : 'dns-badge-unknown'">
+                                        {{ s.status.running ? 'running' : 'stopped' }}
+                                    </span>
+                                </div>
+                                <div class="node-info">地址: {{ s.addr }}:{{ s.port }}</div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    DISPLAY: {{ s.display }} · 分辨率: {{ s.resolution }} · 深度: {{ s.depth }} · FPS: {{ s.frame_rate }}
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    只读: {{ s.view_only ? '是' : '否' }} · 密码: {{ s.password || '-' }}
+                                </div>
+                                <div class="node-info" v-if="s.status.running" style="opacity: 0.85;">
+                                    PID: {{ s.status.pid || '-' }} · 运行: {{ formatUptime(s.status.uptime_secs) }}
+                                </div>
+                            </div>
+                            <div class="node-actions">
+                                <button class="btn-icon" @click.stop="openVncSession(s)" :disabled="!vncUrl(s)"
+                                    title="打开" aria-label="打开">
+                                    <i class="bi bi-box-arrow-up-right"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="restartVncSession(s)" :disabled="loading"
+                                    title="重启" aria-label="重启">
+                                    <i class="bi bi-arrow-repeat"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="toggleVncSession(s)" :disabled="loading"
+                                    :title="s.enabled ? '停止' : '启动'" :aria-label="s.enabled ? '停止' : '启动'">
+                                    <i :class="['bi', s.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="openVncModal(s)" :disabled="loading"
+                                    title="编辑" aria-label="编辑">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn-icon btn-icon-danger" @click.stop="confirmDeleteVncSession(s)" :disabled="loading"
+                                    title="删除" aria-label="删除">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Desktop Apps - 全宽 -->
+                <div class="glass-card layout-full">
+                    <div class="card-header-custom">
+                        <i class="bi bi-window"></i>
+                        <span>Desktop Apps</span>
+                        <button class="btn-custom btn-add btn-sm-custom" @click="openAppModal(null)"
+                            :disabled="loading" style="margin-left: auto;">
+                            <i class="bi bi-plus-lg"></i>
+                            添加
+                        </button>
+                    </div>
+
+                    <div v-if="!appsLoaded" class="empty-state">
+                        <i class="bi bi-hourglass-split" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        正在加载...
+                    </div>
+                    <div v-else-if="apps.length === 0" class="empty-state">
+                        <i class="bi bi-window" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        暂无应用配置
+                    </div>
+                    <div v-else>
+                        <div v-for="a in apps" :key="a.id" class="list-item">
+                            <div style="flex: 1;">
+                                <div class="list-item-text" style="white-space: normal;">
+                                    <strong>{{ a.name || a.id }}</strong>
+                                    <span class="node-type-badge"
+                                        :class="a.status.running ? 'dns-badge-ok' : 'dns-badge-unknown'">
+                                        {{ a.status.running ? 'running' : 'stopped' }}
+                                    </span>
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    DISPLAY: {{ resolveAppDisplay(a) || '-' }}
+                                    <span v-if="a.vnc_session_id">· 绑定: {{ resolveAppVncName(a) }}</span>
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    命令: {{ a.command }} <span v-if="a.args && a.args.length">{{ a.args.join(' ') }}</span>
+                                </div>
+                                <div class="node-info" v-if="a.status.running" style="opacity: 0.85;">
+                                    PID: {{ a.status.pid || '-' }} · 运行: {{ formatUptime(a.status.uptime_secs) }}
+                                </div>
+                            </div>
+                            <div class="node-actions">
+                                <button class="btn-icon" @click.stop="restartApp(a)" :disabled="loading"
+                                    title="重启" aria-label="重启">
+                                    <i class="bi bi-arrow-repeat"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="toggleApp(a)" :disabled="loading"
+                                    :title="a.enabled ? '停止' : '启动'" :aria-label="a.enabled ? '停止' : '启动'">
+                                    <i :class="['bi', a.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="openAppModal(a)" :disabled="loading"
+                                    title="编辑" aria-label="编辑">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn-icon btn-icon-danger" @click.stop="confirmDeleteApp(a)" :disabled="loading"
+                                    title="删除" aria-label="删除">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 左列 -->
                 <div class="layout-column">
 
@@ -2308,6 +2438,184 @@
                         <div class="node-actions" style="justify-content: flex-end;">
                             <button class="btn-custom btn-add" @click="submitTerminal" :disabled="terminalSaving || !canSubmitTerminal">
                                 <span v-if="terminalSaving" class="spinner" style="width:12px;height:12px;"></span>
+                                <span v-else>保存配置</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- VNC Session 模态框 -->
+                <div class="modal-overlay" v-if="showVncModal" v-cloak @click.self="closeVncModal">
+                    <div class="modal-content" style="max-width: 760px;">
+                        <div class="modal-title">
+                            <i class="bi bi-display"></i>
+                            {{ editingVncId ? '编辑 VNC 会话' : '添加 VNC 会话' }}
+                            <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="closeVncModal">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">名称（可选）</label>
+                                <input type="text" class="form-input" v-model="newVncSession.name" placeholder="例如: chromium-vnc">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">启用</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newVncSession.enabled">
+                                    <span style="opacity: 0.9;">{{ newVncSession.enabled ? '已启用' : '未启用' }}</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">绑定地址</label>
+                                <input type="text" class="form-input" v-model="newVncSession.addr" placeholder="0.0.0.0">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">端口</label>
+                                <input type="number" class="form-input" v-model.number="newVncSession.port" min="1" max="65535">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">DISPLAY</label>
+                                <input type="text" class="form-input" v-model="newVncSession.display" placeholder=":10">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">分辨率</label>
+                                <input type="text" class="form-input" v-model="newVncSession.resolution" placeholder="1920x1080">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">深度</label>
+                                <input type="number" class="form-input" v-model.number="newVncSession.depth" min="8" max="32">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">FPS</label>
+                                <input type="number" class="form-input" v-model.number="newVncSession.frame_rate" min="1" max="120">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">密码</label>
+                                <input type="text" class="form-input" v-model="newVncSession.password" :placeholder="editingVncId ? '留空保持不变' : '留空使用默认密码'">
+                            </div>
+                            <div class="form-group" style="max-width: 200px;">
+                                <label class="form-label">只读模式</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newVncSession.view_only">
+                                    <span style="opacity: 0.9;">{{ newVncSession.view_only ? '只读' : '可操作' }}</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="display:flex; flex-direction: column; justify-content: flex-end; gap: 0.4rem;">
+                                <label class="form-label" style="display:flex; align-items:center; gap:0.5rem; margin: 0;">
+                                    <input type="checkbox" v-model="vncRestartOnSave" :disabled="!editingVncId">
+                                    保存后重启
+                                </label>
+                                <label class="form-label" style="display:flex; align-items:center; gap:0.5rem; margin: 0;">
+                                    <input type="checkbox" v-model="vncClearPassword" :disabled="!editingVncId">
+                                    清除密码
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="node-actions" style="justify-content: flex-end;">
+                            <button class="btn-custom btn-add" @click="submitVnc" :disabled="vncSaving || !canSubmitVnc">
+                                <span v-if="vncSaving" class="spinner" style="width:12px;height:12px;"></span>
+                                <span v-else>保存配置</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Desktop App 模态框 -->
+                <div class="modal-overlay" v-if="showAppModal" v-cloak @click.self="closeAppModal">
+                    <div class="modal-content" style="max-width: 820px;">
+                        <div class="modal-title">
+                            <i class="bi bi-window"></i>
+                            {{ editingAppId ? '编辑应用' : '添加应用' }}
+                            <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="closeAppModal">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">模板预设</label>
+                                <select class="form-input" v-model="selectedAppTemplateId" @change="applyAppTemplate">
+                                    <option value="">手动配置</option>
+                                    <option v-for="tpl in appTemplates" :key="tpl.id" :value="tpl.id">
+                                        {{ tpl.name }}
+                                    </option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">名称（可选）</label>
+                                <input type="text" class="form-input" v-model="newApp.name" placeholder="例如: Chromium">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">启用</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newApp.enabled">
+                                    <span style="opacity: 0.9;">{{ newApp.enabled ? '已启用' : '未启用' }}</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">绑定 VNC 会话</label>
+                                <select class="form-input" v-model="newApp.vnc_session_id">
+                                    <option value="">不绑定（手动 DISPLAY）</option>
+                                    <option v-for="s in vncSessions" :key="s.id" :value="s.id">
+                                        {{ s.name || s.id }} ({{ s.display }})
+                                    </option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="max-width: 200px;">
+                                <label class="form-label">DISPLAY</label>
+                                <input type="text" class="form-input" v-model="newApp.display"
+                                    :disabled="!!newApp.vnc_session_id" placeholder=":10">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">启动命令</label>
+                                <input type="text" class="form-input" v-model="newApp.command" placeholder="chromium">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">命令参数</label>
+                                <input type="text" class="form-input" v-model="appArgsText" placeholder="--no-sandbox">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">环境变量 (KEY=VALUE，每行一个)</label>
+                                <textarea class="form-input" v-model="appEnvText" rows="4" placeholder="KEY=VALUE"></textarea>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="display:flex; flex-direction: column; justify-content: flex-end; gap: 0.4rem;">
+                                <label class="form-label" style="display:flex; align-items:center; gap:0.5rem; margin: 0;">
+                                    <input type="checkbox" v-model="appRestartOnSave" :disabled="!editingAppId">
+                                    保存后重启
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="node-actions" style="justify-content: flex-end;">
+                            <button class="btn-custom btn-add" @click="submitApp" :disabled="appSaving || !canSubmitApp">
+                                <span v-if="appSaving" class="spinner" style="width:12px;height:12px;"></span>
                                 <span v-else>保存配置</span>
                             </button>
                         </div>
@@ -2777,7 +3085,43 @@
                     const terminalRestartOnSave = ref(true);
                     const terminalSaving = ref(false);
                     const terminalClearAuth = ref(false);
-	                const proxyStatus = ref(null);
+                    const vncSessionsLoaded = ref(false);
+                    const vncSessions = ref([]);
+                    const showVncModal = ref(false);
+                    const editingVncId = ref(null);
+                    const newVncSession = ref({
+                        name: '',
+                        enabled: true,
+                        addr: '0.0.0.0',
+                        port: 7900,
+                        display: ':10',
+                        resolution: '1920x1080',
+                        depth: 24,
+                        frame_rate: 24,
+                        view_only: false,
+                        password: '',
+                    });
+                    const vncRestartOnSave = ref(true);
+                    const vncSaving = ref(false);
+                    const vncClearPassword = ref(false);
+                    const appsLoaded = ref(false);
+                    const apps = ref([]);
+                    const appTemplates = ref([]);
+                    const showAppModal = ref(false);
+                    const editingAppId = ref(null);
+                    const selectedAppTemplateId = ref('');
+                    const newApp = ref({
+                        name: '',
+                        enabled: true,
+                        vnc_session_id: '',
+                        display: '',
+                        command: '',
+                    });
+                    const appArgsText = ref('');
+                    const appEnvText = ref('');
+                    const appRestartOnSave = ref(true);
+                    const appSaving = ref(false);
+                    const proxyStatus = ref(null);
                     // TCP tunnels (SSH -R)
                 const tcpTunnelsLoaded = ref(false);
                     const tcpTunnelsSupported = ref(false);
@@ -3040,6 +3384,22 @@
                     const port = Number(newTerminal.value.port) || 0;
                     const cmd = (newTerminal.value.command || '').trim();
                     return port > 0 && !!cmd;
+                });
+
+                const canSubmitVnc = computed(() => {
+                    const port = Number(newVncSession.value.port) || 0;
+                    const display = (newVncSession.value.display || '').trim();
+                    const resolution = (newVncSession.value.resolution || '').trim();
+                    return port > 0 && !!display && !!resolution;
+                });
+
+                const canSubmitApp = computed(() => {
+                    const cmd = (newApp.value.command || '').trim();
+                    const vncSessionId = (newApp.value.vnc_session_id || '').trim();
+                    const display = (newApp.value.display || '').trim();
+                    if (!cmd) return false;
+                    if (vncSessionId) return true;
+                    return !!display;
                 });
 
                 const canSubmitFullSet = computed(() => {
@@ -4279,6 +4639,343 @@
                     window.open(url, '_blank', 'noopener');
                 };
 
+                const fetchVncSessions = async () => {
+                    try {
+                        const data = await apiFetch('/api/vnc-sessions');
+                        if (data.data) {
+                            vncSessions.value = data.data.items || [];
+                            vncSessionsLoaded.value = true;
+                        }
+                    } catch (e) {
+                        console.error('获取 VNC 会话失败:', e);
+                        vncSessionsLoaded.value = true;
+                    }
+                };
+
+                const vncUrl = (session) => {
+                    if (!session) return '';
+                    const addr = (session.addr || '').trim();
+                    const host = (!addr || addr === '0.0.0.0') ? window.location.hostname : addr;
+                    const port = Number(session.port) || 0;
+                    if (!port) return '';
+                    return `http://${host}:${port}`;
+                };
+
+                const applyVncForm = (cfg) => {
+                    if (!cfg) return;
+                    newVncSession.value = {
+                        name: cfg.name || '',
+                        enabled: cfg.enabled !== undefined ? !!cfg.enabled : true,
+                        addr: cfg.addr || '0.0.0.0',
+                        port: cfg.port || 7900,
+                        display: cfg.display || ':10',
+                        resolution: cfg.resolution || '1920x1080',
+                        depth: cfg.depth || 24,
+                        frame_rate: cfg.frame_rate || 24,
+                        view_only: !!cfg.view_only,
+                        password: '',
+                    };
+                    vncRestartOnSave.value = true;
+                    vncClearPassword.value = false;
+                };
+
+                const openVncModal = (session) => {
+                    editingVncId.value = session ? session.id : null;
+                    if (session) {
+                        applyVncForm(session);
+                    } else {
+                        applyVncForm({
+                            name: '',
+                            enabled: true,
+                            addr: '0.0.0.0',
+                            port: 7900,
+                            display: ':10',
+                            resolution: '1920x1080',
+                            depth: 24,
+                            frame_rate: 24,
+                            view_only: false,
+                        });
+                    }
+                    showVncModal.value = true;
+                };
+
+                const closeVncModal = () => {
+                    showVncModal.value = false;
+                    editingVncId.value = null;
+                    vncRestartOnSave.value = true;
+                    vncClearPassword.value = false;
+                };
+
+                const submitVnc = async () => {
+                    if (vncSaving.value) return;
+                    vncSaving.value = true;
+                    try {
+                        const payload = {
+                            name: newVncSession.value.name || null,
+                            enabled: !!newVncSession.value.enabled,
+                            addr: (newVncSession.value.addr || '').trim(),
+                            port: Number(newVncSession.value.port) || 0,
+                            display: (newVncSession.value.display || '').trim(),
+                            resolution: (newVncSession.value.resolution || '').trim(),
+                            depth: Number(newVncSession.value.depth) || 0,
+                            frame_rate: Number(newVncSession.value.frame_rate) || 0,
+                            view_only: !!newVncSession.value.view_only,
+                            restart: !!editingVncId.value && vncRestartOnSave.value && !!newVncSession.value.enabled,
+                        };
+                        const password = (newVncSession.value.password || '').trim();
+                        if (editingVncId.value) {
+                            if (vncClearPassword.value) {
+                                payload.password = '';
+                            } else if (password) {
+                                payload.password = password;
+                            }
+                            await apiFetch(`/api/vnc-sessions/${encodeURIComponent(editingVncId.value)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            showToast('VNC 会话已更新', 'success');
+                        } else {
+                            if (password) payload.password = password;
+                            await apiFetch('/api/vnc-sessions', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            showToast('VNC 会话已添加', 'success');
+                        }
+                        showVncModal.value = false;
+                        await fetchVncSessions();
+                    } catch (e) { }
+                    vncSaving.value = false;
+                };
+
+                const toggleVncSession = async (s) => {
+                    try {
+                        if (s.enabled) {
+                            await apiFetch(`/api/vnc-sessions/${encodeURIComponent(s.id)}/stop`, { method: 'POST' });
+                            showToast('VNC 会话已停止', 'success');
+                        } else {
+                            await apiFetch(`/api/vnc-sessions/${encodeURIComponent(s.id)}/start`, { method: 'POST' });
+                            showToast('VNC 会话已启动', 'success');
+                        }
+                        await fetchVncSessions();
+                    } catch (e) { }
+                };
+
+                const restartVncSession = async (s) => {
+                    try {
+                        await apiFetch(`/api/vnc-sessions/${encodeURIComponent(s.id)}/restart`, { method: 'POST' });
+                        showToast('VNC 会话已重启', 'success');
+                        await fetchVncSessions();
+                    } catch (e) { }
+                };
+
+                const confirmDeleteVncSession = (s) => {
+                    if (!s) return;
+                    showConfirm('删除 VNC 会话', `确定删除 ${s.name || s.id}？`, async () => {
+                        vncSaving.value = true;
+                        try {
+                            await apiFetch(`/api/vnc-sessions/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+                            showToast('已删除', 'success');
+                            await fetchVncSessions();
+                        } catch (e) {
+                            if (e && e.message && e.message.includes('已绑定应用')) {
+                                showToast('已绑定应用，无法删除', 'error');
+                            }
+                        }
+                        vncSaving.value = false;
+                    });
+                };
+
+                const openVncSession = (s) => {
+                    const url = vncUrl(s);
+                    if (!url) return;
+                    window.open(url, '_blank', 'noopener');
+                };
+
+                const fetchApps = async () => {
+                    try {
+                        const data = await apiFetch('/api/apps');
+                        if (data.data) {
+                            apps.value = data.data.items || [];
+                            appsLoaded.value = true;
+                        }
+                    } catch (e) {
+                        console.error('获取应用失败:', e);
+                        appsLoaded.value = true;
+                    }
+                };
+
+                const fetchAppTemplates = async () => {
+                    try {
+                        const data = await apiFetch('/api/apps/templates');
+                        if (data.data) {
+                            appTemplates.value = data.data.items || [];
+                        }
+                    } catch (e) { console.error('获取应用模板失败:', e); }
+                };
+
+                const resolveAppDisplay = (app) => {
+                    if (!app) return '';
+                    const vncId = app.vnc_session_id;
+                    if (vncId) {
+                        const session = vncSessions.value.find(v => v.id === vncId);
+                        return session ? session.display : '';
+                    }
+                    return app.display || '';
+                };
+
+                const resolveAppVncName = (app) => {
+                    if (!app || !app.vnc_session_id) return '';
+                    const session = vncSessions.value.find(v => v.id === app.vnc_session_id);
+                    return session ? (session.name || session.id) : app.vnc_session_id;
+                };
+
+                const applyAppForm = (cfg) => {
+                    if (!cfg) return;
+                    newApp.value = {
+                        name: cfg.name || '',
+                        enabled: cfg.enabled !== undefined ? !!cfg.enabled : true,
+                        vnc_session_id: cfg.vnc_session_id || '',
+                        display: cfg.display || '',
+                        command: cfg.command || '',
+                    };
+                    appArgsText.value = (cfg.args || []).join(' ');
+                    appEnvText.value = Object.entries(cfg.env || {})
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join('\n');
+                    selectedAppTemplateId.value = '';
+                    appRestartOnSave.value = true;
+                };
+
+                const openAppModal = (app) => {
+                    editingAppId.value = app ? app.id : null;
+                    if (app) {
+                        applyAppForm(app);
+                    } else {
+                        applyAppForm({
+                            name: '',
+                            enabled: true,
+                            vnc_session_id: '',
+                            display: '',
+                            command: '',
+                            args: [],
+                            env: {},
+                        });
+                    }
+                    showAppModal.value = true;
+                };
+
+                const closeAppModal = () => {
+                    showAppModal.value = false;
+                    editingAppId.value = null;
+                    selectedAppTemplateId.value = '';
+                    appRestartOnSave.value = true;
+                };
+
+                const applyAppTemplate = () => {
+                    const templateId = selectedAppTemplateId.value;
+                    if (!templateId) return;
+                    const tpl = appTemplates.value.find(t => t.id === templateId);
+                    if (!tpl) return;
+                    if (!newApp.value.name) newApp.value.name = tpl.name || '';
+                    newApp.value.command = tpl.command || '';
+                    appArgsText.value = (tpl.args || []).join(' ');
+                    appEnvText.value = Object.entries(tpl.env || {})
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join('\n');
+                };
+
+                const parseEnvText = (text) => {
+                    const env = {};
+                    if (!text) return env;
+                    const lines = text.split('\n');
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed) continue;
+                        const idx = trimmed.indexOf('=');
+                        if (idx < 0) {
+                            env[trimmed] = '';
+                        } else {
+                            const key = trimmed.slice(0, idx).trim();
+                            const value = trimmed.slice(idx + 1);
+                            if (key) env[key] = value;
+                        }
+                    }
+                    return env;
+                };
+
+                const submitApp = async () => {
+                    if (appSaving.value) return;
+                    appSaving.value = true;
+                    try {
+                        const vncSessionId = (newApp.value.vnc_session_id || '').trim();
+                        const payload = {
+                            name: newApp.value.name || null,
+                            enabled: !!newApp.value.enabled,
+                            vnc_session_id: vncSessionId,
+                            display: vncSessionId ? '' : (newApp.value.display || '').trim(),
+                            command: (newApp.value.command || '').trim(),
+                            args: splitArgsText(appArgsText.value),
+                            env: parseEnvText(appEnvText.value),
+                            restart: !!editingAppId.value && appRestartOnSave.value && !!newApp.value.enabled,
+                        };
+                        if (editingAppId.value) {
+                            await apiFetch(`/api/apps/${encodeURIComponent(editingAppId.value)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            showToast('应用已更新', 'success');
+                        } else {
+                            await apiFetch('/api/apps', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            showToast('应用已添加', 'success');
+                        }
+                        showAppModal.value = false;
+                        await fetchApps();
+                    } catch (e) { }
+                    appSaving.value = false;
+                };
+
+                const toggleApp = async (app) => {
+                    try {
+                        if (app.enabled) {
+                            await apiFetch(`/api/apps/${encodeURIComponent(app.id)}/stop`, { method: 'POST' });
+                            showToast('应用已停止', 'success');
+                        } else {
+                            await apiFetch(`/api/apps/${encodeURIComponent(app.id)}/start`, { method: 'POST' });
+                            showToast('应用已启动', 'success');
+                        }
+                        await fetchApps();
+                    } catch (e) { }
+                };
+
+                const restartApp = async (app) => {
+                    try {
+                        await apiFetch(`/api/apps/${encodeURIComponent(app.id)}/restart`, { method: 'POST' });
+                        showToast('应用已重启', 'success');
+                        await fetchApps();
+                    } catch (e) { }
+                };
+
+                const confirmDeleteApp = (app) => {
+                    if (!app) return;
+                    showConfirm('删除应用', `确定删除 ${app.name || app.id}？`, async () => {
+                        appSaving.value = true;
+                        try {
+                            await apiFetch(`/api/apps/${encodeURIComponent(app.id)}`, { method: 'DELETE' });
+                            showToast('已删除', 'success');
+                            await fetchApps();
+                        } catch (e) { }
+                        appSaving.value = false;
+                    });
+                };
+
 		                // 获取订阅文件列表
 		                const fetchSubFiles = async () => {
 		                    try {
@@ -4611,6 +5308,9 @@
 
                     await fetchStatus();
                     await fetchTerminals();
+                    await fetchVncSessions();
+                    await fetchApps();
+                    await fetchAppTemplates();
                     await fetchDnsStatus();
                     await fetchTcpTunnels();
 	                    await fetchSubFiles();
@@ -4623,9 +5323,11 @@
 
                     // 定时刷新状态
                     statusInterval = setInterval(async () => {
-	                        await fetchStatus();
+                            await fetchStatus();
                             await fetchTerminals();
-	                        await fetchDnsStatus();
+                            await fetchVncSessions();
+                            await fetchApps();
+                            await fetchDnsStatus();
                             await fetchTcpTunnels();
 	                        if (status.value.running) {
 	                            await fetchProxies();
@@ -4665,6 +5367,14 @@
                             terminalClearAuth, terminalUrl, canSubmitTerminal,
                             fetchTerminals, openTerminalModal, closeTerminalModal, submitTerminal,
                             toggleTerminal, restartTerminal, confirmDeleteTerminal, openTerminal,
+                            vncSessionsLoaded, vncSessions, showVncModal, editingVncId, newVncSession,
+                            vncRestartOnSave, vncSaving, vncClearPassword, vncUrl, canSubmitVnc,
+                            fetchVncSessions, openVncModal, closeVncModal, submitVnc,
+                            toggleVncSession, restartVncSession, confirmDeleteVncSession, openVncSession,
+                            appsLoaded, apps, appTemplates, showAppModal, editingAppId, selectedAppTemplateId,
+                            newApp, appArgsText, appEnvText, appRestartOnSave, appSaving, canSubmitApp,
+                            fetchApps, fetchAppTemplates, openAppModal, closeAppModal, submitApp, applyAppTemplate,
+                            toggleApp, restartApp, confirmDeleteApp, resolveAppDisplay, resolveAppVncName,
                             subDir, subSource, subDirError, subFiles, nodes, loading, loadingAction, toasts,
 		                    proxyStatus,
                             tcpTunnelsLoaded, tcpTunnelsSupported, tcpTunnels,
