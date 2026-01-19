@@ -1858,8 +1858,13 @@
                     <div class="card-header-custom">
                         <i class="bi bi-terminal"></i>
                         <span>Web Terminal</span>
+                        <button class="btn-custom btn-sm-custom" @click="upgradeGotty" :disabled="gottyUpgrading"
+                            style="margin-left: auto;">
+                            <i class="bi bi-arrow-repeat"></i>
+                            {{ gottyUpgrading ? '更新中...' : '更新 Gotty' }}
+                        </button>
                         <button class="btn-custom btn-add btn-sm-custom" @click="openTerminalModal(null)"
-                            :disabled="loading" style="margin-left: auto;">
+                            :disabled="loading" style="margin-left: 8px;">
                             <i class="bi bi-plus-lg"></i>
                             添加
                         </button>
@@ -3069,6 +3074,7 @@
 	                    const switchingDns = ref(false);
                     const terminalsLoaded = ref(false);
                     const terminals = ref([]);
+                    const gottyUpgrading = ref(false);
                     const showTerminalModal = ref(false);
                     const editingTerminalId = ref(null);
                     const newTerminal = ref({
@@ -4620,6 +4626,18 @@
                     } catch (e) { }
                 };
 
+                const upgradeGotty = async () => {
+                    showConfirm('更新 Gotty', '确定要更新 Gotty binary 到最新版本吗？这将停止所有正在运行的终端。', async () => {
+                        gottyUpgrading.value = true;
+                        try {
+                            await apiCall('/api/gotty/upgrade', 'POST', null, '更新 Gotty');
+                            showToast('Gotty 已更新，请手动重启终端', 'success');
+                            await fetchTerminals();
+                        } catch (e) { }
+                        gottyUpgrading.value = false;
+                    });
+                };
+
                 const confirmDeleteTerminal = (t) => {
                     if (!t) return;
                     showConfirm('删除终端', `确定删除 ${t.name || t.id}？`, async () => {
@@ -5366,7 +5384,7 @@
                             terminalCommandArgsText, terminalExtraArgsText, terminalRestartOnSave, terminalSaving,
                             terminalClearAuth, terminalUrl, canSubmitTerminal,
                             fetchTerminals, openTerminalModal, closeTerminalModal, submitTerminal,
-                            toggleTerminal, restartTerminal, confirmDeleteTerminal, openTerminal,
+                            toggleTerminal, restartTerminal, confirmDeleteTerminal, openTerminal, upgradeGotty, gottyUpgrading,
                             vncSessionsLoaded, vncSessions, showVncModal, editingVncId, newVncSession,
                             vncRestartOnSave, vncSaving, vncClearPassword, vncUrl, canSubmitVnc,
                             fetchVncSessions, openVncModal, closeVncModal, submitVnc,

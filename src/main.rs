@@ -6429,6 +6429,116 @@ async fn stop_terminal_internal(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// POST /api/gotty/upgrade - Download and apply gotty binary upgrade
+async fn upgrade_gotty() -> Json<ApiResponse<String>> {
+    // 1. Stop all running terminals first
+    println!("Stopping all terminals before gotty upgrade...");
+    {
+        let mut lock = GOTTY_PROCESSES.lock().await;
+        for id in lock.keys().cloned().collect::<Vec<_>>() {
+            drop(lock);
+            if let Err(e) = stop_terminal_internal(&id).await {
+                eprintln!("Failed to stop terminal {}: {}", id, e);
+            }
+            lock = GOTTY_PROCESSES.lock().await;
+        }
+    }
+
+    // 2. Download latest gotty binary
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build() {
+        Ok(c) => c,
+        Err(e) => return Json(ApiResponse::error(format!("Failed to create HTTP client: {}", e))),
+    };
+
+    let download_url = if cfg!(target_arch = "x86_64") {
+        "https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-arm64"
+    } else {
+        return Json(ApiResponse::error("Unsupported architecture"));
+    };
+
+    println!("Downloading gotty from {}", download_url);
+
+    match client.get(download_url).send().await {
+        Ok(response) => {
+            if !response.status().is_success() {
+                return Json(ApiResponse::error(format!(
+                    "Download failed with status: {}",
+                    response.status()
+                )));
+            }
+
+            match response.bytes().await {
+                Ok(bytes) => {
+                    let current_dir = match std::env::current_dir() {
+                        Ok(d) => d,
+                        Err(e) => return Json(ApiResponse::error(format!(
+                            "Failed to get current directory: {}",
+                            e
+                        ))),
+                    };
+                    let gotty_path = current_dir.join("gotty");
+
+                    // Backup current binary
+                    let backup_path = format!("{}.bak", gotty_path.display());
+                    if gotty_path.exists() {
+                        if let Err(e) = fs::copy(&gotty_path, &backup_path) {
+                            return Json(ApiResponse::error(format!(
+                                "Failed to backup current gotty: {}",
+                                e
+                            )));
+                        }
+                        println!("Backed up current gotty to {:?}", backup_path);
+                    }
+
+                    // Write new binary
+                    if let Err(e) = fs::write(&gotty_path, &bytes) {
+                        // Try to restore backup
+                        let _ = fs::copy(&backup_path, &gotty_path);
+                        return Json(ApiResponse::error(format!(
+                            "Failed to write new gotty binary: {}",
+                            e
+                        )));
+                    }
+
+                    // Set executable permissions
+                    if let Err(e) = fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755)) {
+                        // Try to restore backup
+                        let _ = fs::copy(&backup_path, &gotty_path);
+                        return Json(ApiResponse::error(format!(
+                            "Failed to set permissions: {}",
+                            e
+                        )));
+                    }
+
+                    println!("Gotty binary upgraded successfully to {:?}", gotty_path);
+
+                    // Clean up backup if successful
+                    if PathBuf::from(&backup_path).exists() {
+                        let _ = fs::remove_file(&backup_path);
+                    }
+
+                    Json(ApiResponse::success(
+                        "Gotty binary upgraded successfully. Please restart any running terminals.",
+                        "success".to_string(),
+                    ))
+                }
+                Err(e) => Json(ApiResponse::error(format!(
+                    "Failed to download gotty binary: {}",
+                    e
+                ))),
+            }
+        }
+        Err(e) => Json(ApiResponse::error(format!(
+            "Failed to download gotty: {}",
+            e
+        ))),
+    }
+}
+
 fn binary_exists(cmd: &str) -> bool {
     let Some(paths) = env::var_os("PATH") else {
         return false;
@@ -7566,6 +7676,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/terminals/{id}/start", post(start_terminal))
         .route("/api/terminals/{id}/stop", post(stop_terminal))
         .route("/api/terminals/{id}/restart", post(restart_terminal))
+        .route("/api/gotty/upgrade", post(upgrade_gotty))
         .route("/api/vnc-sessions", get(get_vnc_sessions))
         .route("/api/vnc-sessions", post(create_vnc_session))
         .route("/api/vnc-sessions/{id}", put(update_vnc_session).delete(delete_vnc_session))
