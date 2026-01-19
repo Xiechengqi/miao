@@ -7398,6 +7398,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 password: None,
                 terminal: None,
                 terminals: vec![],
+                vnc_sessions: vec![],
+                apps: vec![],
                 selections: HashMap::new(),
                 nodes: vec![],
                 dns_active: None,
