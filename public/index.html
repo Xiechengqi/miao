@@ -1910,8 +1910,9 @@
                                     </svg>
                                 </button>
                                 <button class="btn-icon" @click.stop="toggleSync(s)" :disabled="loading"
-                                    :title="s.enabled ? '停止' : '启动'" :aria-label="s.enabled ? '停止' : '启动'">
-                                    <i :class="['bi', s.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                    :title="(s.schedule && s.schedule.enabled) ? (s.enabled ? '停止' : '启动') : (s.status.state === 'running' ? '停止' : '启动')"
+                                    :aria-label="(s.schedule && s.schedule.enabled) ? (s.enabled ? '停止' : '启动') : (s.status.state === 'running' ? '停止' : '启动')">
+                                    <i :class="['bi', (s.schedule && s.schedule.enabled) ? (s.enabled ? 'bi-stop-circle' : 'bi-play-circle') : (s.status.state === 'running' ? 'bi-stop-circle' : 'bi-play-circle')]"></i>
                                 </button>
                                 <button class="btn-icon" @click.stop="openSyncModal(s)" :disabled="loading"
                                     title="编辑" aria-label="编辑">
@@ -3886,8 +3887,8 @@
                         verify: !!cfg.options?.verify,
                         compress: !!cfg.options?.compress,
                         bwlimit: cfg.options?.bwlimit || '',
-                        exclude_text: (cfg.options?.exclude || []).join('\\n'),
-                        include_text: (cfg.options?.include || []).join('\\n'),
+                        exclude_text: (cfg.options?.exclude || []).join('\n'),
+                        include_text: (cfg.options?.include || []).join('\n'),
                         parallel: cfg.options?.parallel || '',
                         watch: !!cfg.options?.watch,
                         extra_args_text: (cfg.options?.extra_args || []).join(' '),
@@ -3997,11 +3998,14 @@
 
                 const toggleSync = async (sync) => {
                     if (!sync || loading.value) return;
+                    const isScheduled = !!(sync.schedule && sync.schedule.enabled);
+                    const isRunning = sync.status?.state === 'running';
+                    const shouldStop = isScheduled ? sync.enabled : isRunning;
                     try {
-                        const action = sync.enabled ? 'stop' : 'start';
+                        const action = shouldStop ? 'stop' : 'start';
                         await apiFetch(`/api/syncs/${encodeURIComponent(sync.id)}/${action}`, { method: 'POST' });
                         await fetchSyncs();
-                        showToast(sync.enabled ? 'Sync 已停止' : 'Sync 已启动', 'success');
+                        showToast(shouldStop ? 'Sync 已停止' : 'Sync 已启动', 'success');
                     } catch (e) {
                         showToast(e.message || '操作失败', 'error');
                     }

@@ -5971,7 +5971,13 @@ fn normalize_sync_schedule(schedule: Option<SyncSchedule>) -> Result<Option<Sync
     if schedule.cron.trim().is_empty() {
         return Err("Cron expression is required".to_string());
     }
-    let _ = cron::Schedule::from_str(schedule.cron.trim())
+    let expr = schedule.cron.trim();
+    let cron_expr = if expr.split_whitespace().count() == 5 {
+        format!("0 {}", expr)
+    } else {
+        expr.to_string()
+    };
+    let _ = cron::Schedule::from_str(&cron_expr)
         .map_err(|e| format!("Invalid cron expression: {}", e))?;
     schedule.cron = schedule.cron.trim().to_string();
     Ok(Some(schedule))

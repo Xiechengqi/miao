@@ -258,7 +258,13 @@ async fn run_schedule_loop(
     };
 
     let timezone = parse_timezone(&schedule_cfg).unwrap_or(chrono_tz::Asia::Shanghai);
-    let schedule = match Schedule::from_str(&schedule_cfg.cron) {
+    let expr = schedule_cfg.cron.trim();
+    let cron_expr = if expr.split_whitespace().count() == 5 {
+        format!("0 {}", expr)
+    } else {
+        expr.to_string()
+    };
+    let schedule = match Schedule::from_str(&cron_expr) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Invalid cron schedule for {}: {}", cfg.id, e);
