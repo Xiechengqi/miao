@@ -528,6 +528,22 @@ async fn prepare_ssh_runtime(cfg: &SyncConfig, local_path: &str) -> Result<SyncS
     if !password.is_empty() {
         config_lines.push("  PreferredAuthentications password".to_string());
         config_lines.push("  PubkeyAuthentication no".to_string());
+    } else {
+        let key_paths = default_ssh_key_paths();
+        if key_paths.is_empty() {
+            return Err("password is empty and no default ssh keys found".to_string());
+        }
+        config_lines.push("  IdentitiesOnly yes".to_string());
+        let mut added = 0;
+        for path in key_paths {
+            if path.exists() {
+                config_lines.push(format!("  IdentityFile {}", path.display()));
+                added += 1;
+            }
+        }
+        if added == 0 {
+            return Err("password is empty and no default ssh keys found".to_string());
+        }
     }
 
     config_lines.push("  StrictHostKeyChecking no".to_string());
@@ -568,6 +584,18 @@ async fn cleanup_ssh_home(dir: &PathBuf) -> Result<(), String> {
             .map_err(|e| format!("Remove temp ssh dir failed: {}", e))?;
     }
     Ok(())
+}
+
+fn default_ssh_key_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let base = PathBuf::from(home).join(".ssh");
+    vec![
+        base.join("id_ed25519"),
+        base.join("id_rsa"),
+        base.join("id_ecdsa"),
+    ]
 }
 
 fn escape_shell_arg(value: &str) -> String {
