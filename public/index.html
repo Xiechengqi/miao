@@ -1853,6 +1853,87 @@
                     </div>
                 </div>
 
+                <!-- Sync - 全宽 -->
+                <div class="glass-card layout-full">
+                    <div class="card-header-custom">
+                        <i class="bi bi-arrow-repeat"></i>
+                        <span>Sync</span>
+                        <button class="btn-custom btn-add btn-sm-custom" @click="openSyncModal(null)"
+                            :disabled="loading" style="margin-left: auto;">
+                            <i class="bi bi-plus-lg"></i>
+                            添加
+                        </button>
+                    </div>
+
+                    <div v-if="!syncsLoaded" class="empty-state">
+                        <i class="bi bi-hourglass-split" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        正在加载...
+                    </div>
+                    <div v-else-if="syncs.length === 0" class="empty-state">
+                        <i class="bi bi-arrow-repeat" style="font-size: 2rem; display: block; margin-bottom: 0.5rem;"></i>
+                        暂无 Sync 配置
+                    </div>
+                    <div v-else>
+                        <div v-for="s in syncs" :key="s.id" class="list-item">
+                            <div style="flex: 1;">
+                                <div class="list-item-text" style="white-space: normal;">
+                                    <strong>{{ s.name || s.id }}</strong>
+                                    <span class="node-type-badge"
+                                        :class="s.status.state === 'running' ? 'dns-badge-ok' : (s.status.state === 'error' ? 'dns-badge-bad' : 'dns-badge-unknown')">
+                                        {{ s.status.state }}
+                                    </span>
+                                    <span v-if="s.schedule && s.schedule.enabled" class="node-type-badge dns-badge-cooldown">
+                                        cron
+                                    </span>
+                                </div>
+                                <div class="node-info">
+                                    本地: {{ formatSyncLocalPaths(s.local_paths) }}
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    远程: {{ s.ssh.username }}@{{ s.ssh.host }}:{{ s.ssh.port }}
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;">
+                                    远程路径: {{ s.remote_path || '跟随本地' }}
+                                </div>
+                                <div class="node-info" style="opacity: 0.85;" v-if="s.schedule && s.schedule.cron">
+                                    定时: {{ s.schedule.cron }} ({{ s.schedule.timezone || 'Asia/Shanghai' }})
+                                </div>
+                                <div class="node-info" v-if="s.status.last_error" style="color: rgba(255, 110, 110, 0.95);">
+                                    {{ s.status.last_error.message }}
+                                </div>
+                            </div>
+                            <div class="node-actions">
+                                <button class="btn-icon" @click.stop="testSync(s)" :disabled="loading"
+                                    title="测试" aria-label="测试">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 12h4l3 8 4-16 3 8h4" />
+                                    </svg>
+                                </button>
+                                <button class="btn-icon" @click.stop="toggleSync(s)" :disabled="loading"
+                                    :title="s.enabled ? '停止' : '启动'" :aria-label="s.enabled ? '停止' : '启动'">
+                                    <i :class="['bi', s.enabled ? 'bi-stop-circle' : 'bi-play-circle']"></i>
+                                </button>
+                                <button class="btn-icon" @click.stop="openSyncModal(s)" :disabled="loading"
+                                    title="编辑" aria-label="编辑">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M17 3a2.828 2.828 0 1 1 4 4L7 21H3v-4L17 3z" />
+                                    </svg>
+                                </button>
+                                <button class="btn-icon btn-icon-danger" @click.stop="confirmDeleteSync(s)" :disabled="loading"
+                                    title="删除" aria-label="删除">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 6h18" />
+                                        <path d="M8 6V4h8v2" />
+                                        <path d="M19 6l-1 14H6L5 6" />
+                                        <path d="M10 11v6" />
+                                        <path d="M14 11v6" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Web Terminal - 全宽 -->
                 <div class="glass-card layout-full">
                     <div class="card-header-custom">
@@ -2365,6 +2446,156 @@
                     </div>
                 </div>
 
+                <!-- Sync 模态框 -->
+                <div class="modal-overlay" v-if="showSyncModal" v-cloak @click.self="closeSyncModal">
+                    <div class="modal-content" style="max-width: 860px;">
+                        <div class="modal-title">
+                            <i class="bi bi-arrow-repeat"></i>
+                            {{ editingSyncId ? '编辑 Sync' : '添加 Sync' }}
+                            <button style="margin-left: auto; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer;" @click="closeSyncModal">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">名称（可选）</label>
+                                <input type="text" class="form-input" v-model="newSync.name" placeholder="例如: 备份主目录">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">启用</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newSync.enabled">
+                                    <span style="opacity: 0.9;">{{ newSync.enabled ? '已启用' : '未启用' }}</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label">本地路径（多行）</label>
+                                <textarea class="form-input" v-model="syncLocalPathsText" rows="3" placeholder="/data&#10;/var/log/app.log"></textarea>
+                                <div style="opacity: 0.7; font-size: 0.8rem; margin-top: 0.35rem;">
+                                    {{ syncLocalPathsCount }} 项 · 多路径时远程路径固定为本地路径
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">远程路径（可选）</label>
+                                <input type="text" class="form-input" v-model="newSync.remote_path"
+                                    :disabled="syncLocalPathsCount > 1" placeholder="留空则与本地相同">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">SSH Host</label>
+                                <input type="text" class="form-input" v-model="newSync.ssh_host" placeholder="example.com">
+                            </div>
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">端口</label>
+                                <input type="number" class="form-input" v-model.number="newSync.ssh_port" min="1" max="65535">
+                            </div>
+                            <div class="form-group" style="max-width: 200px;">
+                                <label class="form-label">用户名</label>
+                                <input type="text" class="form-input" v-model="newSync.username" placeholder="root">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">密码（可选）</label>
+                                <input type="password" class="form-input" v-model="newSync.password"
+                                    :placeholder="editingSyncId ? '留空会改为使用 ~/.ssh 密钥' : '留空会改为使用 ~/.ssh 密钥'">
+                            </div>
+                        </div>
+
+                        <div style="opacity: 0.75; font-size: 0.85rem; margin-top: -0.25rem;">
+                            远端必须安装 sy（包含 sy-remote），不校验主机指纹；密码留空时会使用本机 ~/.ssh 下的密钥。
+                        </div>
+
+                        <div class="form-row" style="margin-top: 0.75rem;">
+                            <div class="form-group">
+                                <label class="form-label">同步选项</label>
+                                <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
+                                    <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.4rem;">
+                                        <input type="checkbox" v-model="newSync.delete">
+                                        删除远端多余文件
+                                    </label>
+                                    <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.4rem;">
+                                        <input type="checkbox" v-model="newSync.verify">
+                                        写后校验
+                                    </label>
+                                    <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.4rem;">
+                                        <input type="checkbox" v-model="newSync.compress">
+                                        压缩传输
+                                    </label>
+                                    <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.4rem;">
+                                        <input type="checkbox" v-model="newSync.watch">
+                                        监听模式
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">带宽限制</label>
+                                <input type="text" class="form-input" v-model="newSync.bwlimit" placeholder="例如: 1MB">
+                            </div>
+                            <div class="form-group" style="max-width: 200px;">
+                                <label class="form-label">并行数</label>
+                                <input type="number" class="form-input" v-model.number="newSync.parallel" min="1">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">排除规则（多行）</label>
+                                <textarea class="form-input" v-model="newSync.exclude_text" rows="3" placeholder="*.log&#10;node_modules/"></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">包含规则（多行）</label>
+                                <textarea class="form-input" v-model="newSync.include_text" rows="3" placeholder="important.txt"></textarea>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">额外参数</label>
+                                <input type="text" class="form-input" v-model="newSync.extra_args_text" placeholder="--dry-run 不需要配置">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="max-width: 160px;">
+                                <label class="form-label">定时执行</label>
+                                <label class="log-auto-scroll" style="display: flex; align-items: center; gap: 0.5rem; height: 42px;">
+                                    <input type="checkbox" v-model="newSync.schedule_enabled">
+                                    <span style="opacity: 0.9;">{{ newSync.schedule_enabled ? '已启用' : '未启用' }}</span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Cron 表达式</label>
+                                <input type="text" class="form-input" v-model="newSync.schedule_cron" placeholder="0 2 * * *">
+                            </div>
+                            <div class="form-group" style="max-width: 200px;">
+                                <label class="form-label">时区</label>
+                                <input type="text" class="form-input" v-model="newSync.schedule_timezone" placeholder="Asia/Shanghai">
+                            </div>
+                        </div>
+
+                        <div class="node-actions" style="justify-content: flex-end;">
+                            <button class="btn-custom btn-add" @click="submitSync" :disabled="syncSaving || !canSubmitSync">
+                                <span v-if="syncSaving" class="spinner" style="width:12px;height:12px;"></span>
+                                <span v-else>保存配置</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Web Terminal 模态框 -->
                 <div class="modal-overlay" v-if="showTerminalModal" v-cloak @click.self="closeTerminalModal">
                     <div class="modal-content" style="max-width: 720px;">
@@ -2712,7 +2943,7 @@
                             </div>
                             <div class="form-group" v-if="newTunnel.auth_type === 'password'">
                                 <label class="form-label">密码</label>
-                                <input type="password" class="form-input" v-model="newTunnel.password" :placeholder="editingTunnelId ? '留空保持不变' : '密码'">
+                                <input type="text" class="form-input" v-model="newTunnel.password" placeholder="留空使用 ~/.ssh 密钥">
                             </div>
                             <div class="form-group" v-else>
                                 <label class="form-label">私钥路径</label>
@@ -2845,8 +3076,8 @@
                             </div>
                             <div class="form-group" v-if="newFullSet.auth_type === 'password'">
                                 <label class="form-label">密码</label>
-                                <input type="password" class="form-input" v-model="newFullSet.password"
-                                    :placeholder="editingFullSetId ? '留空保持不变' : '密码'">
+                                <input type="text" class="form-input" v-model="newFullSet.password"
+                                    placeholder="留空使用 ~/.ssh 密钥">
                             </div>
                             <div class="form-group" v-else>
                                 <label class="form-label">私钥路径</label>
@@ -3157,7 +3388,7 @@
                         username: 'root',
                         auth_type: 'password',
                         password: '',
-                        private_key_path: '',
+                        password: '',
                         private_key_passphrase: '',
                         strict_host_key_checking: true,
                         host_key_fingerprint: '',
@@ -3176,7 +3407,7 @@
                         username: 'root',
                         auth_type: 'password',
                         password: '',
-                        private_key_path: '',
+                        password: '',
                         private_key_passphrase: '',
                         clear_private_key_passphrase: false,
                         strict_host_key_checking: true,
@@ -3186,7 +3417,34 @@
                         backoff_base_ms: 1000,
                         backoff_max_ms: 30000,
                     });
-		                const subDir = ref('');
+                    const syncsLoaded = ref(false);
+                    const syncs = ref([]);
+                    const showSyncModal = ref(false);
+                    const editingSyncId = ref(null);
+                    const syncLocalPathsText = ref('');
+                    const newSync = ref({
+                        name: '',
+                        enabled: true,
+                        remote_path: '',
+                        ssh_host: '',
+                        ssh_port: 22,
+                        username: 'root',
+                        password: '',
+                        delete: false,
+                        verify: false,
+                        compress: false,
+                        bwlimit: '',
+                        exclude_text: '',
+                        include_text: '',
+                        parallel: '',
+                        watch: false,
+                        extra_args_text: '',
+                        schedule_enabled: false,
+                        schedule_cron: '',
+                        schedule_timezone: 'Asia/Shanghai',
+                    });
+                    const syncSaving = ref(false);
+                    const subDir = ref('');
 		                const subSource = ref(null);
 		                const subDirError = ref('');
 		                const subFiles = ref([]);
@@ -3379,8 +3637,7 @@
                         && newTunnel.value.auth_type !== editingTunnelOriginalAuthType.value;
 
                     if (newTunnel.value.auth_type === 'password') {
-                        if (!editingTunnelId.value) return !!newTunnel.value.password;
-                        return authTypeChanged ? !!newTunnel.value.password : true;
+                        return true;
                     }
                     if (!editingTunnelId.value) return !!newTunnel.value.private_key_path;
                     return authTypeChanged ? !!newTunnel.value.private_key_path : true;
@@ -3416,11 +3673,21 @@
                         && newFullSet.value.auth_type !== editingFullSetOriginalAuthType.value;
 
                     if (newFullSet.value.auth_type === 'password') {
-                        if (!editingFullSetId.value) return !!newFullSet.value.password;
-                        return authTypeChanged ? !!newFullSet.value.password : true;
+                        return true;
                     }
                     if (!editingFullSetId.value) return !!newFullSet.value.private_key_path;
                     return authTypeChanged ? !!newFullSet.value.private_key_path : true;
+                });
+
+                const syncLocalPaths = computed(() => splitLineText(syncLocalPathsText.value));
+                const syncLocalPathsCount = computed(() => syncLocalPaths.value.length);
+
+                const canSubmitSync = computed(() => {
+                    if (!syncLocalPathsCount.value) return false;
+                    if (!newSync.value.ssh_host || !newSync.value.username) return false;
+                    if (newSync.value.schedule_enabled && !(newSync.value.schedule_cron || '').trim()) return false;
+
+                    return true;
                 });
 
                 const terminalUrl = (terminal) => {
@@ -3556,6 +3823,14 @@
                         .filter(v => v.length > 0);
                 };
 
+                const splitLineText = (text) => {
+                    if (!text) return [];
+                    return text
+                        .split(/[\n,]+/)
+                        .map(v => v.trim())
+                        .filter(v => v.length > 0);
+                };
+
                 const applyTerminalForm = (cfg) => {
                     if (!cfg) return;
                     newTerminal.value = {
@@ -3571,6 +3846,190 @@
                     terminalExtraArgsText.value = (cfg.extra_args || ['-w', '--enable-idle-alert']).join(' ');
                     terminalRestartOnSave.value = true;
                     terminalClearAuth.value = false;
+                };
+
+                const resetSyncForm = () => {
+                    newSync.value = {
+                        name: '',
+                        enabled: true,
+                        remote_path: '',
+                        ssh_host: '',
+                        ssh_port: 22,
+                        username: 'root',
+                        private_key_path: '',
+                        delete: false,
+                        verify: false,
+                        compress: false,
+                        bwlimit: '',
+                        exclude_text: '',
+                        include_text: '',
+                        parallel: '',
+                        watch: false,
+                        extra_args_text: '',
+                        schedule_enabled: false,
+                        schedule_cron: '',
+                        schedule_timezone: 'Asia/Shanghai',
+                    };
+                    syncLocalPathsText.value = '';
+                };
+
+                const applySyncForm = (cfg) => {
+                    if (!cfg) return;
+                    newSync.value = {
+                        name: cfg.name || '',
+                        enabled: cfg.enabled !== undefined ? !!cfg.enabled : true,
+                        remote_path: cfg.remote_path || '',
+                        ssh_host: cfg.ssh?.host || '',
+                        ssh_port: cfg.ssh?.port || 22,
+                        username: cfg.ssh?.username || 'root',
+                        password: '',
+                        delete: !!cfg.options?.delete,
+                        verify: !!cfg.options?.verify,
+                        compress: !!cfg.options?.compress,
+                        bwlimit: cfg.options?.bwlimit || '',
+                        exclude_text: (cfg.options?.exclude || []).join('\\n'),
+                        include_text: (cfg.options?.include || []).join('\\n'),
+                        parallel: cfg.options?.parallel || '',
+                        watch: !!cfg.options?.watch,
+                        extra_args_text: (cfg.options?.extra_args || []).join(' '),
+                        schedule_enabled: cfg.schedule?.enabled || false,
+                        schedule_cron: cfg.schedule?.cron || '',
+                        schedule_timezone: cfg.schedule?.timezone || 'Asia/Shanghai',
+                    };
+                    syncLocalPathsText.value = (cfg.local_paths || []).map(p => p.path).join('\\n');
+                };
+
+                const openSyncModal = (sync) => {
+                    editingSyncId.value = sync ? sync.id : null;
+                    if (sync) {
+                        applySyncForm(sync);
+                    } else {
+                        resetSyncForm();
+                    }
+                    showSyncModal.value = true;
+                };
+
+                const closeSyncModal = () => {
+                    showSyncModal.value = false;
+                    editingSyncId.value = null;
+                    resetSyncForm();
+                };
+
+                const formatSyncLocalPaths = (paths) => {
+                    if (!paths || !paths.length) return '-';
+                    const labels = { file: '文件', dir: '目录', missing: '缺失' };
+                    return paths.map(p => {
+                        const kind = labels[p.kind] || p.kind || '';
+                        return kind ? `${p.path} (${kind})` : p.path;
+                    }).join(', ');
+                };
+
+                const fetchSyncs = async () => {
+                    try {
+                        const data = await apiFetch('/api/syncs');
+                        syncs.value = data.data?.items || [];
+                        syncsLoaded.value = true;
+                    } catch (e) {
+                        console.error('获取 Sync 配置失败:', e);
+                        syncsLoaded.value = true;
+                    }
+                };
+
+                const submitSync = async () => {
+                    if (syncSaving.value) return;
+                    syncSaving.value = true;
+                    try {
+                        const localPaths = syncLocalPaths.value;
+                        const remotePath = syncLocalPathsCount.value > 1
+                            ? null
+                            : ((newSync.value.remote_path || '').trim() || null);
+                        const cron = (newSync.value.schedule_cron || '').trim();
+                        const timezone = (newSync.value.schedule_timezone || '').trim() || 'Asia/Shanghai';
+                        const schedule = cron
+                            ? { enabled: !!newSync.value.schedule_enabled, cron, timezone }
+                            : null;
+
+                        const payload = {
+                            name: (newSync.value.name || '').trim() || null,
+                            enabled: !!newSync.value.enabled,
+                            local_paths: localPaths,
+                            remote_path: remotePath,
+                            ssh_host: (newSync.value.ssh_host || '').trim(),
+                            ssh_port: Number(newSync.value.ssh_port) || 22,
+                            username: (newSync.value.username || '').trim(),
+                            auth: { type: 'password', password: (newSync.value.password || '').trim() },
+                            options: {
+                                delete: !!newSync.value.delete,
+                                verify: !!newSync.value.verify,
+                                compress: !!newSync.value.compress,
+                                bwlimit: (newSync.value.bwlimit || '').trim() || null,
+                                exclude: splitLineText(newSync.value.exclude_text || ''),
+                                include: splitLineText(newSync.value.include_text || ''),
+                                parallel: newSync.value.parallel ? Number(newSync.value.parallel) : null,
+                                watch: !!newSync.value.watch,
+                                extra_args: splitArgsText(newSync.value.extra_args_text || ''),
+                            },
+                            schedule,
+                        };
+
+                        if (editingSyncId.value) {
+                            await apiFetch(`/api/syncs/${encodeURIComponent(editingSyncId.value)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            showToast('Sync 配置已更新', 'success');
+                        } else {
+                            await apiFetch('/api/syncs', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            showToast('Sync 配置已添加', 'success');
+                        }
+                        closeSyncModal();
+                        await fetchSyncs();
+                    } catch (e) {
+                        showToast(e.message || '保存 Sync 失败', 'error');
+                    } finally {
+                        syncSaving.value = false;
+                    }
+                };
+
+                const toggleSync = async (sync) => {
+                    if (!sync || loading.value) return;
+                    try {
+                        const action = sync.enabled ? 'stop' : 'start';
+                        await apiFetch(`/api/syncs/${encodeURIComponent(sync.id)}/${action}`, { method: 'POST' });
+                        await fetchSyncs();
+                        showToast(sync.enabled ? 'Sync 已停止' : 'Sync 已启动', 'success');
+                    } catch (e) {
+                        showToast(e.message || '操作失败', 'error');
+                    }
+                };
+
+                const testSync = async (sync) => {
+                    if (!sync || loading.value) return;
+                    try {
+                        await apiFetch(`/api/syncs/${encodeURIComponent(sync.id)}/test`, { method: 'POST' });
+                        showToast('Sync dry-run 已启动', 'success');
+                        await fetchSyncs();
+                    } catch (e) {
+                        showToast(e.message || '测试失败', 'error');
+                    }
+                };
+
+                const confirmDeleteSync = (sync) => {
+                    if (!sync) return;
+                    showConfirm('删除 Sync', `确定要删除 ${sync.name || sync.id} 吗？`, async () => {
+                        try {
+                            await apiFetch(`/api/syncs/${encodeURIComponent(sync.id)}`, { method: 'DELETE' });
+                            await fetchSyncs();
+                            showToast('Sync 已删除', 'success');
+                        } catch (e) {
+                            showToast(e.message || '删除失败', 'error');
+                        }
+                    });
                 };
 
 	                const fetchSetupStatus = async () => {
@@ -3842,7 +4301,7 @@
                             ssh_port: t?.ssh_port || 22,
                             username: t?.username || 'root',
                             auth_type: t?.auth?.type || 'password',
-                            password: '',
+                            password: t?.auth?.password || '',
                             private_key_path: (t?.auth?.type === 'private_key_path' ? (t?.auth?.path || '') : ''),
                             private_key_passphrase: '',
                             clear_private_key_passphrase: false,
@@ -3899,7 +4358,7 @@
                                 ssh_port: s.ssh_port || 22,
                                 username: s.username || 'root',
                                 auth_type: s.auth?.type || 'password',
-                                password: '',
+                                password: s.auth?.password || '',
                                 private_key_path: (s.auth?.type === 'private_key_path' ? (s.auth?.path || '') : ''),
                                 private_key_passphrase: '',
                                 strict_host_key_checking: s.strict_host_key_checking !== undefined ? !!s.strict_host_key_checking : true,
@@ -3946,9 +4405,7 @@
                             const auth = newFullSet.value.auth_type === 'password'
                                 ? {
                                     type: 'password',
-                                    password: (editingFullSetId.value && !authTypeChanged)
-                                        ? (newFullSet.value.password || '')
-                                        : (newFullSet.value.password || ''),
+                                    password: (newFullSet.value.password || ''),
                                 }
                                 : {
                                     type: 'private_key_path',
@@ -4107,8 +4564,8 @@
                         const auth = newTunnel.value.auth_type === 'password'
                             ? {
                                 type: 'password',
-                                // If editing and auth type unchanged, empty string means "keep existing".
-                                password: (editingTunnelId.value && !authTypeChanged) ? (newTunnel.value.password || '') : (newTunnel.value.password || ''),
+                                // Empty string means "use local ~/.ssh keys".
+                                password: (newTunnel.value.password || ''),
                             }
                             : {
                                 type: 'private_key_path',
@@ -5331,6 +5788,7 @@
                     await fetchAppTemplates();
                     await fetchDnsStatus();
                     await fetchTcpTunnels();
+                    await fetchSyncs();
 	                    await fetchSubFiles();
 	                    await fetchNodes();
 	                    await fetchProxies();
@@ -5347,6 +5805,7 @@
                             await fetchApps();
                             await fetchDnsStatus();
                             await fetchTcpTunnels();
+                            await fetchSyncs();
 	                        if (status.value.running) {
 	                            await fetchProxies();
 	                            await fetchProxyStatus();
@@ -5402,7 +5861,10 @@
                             showFullSetDetailModal, fullSetDetailLoading, fullSetDetailItems, fullSetDetailSet, fullSetDetailConfig,
                             openFullSetModal, submitFullSet, openFullSetDetails, closeFullSetDetail,
                             handleTcpItemClick, confirmDeleteFullSet, copyFullSet, testFullSet,
-		                    reloadSubFiles,
+                            syncsLoaded, syncs, showSyncModal, editingSyncId, newSync, syncLocalPathsText,
+                            syncLocalPathsCount, syncSaving, canSubmitSync, formatSyncLocalPaths,
+                            fetchSyncs, openSyncModal, closeSyncModal, submitSync, toggleSync, testSync, confirmDeleteSync,
+	                    reloadSubFiles,
 	                    newNode, canAddNode, canTestNode, canSubmitNode, showNodeModal, nodeType, setNodeType,
                         portTouched, openNodeModal,
                         editingTag,

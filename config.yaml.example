@@ -54,6 +54,36 @@
 #     env:
 #       CHROMIUM_USER_DATA_DIR: "/app/chromium"
 
+# Sync (sy) (optional)
+# Note: Remote host must install sy (sy-remote). Only SSH password auth is supported.
+# Host key checking is disabled for sync.
+# syncs:
+#   - id: "sync-1"
+#     name: "Backup data"
+#     enabled: false
+#     local_paths:
+#       - path: "/data"
+#         kind: "dir"
+#     # remote_path: "/backup/data"  # only when local_paths has single item
+#     ssh:
+#       host: "example.com"
+#       port: 22
+#       username: "root"
+#       auth:
+#         type: "password"
+#         password: "your-password"  # leave empty to use local ~/.ssh keys
+#     options:
+#       delete: false
+#       verify: false
+#       compress: false
+#       bwlimit: "1MB"
+#       exclude:
+#         - "*.log"
+#     schedule:
+#       enabled: true
+#       cron: "0 2 * * *"
+#       timezone: "Asia/Shanghai"
+
 # Remembered node selections (optional)
 # Key is selector group name, value is selected node name.
 # selections:
@@ -111,7 +141,8 @@ nodes:
 # - remote_port must be explicit (no auto allocation). Port conflict will be marked as error.
 # - Default remote_bind_addr is 127.0.0.1 (remote localhost only).
 # - To expose publicly (0.0.0.0), you must set allow_public_bind: true and configure sshd GatewayPorts.
-# - On update from the Web UI, leaving password/passphrase blank keeps the existing value.
+# - SSH password empty uses local ~/.ssh keys.
+# - On update from the Web UI, leaving private key passphrase blank keeps the existing value.
 #
 # tcp_tunnels:
 #   - id: "t1"
@@ -127,7 +158,7 @@ nodes:
 #     username: "root"
 #     auth:
 #       type: "password"
-#       password: "your-password"
+#       password: "your-password"  # leave empty to use local ~/.ssh keys
 #       # or:
 #       # type: "private_key_path"
 #       # path: "/root/.ssh/id_ed25519"
@@ -155,7 +186,7 @@ nodes:
 #     username: "root"
 #     auth:
 #       type: "password"
-#       password: "your-password"
+#       password: "your-password"  # leave empty to use local ~/.ssh keys
 #     strict_host_key_checking: true
 #     host_key_fingerprint: "SHA256:xxxx"
 #     exclude_ports: [443, 6161]

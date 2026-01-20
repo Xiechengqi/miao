@@ -14,6 +14,7 @@
 - **Web Terminal** - 内置 gotty 提供浏览器终端（可选）
 - **KasmVNC 桌面访问** - 通过 VNC Web 端访问桌面/应用（可选）
 - **桌面应用管理** - Chromium/CCSwitch 等应用可在 Web 面板启动并绑定到 VNC DISPLAY
+- **Sync 同步** - 基于 sy 的本地文件/目录同步到 SSH 远端（支持定时 cron）
 - **节点候选池 + 自动切换** - 支持 Ctrl/⌘ 多选候选节点，后端定时健康检查失败自动切换
 - **自动更新** - 支持从 GitHub 一键更新到最新版本
 - **OpenWrt 支持** - 自动安装所需内核模块
@@ -82,6 +83,7 @@ sudo ./miao --sub ./sub
 | `terminals` | Web Terminal (gotty) 配置列表 | - |
 | `vnc_sessions` | KasmVNC 会话配置列表 | - |
 | `apps` | 桌面应用配置列表 | - |
+| `syncs` | sy 文件同步配置列表 | - |
 
 ### Web Terminal (gotty)
 
@@ -96,6 +98,18 @@ sudo ./miao --sub ./sub
 ### Desktop Apps
 
 桌面应用支持绑定到某个 VNC 会话（自动使用该 DISPLAY），或手动指定 DISPLAY。应用模板预设可快速生成 Chromium/CCSwitch 等配置，后续可在面板中编辑参数与环境变量。
+
+### Sync (sy)
+
+Sync 功能使用 sy 在本地和 SSH 远端同步文件/目录，默认只新增或更新（不删除远端多余文件）。
+
+注意事项：
+
+- 远端必须预先安装 sy（包含 sy-remote）
+- 仅支持 SSH 用户名/密码认证（密码留空时使用本机 ~/.ssh 下的密钥）
+- 多路径同步时远端路径固定为本地路径
+- 定时执行使用 cron 表达式，默认时区为 `Asia/Shanghai`
+- 同步时不校验 SSH 主机指纹
 
 ## DNS 说明（DoH 优先 + 自动切换）
 

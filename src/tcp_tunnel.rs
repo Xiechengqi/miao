@@ -1,6 +1,7 @@
 use crate::TcpTunnelConfig;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch, Mutex};
 use tokio::time::{sleep, Duration};
@@ -287,6 +288,124 @@ fn validate(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
     Ok(())
 }
 
+#[cfg(feature = "tcp_tunnel")]
+fn default_ssh_key_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let base = PathBuf::from(home).join(".ssh");
+    vec![
+        base.join("id_ed25519"),
+        base.join("id_rsa"),
+        base.join("id_ecdsa"),
+    ]
+}
+
+#[cfg(feature = "tcp_tunnel")]
+async fn authenticate_session(
+    session: &mut russh::client::Handle<TunnelClientHandler>,
+    cfg: &TcpTunnelConfig,
+    connect_timeout: Duration,
+) -> Result<russh::client::AuthResult, (String, String)> {
+    use crate::TcpTunnelAuth;
+    use russh::keys::key::PrivateKeyWithHashAlg;
+    use russh::keys::load_secret_key;
+
+    match &cfg.auth {
+        TcpTunnelAuth::Password { password } => {
+            if !password.is_empty() {
+                return tokio::time::timeout(
+                    connect_timeout,
+                    session.authenticate_password(cfg.username.clone(), password.clone()),
+                )
+                .await
+                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")));
+            }
+
+            let mut last_err: Option<String> = None;
+            let key_paths = default_ssh_key_paths();
+            if key_paths.is_empty() {
+                return Err((
+                    "AUTH_MISSING".to_string(),
+                    "password is empty and no default ssh keys found".to_string(),
+                ));
+            }
+
+            for path in key_paths {
+                if !path.exists() {
+                    continue;
+                }
+                let key = match load_secret_key(&path, None) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        last_err = Some(format!("{e:?}"));
+                        continue;
+                    }
+                };
+                let rsa_hash = match tokio::time::timeout(
+                    connect_timeout,
+                    session.best_supported_rsa_hash(),
+                )
+                .await
+                {
+                    Ok(Ok(v)) => v.flatten(),
+                    Ok(Err(e)) => {
+                        last_err = Some(format!("{e:?}"));
+                        continue;
+                    }
+                    Err(_) => {
+                        return Err((
+                            "AUTH_TIMEOUT".to_string(),
+                            "authentication timeout".to_string(),
+                        ));
+                    }
+                };
+
+                let auth = tokio::time::timeout(
+                    connect_timeout,
+                    session.authenticate_publickey(
+                        cfg.username.clone(),
+                        PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
+                    ),
+                )
+                .await
+                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
+
+                if auth.success() {
+                    return Ok(auth);
+                }
+                last_err = Some("authentication failed".to_string());
+            }
+
+            Err((
+                "AUTH_FAILED".to_string(),
+                last_err.unwrap_or_else(|| "authentication failed".to_string()),
+            ))
+        }
+        TcpTunnelAuth::PrivateKeyPath { path, passphrase } => {
+            let key = load_secret_key(path, passphrase.as_deref())
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
+            let rsa_hash = tokio::time::timeout(connect_timeout, session.best_supported_rsa_hash())
+                .await
+                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?
+                .flatten();
+            tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_publickey(
+                    cfg.username.clone(),
+                    PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
+                ),
+            )
+            .await
+            .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+            .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))
+        }
+    }
+}
+
 async fn set_error(
     status: &Arc<RwLock<TunnelRuntimeStatus>>,
     code: &str,
@@ -380,10 +499,7 @@ async fn connect_and_forward(
     status: &Arc<RwLock<TunnelRuntimeStatus>>,
     stop_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), (String, String, bool)> {
-    use crate::TcpTunnelAuth;
     use russh::client;
-    use russh::keys::key::PrivateKeyWithHashAlg;
-    use russh::keys::load_secret_key;
     use russh::Disconnect;
     use std::borrow::Cow;
 
@@ -412,34 +528,9 @@ async fn connect_and_forward(
         .map_err(|_| ("SSH_CONNECT_TIMEOUT".to_string(), "connect timeout".to_string(), true))?
         .map_err(|e| ("SSH_CONNECT_FAILED".to_string(), format!("{e:?}"), true))?;
 
-    let auth_ok = match &cfg.auth {
-        TcpTunnelAuth::Password { password } => tokio::time::timeout(
-            connect_timeout,
-            session.authenticate_password(cfg.username.clone(), password.clone()),
-        )
+    let auth_ok = authenticate_session(&mut session, cfg, connect_timeout)
         .await
-        .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string(), false))?
-        .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}"), false))?,
-        TcpTunnelAuth::PrivateKeyPath { path, passphrase } => {
-            let key = load_secret_key(path, passphrase.as_deref())
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}"), false))?;
-            let rsa_hash = tokio::time::timeout(connect_timeout, session.best_supported_rsa_hash())
-                .await
-                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string(), false))?
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}"), false))?
-                .flatten();
-            tokio::time::timeout(
-                connect_timeout,
-                session.authenticate_publickey(
-                    cfg.username.clone(),
-                    PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
-                ),
-            )
-            .await
-            .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string(), false))?
-            .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}"), false))?
-        }
-    };
+        .map_err(|(c, m)| (c, m, false))?;
 
     if !auth_ok.success() {
         return Err((
@@ -626,10 +717,7 @@ fn compute_openssh_sha256_fingerprint(
 
 #[cfg(feature = "tcp_tunnel")]
 async fn test_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
-    use crate::TcpTunnelAuth;
     use russh::client;
-    use russh::keys::key::PrivateKeyWithHashAlg;
-    use russh::keys::load_secret_key;
     use std::borrow::Cow;
 
     validate(cfg)?;
@@ -658,34 +746,7 @@ async fn test_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
         .map_err(|_| ("SSH_CONNECT_TIMEOUT".to_string(), "connect timeout".to_string()))?
         .map_err(|e| ("SSH_CONNECT_FAILED".to_string(), format!("{e:?}")))?;
 
-    let auth_ok = match &cfg.auth {
-        TcpTunnelAuth::Password { password } => tokio::time::timeout(
-            connect_timeout,
-            session.authenticate_password(cfg.username.clone(), password.clone()),
-        )
-        .await
-        .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-        .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?,
-        TcpTunnelAuth::PrivateKeyPath { path, passphrase } => {
-            let key = load_secret_key(path, passphrase.as_deref())
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
-            let rsa_hash = tokio::time::timeout(connect_timeout, session.best_supported_rsa_hash())
-                .await
-                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))? 
-                .flatten();
-            tokio::time::timeout(
-                connect_timeout,
-                session.authenticate_publickey(
-                    cfg.username.clone(),
-                    PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
-                ),
-            )
-            .await
-            .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-            .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?
-        }
-    };
+    let auth_ok = authenticate_session(&mut session, cfg, connect_timeout).await?;
 
     if !auth_ok.success() {
         return Err(("AUTH_FAILED".to_string(), "authentication failed".to_string()));
@@ -716,8 +777,6 @@ async fn test_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
 async fn test_ssh_only_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
     use crate::TcpTunnelAuth;
     use russh::client;
-    use russh::keys::key::PrivateKeyWithHashAlg;
-    use russh::keys::load_secret_key;
     use std::borrow::Cow;
 
     if cfg.ssh_host.trim().is_empty() {
@@ -733,9 +792,6 @@ async fn test_ssh_only_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String
         ));
     }
     match &cfg.auth {
-        TcpTunnelAuth::Password { password } if password.is_empty() => {
-            return Err(("AUTH_MISSING".to_string(), "password is required".to_string()));
-        }
         TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
             return Err((
                 "AUTH_MISSING".to_string(),
@@ -769,34 +825,7 @@ async fn test_ssh_only_once(cfg: &TcpTunnelConfig) -> Result<(), (String, String
         .map_err(|_| ("SSH_CONNECT_TIMEOUT".to_string(), "connect timeout".to_string()))?
         .map_err(|e| ("SSH_CONNECT_FAILED".to_string(), format!("{e:?}")))?;
 
-    let auth_ok = match &cfg.auth {
-        TcpTunnelAuth::Password { password } => tokio::time::timeout(
-            connect_timeout,
-            session.authenticate_password(cfg.username.clone(), password.clone()),
-        )
-        .await
-        .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-        .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?,
-        TcpTunnelAuth::PrivateKeyPath { path, passphrase } => {
-            let key = load_secret_key(path, passphrase.as_deref())
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
-            let rsa_hash = tokio::time::timeout(connect_timeout, session.best_supported_rsa_hash())
-                .await
-                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?
-                .flatten();
-            tokio::time::timeout(
-                connect_timeout,
-                session.authenticate_publickey(
-                    cfg.username.clone(),
-                    PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
-                ),
-            )
-            .await
-            .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-            .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?
-        }
-    };
+    let auth_ok = authenticate_session(&mut session, cfg, connect_timeout).await?;
 
     if !auth_ok.success() {
         return Err(("AUTH_FAILED".to_string(), "authentication failed".to_string()));

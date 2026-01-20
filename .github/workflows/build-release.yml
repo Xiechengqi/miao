@@ -102,6 +102,16 @@ jobs:
           fi
           ls -lh embedded/
 
+      - name: Download sy binary
+        run: |
+          mkdir -p embedded
+          if [ "${{ matrix.target }}" = "arm64" ]; then
+            curl -L -o embedded/sy-arm64 https://github.com/Xiechengqi/sy/releases/download/latest/sy-linux-arm64
+          else
+            curl -L -o embedded/sy-amd64 https://github.com/Xiechengqi/sy/releases/download/latest/sy-linux-amd64
+          fi
+          ls -lh embedded/
+
       - name: Build release for ${{ matrix.target }}
         run: |
           if [ "${{ matrix.target }}" = "arm64" ]; then

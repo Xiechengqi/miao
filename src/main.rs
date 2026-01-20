@@ -20,6 +20,7 @@ use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path as StdPath, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -31,6 +32,7 @@ use base64::Engine;
 
 mod tcp_tunnel;
 mod full_tunnel;
+mod sync;
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -48,6 +50,13 @@ const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-amd64");
 
 #[cfg(target_arch = "aarch64")]
 const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-arm64");
+
+// Embed sy binary based on target architecture
+#[cfg(target_arch = "x86_64")]
+const SY_BINARY: &[u8] = include_bytes!("../embedded/sy-amd64");
+
+#[cfg(target_arch = "aarch64")]
+const SY_BINARY: &[u8] = include_bytes!("../embedded/sy-arm64");
 
 // ============================================================================
 // Data Structures
@@ -87,6 +96,10 @@ fn default_tunnel_set_start_batch_size() -> u64 {
 
 fn default_tunnel_set_start_batch_interval_ms() -> u64 {
     500
+}
+
+fn default_schedule_timezone() -> String {
+    "Asia/Shanghai".to_string()
 }
 
 fn default_terminal_addr() -> String {
@@ -237,6 +250,117 @@ struct TcpTunnelSetConfig {
     #[serde(default = "default_tunnel_set_start_batch_interval_ms")]
     start_batch_interval_ms: u64,
 
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum SyncPathKind {
+    File,
+    Dir,
+    Missing,
+}
+
+impl Default for SyncPathKind {
+    fn default() -> Self {
+        SyncPathKind::Missing
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct SyncLocalPath {
+    path: String,
+    #[serde(default)]
+    kind: SyncPathKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct SyncSshConfig {
+    host: String,
+    #[serde(default = "default_ssh_port")]
+    port: u16,
+    username: String,
+    auth: TcpTunnelAuth,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+struct SyncOptions {
+    delete: bool,
+    verify: bool,
+    compress: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bwlimit: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    exclude: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parallel: Option<u32>,
+    #[serde(default)]
+    watch: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct SyncSchedule {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    cron: String,
+    #[serde(default = "default_schedule_timezone")]
+    timezone: String,
+}
+
+impl Default for SyncSchedule {
+    fn default() -> Self {
+        SyncSchedule {
+            enabled: true,
+            cron: String::new(),
+            timezone: default_schedule_timezone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct SyncConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_paths: Vec<SyncLocalPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_path: Option<String>,
+    ssh: SyncSshConfig,
+    #[serde(default)]
+    options: SyncOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schedule: Option<SyncSchedule>,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        SyncConfig {
+            id: String::new(),
+            name: None,
+            enabled: false,
+            local_paths: Vec::new(),
+            remote_path: None,
+            ssh: SyncSshConfig {
+                host: String::new(),
+                port: default_ssh_port(),
+                username: String::new(),
+                auth: TcpTunnelAuth::Password {
+                    password: String::new(),
+                },
+            },
+            options: SyncOptions::default(),
+            schedule: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -398,6 +522,8 @@ struct Config {
     vnc_sessions: Vec<VncSessionConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     apps: Vec<AppConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    syncs: Vec<SyncConfig>,
     #[serde(default)]
     selections: HashMap<String, String>, // selector group -> node name
     #[serde(default)]
@@ -483,7 +609,7 @@ struct SelectionsResponse {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TcpTunnelAuthPublic {
-    Password,
+    Password { password: String },
     PrivateKeyPath { path: String },
 }
 
@@ -665,6 +791,104 @@ struct TcpTunnelSetDetailResponse {
 struct TcpTunnelSetSaveResponse {
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SyncState {
+    Stopped,
+    Running,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SyncErrorInfo {
+    message: String,
+    at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SyncRuntimeStatus {
+    state: SyncState,
+    running_path: Option<String>,
+    last_run_at_ms: Option<i64>,
+    last_ok_at_ms: Option<i64>,
+    last_error: Option<SyncErrorInfo>,
+}
+
+impl Default for SyncRuntimeStatus {
+    fn default() -> Self {
+        Self {
+            state: SyncState::Stopped,
+            running_path: None,
+            last_run_at_ms: None,
+            last_ok_at_ms: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SyncAuthPublic {
+    Password,
+    PrivateKeyPath { path: String },
+}
+
+#[derive(Serialize)]
+struct SyncItem {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    local_paths: Vec<SyncLocalPath>,
+    remote_path: Option<String>,
+    ssh: SyncSshInfo,
+    auth: SyncAuthPublic,
+    options: SyncOptions,
+    schedule: Option<SyncSchedule>,
+    status: SyncRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct SyncSshInfo {
+    host: String,
+    port: u16,
+    username: String,
+}
+
+#[derive(Serialize)]
+struct SyncListResponse {
+    items: Vec<SyncItem>,
+}
+
+#[derive(Serialize)]
+struct SyncSaveResponse {
+    item: SyncItem,
+}
+
+#[derive(Serialize)]
+struct SyncTestResponse {
+    ok: bool,
+}
+
+#[derive(Deserialize)]
+struct SyncUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    local_paths: Vec<String>,
+    #[serde(default)]
+    remote_path: Option<String>,
+    ssh_host: String,
+    #[serde(default)]
+    ssh_port: Option<u16>,
+    username: String,
+    auth: TcpTunnelAuth,
+    #[serde(default)]
+    options: SyncOptions,
+    #[serde(default)]
+    schedule: Option<SyncSchedule>,
+}
+
 fn generate_tunnel_set_id() -> String {
     format!("s-{}", uuid::Uuid::new_v4())
 }
@@ -699,6 +923,7 @@ struct AppState {
     setup_required: AtomicBool,
     tcp_tunnel: tcp_tunnel::TunnelManager,
     full_tunnel: full_tunnel::FullTunnelManager,
+    sync_manager: sync::SyncManager,
 }
 
 #[derive(Clone)]
@@ -4024,8 +4249,19 @@ async fn update_proxy_pool(
 
 fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
     match auth {
-        TcpTunnelAuth::Password { .. } => TcpTunnelAuthPublic::Password,
+        TcpTunnelAuth::Password { password } => TcpTunnelAuthPublic::Password {
+            password: password.clone(),
+        },
         TcpTunnelAuth::PrivateKeyPath { path, .. } => TcpTunnelAuthPublic::PrivateKeyPath {
+            path: path.clone(),
+        },
+    }
+}
+
+fn redact_sync_auth(auth: &TcpTunnelAuth) -> SyncAuthPublic {
+    match auth {
+        TcpTunnelAuth::Password { .. } => SyncAuthPublic::Password,
+        TcpTunnelAuth::PrivateKeyPath { path, .. } => SyncAuthPublic::PrivateKeyPath {
             path: path.clone(),
         },
     }
@@ -4033,6 +4269,10 @@ fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
 
 fn generate_tunnel_id() -> String {
     format!("t-{}", uuid::Uuid::new_v4())
+}
+
+fn generate_sync_id() -> String {
+    format!("sync-{}", uuid::Uuid::new_v4())
 }
 
 fn generate_terminal_id() -> String {
@@ -4317,12 +4557,6 @@ async fn create_tcp_tunnel(
 
     // Require secrets on create.
     match &cfg.auth {
-        TcpTunnelAuth::Password { password } if password.is_empty() => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("password is required")),
-            ));
-        }
         TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -4399,13 +4633,8 @@ async fn update_tcp_tunnel(
     let mut cfg = normalize_tcp_tunnel(req, id.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
 
-    // Support "leave blank to keep unchanged" for secrets on update.
+    // Support "leave blank to keep unchanged" for private-key secrets on update.
     match (&existing.auth, &mut cfg.auth) {
-        (TcpTunnelAuth::Password { password: old }, TcpTunnelAuth::Password { password: new }) => {
-            if new.is_empty() {
-                *new = old.clone();
-            }
-        }
         (
             TcpTunnelAuth::PrivateKeyPath {
                 path: old_path,
@@ -4428,12 +4657,6 @@ async fn update_tcp_tunnel(
 
     // Require secrets after merge (important when switching auth types).
     match &cfg.auth {
-        TcpTunnelAuth::Password { password } if password.is_empty() => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("password is required")),
-            ));
-        }
         TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -4860,11 +5083,6 @@ async fn update_tcp_tunnel_set(
 
     let mut auth = req.auth;
     match (&existing.auth, &mut auth) {
-        (TcpTunnelAuth::Password { password: old }, TcpTunnelAuth::Password { password: new }) => {
-            if new.is_empty() {
-                *new = old.clone();
-            }
-        }
         (
             TcpTunnelAuth::PrivateKeyPath {
                 path: old_path,
@@ -4886,12 +5104,6 @@ async fn update_tcp_tunnel_set(
     }
 
     match &auth {
-        TcpTunnelAuth::Password { password } if password.is_empty() => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("password is required")),
-            ));
-        }
         TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -5037,9 +5249,6 @@ async fn create_tcp_tunnel_set(
     }
 
     match &req.auth {
-        TcpTunnelAuth::Password { password } if password.is_empty() => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("password is required"))));
-        }
         TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -5343,6 +5552,288 @@ async fn copy_tcp_tunnel(
     )))
 }
 
+async fn get_syncs(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<SyncListResponse>> {
+    let syncs = { state.config.lock().await.syncs.clone() };
+    let mut items = Vec::with_capacity(syncs.len());
+    for cfg in syncs {
+        let status = state.sync_manager.get_status(&cfg.id).await;
+        items.push(build_sync_item(&cfg, status));
+    }
+    Json(ApiResponse::success("ok", SyncListResponse { items }))
+}
+
+async fn create_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncUpsertRequest>,
+) -> Result<Json<ApiResponse<SyncSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let local_paths = build_sync_local_paths(&req.local_paths)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+    let remote_path = normalize_sync_remote_path(req.remote_path);
+    if local_paths.len() > 1 && remote_path.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Multiple local paths cannot set remote path")),
+        ));
+    }
+    let schedule = normalize_sync_schedule(req.schedule)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    let host = req.ssh_host.trim().to_string();
+    if host.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("SSH host is required")),
+        ));
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("SSH username is required")),
+        ));
+    }
+
+    let options = normalize_sync_options(req.options);
+    let cfg = SyncConfig {
+        id: generate_sync_id(),
+        name: normalize_sync_name(req.name),
+        enabled: req.enabled.unwrap_or(true),
+        local_paths,
+        remote_path,
+        ssh: SyncSshConfig {
+            host,
+            port: req.ssh_port.unwrap_or(default_ssh_port()),
+            username,
+            auth: req.auth,
+        },
+        options,
+        schedule,
+    };
+
+    match &cfg.ssh.auth {
+        TcpTunnelAuth::PrivateKeyPath { .. } => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("sync only supports password auth")),
+            ));
+        }
+        TcpTunnelAuth::Password { .. } => {}
+    }
+
+    let syncs_snapshot = {
+        let mut config = state.config.lock().await;
+        config.syncs.push(cfg.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config.syncs.clone()
+    };
+    state.sync_manager.apply_config(&syncs_snapshot).await;
+
+    let status = state.sync_manager.get_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success(
+        "Sync created",
+        SyncSaveResponse {
+            item: build_sync_item(&cfg, status),
+        },
+    )))
+}
+
+async fn update_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SyncUpsertRequest>,
+) -> Result<Json<ApiResponse<SyncSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let local_paths = build_sync_local_paths(&req.local_paths)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+    let remote_path = normalize_sync_remote_path(req.remote_path);
+    if local_paths.len() > 1 && remote_path.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Multiple local paths cannot set remote path")),
+        ));
+    }
+    let schedule = normalize_sync_schedule(req.schedule)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    let host = req.ssh_host.trim().to_string();
+    if host.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("SSH host is required")),
+        ));
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("SSH username is required")),
+        ));
+    }
+
+    let (updated, syncs_snapshot) = {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.syncs.iter().position(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        };
+        let existing = config.syncs[pos].clone();
+        let enabled = req.enabled.unwrap_or(existing.enabled);
+        let name = if req.name.is_some() {
+            normalize_sync_name(req.name)
+        } else {
+            existing.name.clone()
+        };
+        let auth = req.auth;
+
+        match &auth {
+            TcpTunnelAuth::PrivateKeyPath { .. } => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("sync only supports password auth")),
+                ));
+            }
+            _ => {}
+        }
+        let cfg = SyncConfig {
+            id: id.clone(),
+            name,
+            enabled,
+            local_paths,
+            remote_path,
+            ssh: SyncSshConfig {
+                host,
+                port: req.ssh_port.unwrap_or(default_ssh_port()),
+                username,
+                auth,
+            },
+            options: normalize_sync_options(req.options),
+            schedule,
+        };
+        config.syncs[pos] = cfg.clone();
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        (cfg, config.syncs.clone())
+    };
+    state.sync_manager.apply_config(&syncs_snapshot).await;
+
+    let status = state.sync_manager.get_status(&updated.id).await;
+    Ok(Json(ApiResponse::success(
+        "Sync updated",
+        SyncSaveResponse {
+            item: build_sync_item(&updated, status),
+        },
+    )))
+}
+
+async fn delete_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let syncs_snapshot = {
+        let mut config = state.config.lock().await;
+        let before = config.syncs.len();
+        config.syncs.retain(|s| s.id != id);
+        if config.syncs.len() == before {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config.syncs.clone()
+    };
+    state.sync_manager.apply_config(&syncs_snapshot).await;
+    let _ = state.sync_manager.stop(&id).await;
+    Ok(Json(ApiResponse::success_no_data("Sync deleted")))
+}
+
+async fn start_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config = state.config.lock().await;
+        let Some(sync) = config.syncs.iter().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        };
+        sync.clone()
+    };
+    if let Err(e) = state.sync_manager.start(cfg.clone(), false).await {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
+    }
+    let syncs_snapshot = {
+        let mut config = state.config.lock().await;
+        if let Some(s) = config.syncs.iter_mut().find(|s| s.id == id) {
+            s.enabled = true;
+        }
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config.syncs.clone()
+    };
+    state.sync_manager.apply_config(&syncs_snapshot).await;
+    Ok(Json(ApiResponse::success_no_data("Sync started")))
+}
+
+async fn stop_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let syncs_snapshot = {
+        let mut config = state.config.lock().await;
+        let Some(sync) = config.syncs.iter_mut().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        };
+        sync.enabled = false;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config.syncs.clone()
+    };
+    state.sync_manager.apply_config(&syncs_snapshot).await;
+    let _ = state.sync_manager.stop(&id).await;
+    Ok(Json(ApiResponse::success_no_data("Sync stopped")))
+}
+
+async fn test_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<SyncTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config = state.config.lock().await;
+        let Some(sync) = config.syncs.iter().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        };
+        sync.clone()
+    };
+    if let Err(e) = state.sync_manager.start(cfg, true).await {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
+    }
+    Ok(Json(ApiResponse::success(
+        "Sync test started",
+        SyncTestResponse { ok: true },
+    )))
+}
+
 // ============================================================================
 // Internal Functions
 // ============================================================================
@@ -5383,6 +5874,124 @@ fn normalize_pool(input: &[String], max_len: usize) -> Vec<String> {
         }
     }
     out
+}
+
+fn normalize_sync_name(name: Option<String>) -> Option<String> {
+    name.and_then(|n| {
+        let trimmed = n.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_sync_remote_path(remote_path: Option<String>) -> Option<String> {
+    remote_path.and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_sync_options(mut options: SyncOptions) -> SyncOptions {
+    options.bwlimit = options
+        .bwlimit
+        .and_then(|b| {
+            let trimmed = b.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+    options.exclude = options
+        .exclude
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    options.include = options
+        .include
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    options.extra_args = options
+        .extra_args
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if let Some(parallel) = options.parallel {
+        if parallel == 0 {
+            options.parallel = None;
+        }
+    }
+    options
+}
+
+async fn build_sync_local_paths(paths: &[String]) -> Result<Vec<SyncLocalPath>, String> {
+    let mut items = Vec::new();
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let kind = match tokio::fs::metadata(trimmed).await {
+            Ok(meta) if meta.is_dir() => SyncPathKind::Dir,
+            Ok(meta) if meta.is_file() => SyncPathKind::File,
+            Ok(_) => SyncPathKind::Missing,
+            Err(_) => SyncPathKind::Missing,
+        };
+        items.push(SyncLocalPath {
+            path: trimmed.to_string(),
+            kind,
+        });
+    }
+    if items.is_empty() {
+        return Err("Local paths are required".to_string());
+    }
+    Ok(items)
+}
+
+fn normalize_sync_schedule(schedule: Option<SyncSchedule>) -> Result<Option<SyncSchedule>, String> {
+    let Some(mut schedule) = schedule else {
+        return Ok(None);
+    };
+    if schedule.timezone.trim().is_empty() {
+        schedule.timezone = default_schedule_timezone();
+    }
+    if schedule.cron.trim().is_empty() {
+        return Err("Cron expression is required".to_string());
+    }
+    let _ = cron::Schedule::from_str(schedule.cron.trim())
+        .map_err(|e| format!("Invalid cron expression: {}", e))?;
+    schedule.cron = schedule.cron.trim().to_string();
+    Ok(Some(schedule))
+}
+
+fn build_sync_item(cfg: &SyncConfig, status: SyncRuntimeStatus) -> SyncItem {
+    SyncItem {
+        id: cfg.id.clone(),
+        name: cfg.name.clone(),
+        enabled: cfg.enabled,
+        local_paths: cfg.local_paths.clone(),
+        remote_path: cfg.remote_path.clone(),
+        ssh: SyncSshInfo {
+            host: cfg.ssh.host.clone(),
+            port: cfg.ssh.port,
+            username: cfg.ssh.username.clone(),
+        },
+        auth: redact_sync_auth(&cfg.ssh.auth),
+        options: cfg.options.clone(),
+        schedule: cfg.schedule.clone(),
+        status,
+    }
 }
 
 async fn switch_selector_and_save(
@@ -6152,6 +6761,23 @@ fn extract_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> 
     }
 
     Ok(gotty_path)
+}
+
+/// Extract embedded sy binary to current working directory
+fn extract_sy() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let current_dir = std::env::current_dir()?;
+    let sy_path = current_dir.join("sy");
+    let force_marker = current_dir.join(".force_extract_sy");
+
+    if force_marker.exists() || !sy_path.exists() {
+        println!("Extracting embedded sy binary to {:?}", sy_path);
+        fs::write(&sy_path, SY_BINARY)?;
+        fs::set_permissions(&sy_path, fs::Permissions::from_mode(0o755))?;
+        println!("sy binary extracted successfully");
+        let _ = fs::remove_file(&force_marker);
+    }
+
+    Ok(sy_path)
 }
 
 async fn check_and_install_openwrt_dependencies(
@@ -7520,6 +8146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 terminals: vec![],
                 vnc_sessions: vec![],
                 apps: vec![],
+                syncs: vec![],
                 selections: HashMap::new(),
                 nodes: vec![],
                 dns_active: None,
@@ -7635,6 +8262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         setup_required: AtomicBool::new(setup_required),
         tcp_tunnel: tcp_tunnel::TunnelManager::new(),
         full_tunnel: full_tunnel::FullTunnelManager::new(),
+        sync_manager: sync::SyncManager::new(),
     });
 
     // Apply initial TCP tunnel config (best-effort).
@@ -7645,6 +8273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .full_tunnel
             .sync_from_config(app_state.clone(), cfg.tcp_tunnel_sets.clone())
             .await;
+        app_state.sync_manager.apply_config(&cfg.syncs).await;
     }
 
     // DNS health monitor (best-effort). It updates config.dns_active and restarts sing-box when needed.
@@ -7737,6 +8366,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnel-sets/{id}/test", post(test_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/bulk/start", post(bulk_start_tcp_tunnel_sets))
         .route("/api/tcp-tunnel-sets/bulk/stop", post(bulk_stop_tcp_tunnel_sets))
+        .route("/api/syncs", get(get_syncs))
+        .route("/api/syncs", post(create_sync))
+        .route("/api/syncs/{id}", put(update_sync).delete(delete_sync))
+        .route("/api/syncs/{id}/start", post(start_sync))
+        .route("/api/syncs/{id}/stop", post(stop_sync))
+        .route("/api/syncs/{id}/test", post(test_sync))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
