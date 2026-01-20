@@ -117,13 +117,14 @@ impl SyncManager {
 
         let status = status.clone();
         let pid_slot = current_pid.clone();
+        let cfg_id = cfg.id.clone();
         let join = tokio::spawn(async move {
             run_sync_task(cfg, status, stop_rx, pid_slot, dry_run).await;
         });
 
         {
             let mut runtimes = self.inner.runtimes.lock().await;
-            if let Some(entry) = runtimes.get_mut(&cfg.id) {
+            if let Some(entry) = runtimes.get_mut(&cfg_id) {
                 entry.join = Some(join);
             }
         }
@@ -165,7 +166,8 @@ impl SyncManager {
             };
             runtime.status.clone()
         };
-        status.read().await.clone()
+        let snapshot = status.read().await.clone();
+        snapshot
     }
 
     async fn apply_schedules(&self, configs: &[SyncConfig]) {
