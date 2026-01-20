@@ -158,11 +158,14 @@ impl SyncManager {
     }
 
     pub async fn get_status(&self, id: &str) -> SyncRuntimeStatus {
-        let runtimes = self.inner.runtimes.lock().await;
-        let Some(runtime) = runtimes.get(id) else {
-            return SyncRuntimeStatus::default();
+        let status = {
+            let runtimes = self.inner.runtimes.lock().await;
+            let Some(runtime) = runtimes.get(id) else {
+                return SyncRuntimeStatus::default();
+            };
+            runtime.status.clone()
         };
-        runtime.status.read().await.clone()
+        status.read().await.clone()
     }
 
     async fn apply_schedules(&self, configs: &[SyncConfig]) {
@@ -197,7 +200,7 @@ impl SyncManager {
         }
 
         for (id, (cron, timezone)) in desired {
-            let mut schedules = self.inner.schedules.lock().await;
+            let schedules = self.inner.schedules.lock().await;
             if let Some(existing) = schedules.get(&id) {
                 if existing.cron == cron && existing.timezone == timezone {
                     continue;

@@ -791,7 +791,7 @@ struct TcpTunnelSetDetailResponse {
 struct TcpTunnelSetSaveResponse {
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum SyncState {
     Stopped,

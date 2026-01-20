@@ -135,7 +135,7 @@ async fn run_set_loop(
             }
         };
 
-        let mut ports_now: HashSet<u16> = ports_now
+        let ports_now: HashSet<u16> = ports_now
             .into_iter()
             .filter(|p| !set_cfg.exclude_ports.iter().any(|x| x == p))
             .collect();
