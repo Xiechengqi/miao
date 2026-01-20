@@ -829,7 +829,7 @@ impl Default for SyncRuntimeStatus {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SyncAuthPublic {
-    Password,
+    Password { password: String },
     PrivateKeyPath { path: String },
 }
 
@@ -4260,7 +4260,9 @@ fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
 
 fn redact_sync_auth(auth: &TcpTunnelAuth) -> SyncAuthPublic {
     match auth {
-        TcpTunnelAuth::Password { .. } => SyncAuthPublic::Password,
+        TcpTunnelAuth::Password { password } => SyncAuthPublic::Password {
+            password: password.clone(),
+        },
         TcpTunnelAuth::PrivateKeyPath { path, .. } => SyncAuthPublic::PrivateKeyPath {
             path: path.clone(),
         },
