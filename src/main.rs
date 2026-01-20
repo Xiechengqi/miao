@@ -5827,11 +5827,11 @@ async fn test_sync(
         };
         sync.clone()
     };
-    if let Err(e) = state.sync_manager.start(cfg, true).await {
+    if let Err(e) = state.sync_manager.test_sy(&cfg).await {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
     }
     Ok(Json(ApiResponse::success(
-        "Sync test started",
+        "Sync test ok",
         SyncTestResponse { ok: true },
     )))
 }

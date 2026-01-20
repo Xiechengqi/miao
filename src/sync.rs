@@ -132,6 +132,10 @@ impl SyncManager {
         Ok(())
     }
 
+    pub async fn test_sy(&self, cfg: &SyncConfig) -> Result<(), String> {
+        test_remote_sy(cfg).await
+    }
+
     pub async fn stop(&self, id: &str) -> Result<(), String> {
         let (stop_tx, status, current_pid) = {
             let runtimes = self.inner.runtimes.lock().await;
@@ -498,6 +502,7 @@ fn build_paths(cfg: &SyncConfig, local_path: &str) -> Result<(String, String), S
 
 struct SyncSshRuntime {
     home_dir: PathBuf,
+    config_path: PathBuf,
     askpass_path: Option<PathBuf>,
 }
 
@@ -573,7 +578,63 @@ async fn prepare_ssh_runtime(cfg: &SyncConfig, local_path: &str) -> Result<SyncS
 
     Ok(SyncSshRuntime {
         home_dir: dir,
+        config_path,
         askpass_path,
+    })
+}
+
+async fn test_remote_sy(cfg: &SyncConfig) -> Result<(), String> {
+    let ssh_runtime = prepare_ssh_runtime(cfg, "test").await?;
+    let alias = format!("miao-sync-{}", cfg.id);
+
+    let mut command = tokio::process::Command::new("ssh");
+    command
+        .arg("-F")
+        .arg(&ssh_runtime.config_path)
+        .arg(alias)
+        .arg("which")
+        .arg("sy");
+    command.env("HOME", ssh_runtime.home_dir.display().to_string());
+    if let Some(askpass) = ssh_runtime.askpass_path.as_ref() {
+        command.env("SSH_ASKPASS", askpass.display().to_string());
+        command.env("SSH_ASKPASS_REQUIRE", "force");
+        command.env("DISPLAY", "miao-sync");
+    }
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+    {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            let _ = cleanup_ssh_home(&ssh_runtime.home_dir).await;
+            return Err(format!("Failed to run ssh: {}", e));
+        }
+        Err(_) => {
+            let _ = cleanup_ssh_home(&ssh_runtime.home_dir).await;
+            return Err("SSH test timeout".to_string());
+        }
+    };
+
+    let _ = cleanup_ssh_home(&ssh_runtime.home_dir).await;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            return Err("sy not found on remote".to_string());
+        }
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(if detail.is_empty() {
+        "SSH test failed".to_string()
+    } else {
+        detail
     })
 }
 
