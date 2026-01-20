@@ -3897,7 +3897,7 @@
                         schedule_cron: cfg.schedule?.cron || '',
                         schedule_timezone: cfg.schedule?.timezone || 'Asia/Shanghai',
                     };
-                    syncLocalPathsText.value = (cfg.local_paths || []).map(p => p.path).join('\\n');
+                    syncLocalPathsText.value = (cfg.local_paths || []).map(p => p.path).join('\n');
                 };
 
                 const openSyncModal = (sync) => {
