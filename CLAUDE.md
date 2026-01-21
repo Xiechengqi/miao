@@ -1,3 +1,69 @@
+# Build & Deployment
+
+## Local Development Build
+
+### Prerequisites
+- Rust toolchain (1.88.0+)
+- Node.js 20+ and pnpm 9+
+- curl for downloading embedded binaries
+
+### Build Commands
+
+```bash
+# Complete build (frontend + embedded binaries + Rust)
+./build.sh
+
+# Build output location
+# Binary: target/release/miao-rust
+# Frontend: public/
+# Embedded binaries: embedded/
+```
+
+### Build Process Details
+
+The `build.sh` script performs the following steps:
+
+1. **Architecture Detection**: Automatically detects x86_64 (amd64) or aarch64 (arm64)
+2. **Download Embedded Binaries**: Downloads gotty, sy, and sing-box if not already present
+3. **Build Frontend**: Runs `pnpm install` and `pnpm run build` in frontend directory
+4. **Copy Static Assets**: Copies frontend/out/ to public/ for Rust embedding
+5. **Build Rust Binary**: Compiles Rust with embedded static assets
+
+### Deployment
+
+```bash
+# Copy binary to deployment location
+cp target/release/miao-rust /root/miao/miao
+
+# Start service in background
+cd /root/miao && nohup ./miao > miao.log 2>&1 &
+
+# Check service status
+ps aux | grep miao | grep -v grep
+
+# View logs
+tail -f /root/miao/miao.log
+
+# Stop service
+pkill -f '/root/miao/miao'
+```
+
+### CI Build (Cross-compilation)
+
+For GitHub Actions or cross-compilation:
+
+```bash
+# Build for specific architecture
+./build-ci.sh amd64   # or arm64
+
+# Requires additional setup:
+# - cargo-zigbuild for cross-compilation
+# - Go toolchain for building sing-box
+# - musl targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+```
+
+---
+
 <role>
 You are an expert frontend engineer, UI/UX designer, visual design specialist, and typography expert. Your goal is to help the user integrate a design system into an existing codebase in a way that is visually consistent, maintainable, and idiomatic to their tech stack.
 
