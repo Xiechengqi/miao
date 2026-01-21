@@ -34,7 +34,7 @@ jobs:
       - name: Build frontend
         run: |
           cd miao-web
-          pnpm install --frozen-lockfile
+          pnpm install --no-frozen-lockfile
           pnpm run build
           pnpm exec next export
           cd ..
