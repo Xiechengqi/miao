@@ -31,17 +31,6 @@ jobs:
         with:
           version: 9
 
-      - name: Build frontend
-        run: |
-          rm -rf public
-          cd frontend
-          rm -rf out
-          pnpm install --no-frozen-lockfile
-          pnpm run build
-          ls out
-          cp -rf -v out ../public
-          cd ..
-
       - name: Determine required Go version
         id: go-version
         run: |
@@ -73,73 +62,8 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
 
-      - name: Build sing-box binary
-        run: |
-          mkdir -p embedded
-
-          # Clone sing-box repository
-          git clone --depth=1 https://github.com/SagerNet/sing-box.git sing-box-src
-          cd sing-box-src
-
-          SING_BOX_VERSION=$(git describe --tags --always)
-          echo "Building sing-box version: ${SING_BOX_VERSION}"
-
-          # Set Go version
-          go version
-
-          # Build for target architecture
-          # Use go build directly since sing-box requires Go 1.24.7+
-          if [ "${{ matrix.target }}" = "arm64" ]; then
-            GOARCH=arm64 GOOS=linux CGO_ENABLED=0 go build \
-              -v \
-              -trimpath \
-              -ldflags "-s -w -buildid=" \
-              -tags "with_quic,with_clash_api" \
-              ./cmd/sing-box
-            mv sing-box ../embedded/sing-box-arm64
-          else
-            GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
-              -v \
-              -trimpath \
-              -ldflags "-s -w -buildid=" \
-              -tags "with_quic,with_clash_api" \
-              ./cmd/sing-box
-            mv sing-box ../embedded/sing-box-amd64
-          fi
-
-          cd ..
-          rm -rf sing-box-src
-
-          echo "Built sing-box ${SING_BOX_VERSION}"
-          ls -lh embedded/
-
-      - name: Download gotty binary
-        run: |
-          mkdir -p embedded
-          if [ "${{ matrix.target }}" = "arm64" ]; then
-            curl -L -o embedded/gotty-arm64 https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-arm64
-          else
-            curl -L -o embedded/gotty-amd64 https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-amd64
-          fi
-          ls -lh embedded/
-
-      - name: Download sy binary
-        run: |
-          mkdir -p embedded
-          if [ "${{ matrix.target }}" = "arm64" ]; then
-            curl -L -o embedded/sy-arm64 https://github.com/Xiechengqi/sy/releases/download/latest/sy-linux-arm64
-          else
-            curl -L -o embedded/sy-amd64 https://github.com/Xiechengqi/sy/releases/download/latest/sy-linux-amd64
-          fi
-          ls -lh embedded/
-
-      - name: Build release for ${{ matrix.target }}
-        run: |
-          if [ "${{ matrix.target }}" = "arm64" ]; then
-            cargo zigbuild --release --locked --features tcp_tunnel --target aarch64-unknown-linux-musl
-          else
-            cargo zigbuild --release --locked --features tcp_tunnel --target x86_64-unknown-linux-musl
-          fi
+      - name: Build for ${{ matrix.target }}
+        run: ./build-ci.sh ${{ matrix.target }}
 
       - name: Prepare release asset
         run: |
