@@ -80,12 +80,12 @@ class ApiClient {
 
   // Auth
   async login(password: string): Promise<{ token: string }> {
-    const res = await this.fetch<{ token: string }>("/api/login", {
+    const res = await this.fetch<{ data: { token: string } }>("/api/login", {
       method: "POST",
       body: JSON.stringify({ password }),
     });
-    this.setToken(res.token);
-    return res;
+    this.setToken(res.data.token);
+    return res.data;
   }
 
   async setup(password: string): Promise<void> {
