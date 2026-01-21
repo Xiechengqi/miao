@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mock System Test</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #f5f5f5;
+        }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>Mock System Test</h1>
+    <p>This page tests if the mock fetch interceptor is working.</p>
+
+    <button onclick="testLogin()">Test Login API</button>
+    <button onclick="testStatus()">Test Status API</button>
+
+    <div id="result"></div>
+
+    <script>
+        // Check if mock is enabled
+        const mockEnabled = 'true' === 'true'; // Will be replaced by Next.js env var
+        document.body.insertAdjacentHTML('afterbegin',
+            `<div style="padding: 10px; background: ${mockEnabled ? '#d4edda' : '#f8d7da'}; border-radius: 5px; margin-bottom: 20px;">
+                Mock Mode: <strong>${mockEnabled ? 'ENABLED ✓' : 'DISABLED ✗'}</strong>
+            </div>`
+        );
+
+        function showResult(title, data, isError = false) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.className = isError ? 'error' : 'success';
+            resultDiv.innerHTML = `
+                <h3>${title}</h3>
+                <pre>${JSON.stringify(data, null, 2)}</pre>
+            `;
+        }
+
+        async function testLogin() {
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: 'admin' })
+                });
+
+                const data = await response.json();
+                showResult('Login API Response', { status: response.status, data }, !response.ok);
+            } catch (error) {
+                showResult('Login API Error', { error: error.message }, true);
+            }
+        }
+
+        async function testStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                showResult('Status API Response', { status: response.status, data }, !response.ok);
+            } catch (error) {
+                showResult('Status API Error', { error: error.message }, true);
+            }
+        }
+    </script>
+</body>
+</html>

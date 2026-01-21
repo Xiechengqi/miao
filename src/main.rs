@@ -33,6 +33,8 @@ use tokio::task::spawn_blocking;
 use tokio::time::{sleep, Duration};
 use tokio::io::AsyncWriteExt;
 use base64::Engine;
+use rust_embed::RustEmbed;
+use axum::response::IntoResponse;
 
 mod tcp_tunnel;
 mod full_tunnel;
@@ -61,6 +63,11 @@ const SY_BINARY: &[u8] = include_bytes!("../embedded/sy-amd64");
 
 #[cfg(target_arch = "aarch64")]
 const SY_BINARY: &[u8] = include_bytes!("../embedded/sy-arm64");
+
+// Embed static assets (Next.js build output) at compile time
+#[derive(RustEmbed)]
+#[folder = "public/"]
+struct StaticAssets;
 
 // ============================================================================
 // Data Structures
@@ -1454,15 +1461,40 @@ lazy_static! {
 // API Handlers
 // ============================================================================
 
-async fn serve_index() -> Html<&'static str> {
-    Html(include_str!("../public/index.html"))
+/// Serve static files from embedded assets
+async fn serve_static(Path(path): Path<String>) -> Response {
+    let path = path.trim_start_matches('/');
+
+    match StaticAssets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                content.data.into_owned(),
+            ).into_response()
+        }
+        None => {
+            // File not found, fall back to serving index.html for SPA routing
+            spa_fallback().await
+        }
+    }
 }
 
-async fn serve_icon() -> impl axum::response::IntoResponse {
-    (
-        [("content-type", "image/svg+xml")],
-        include_str!("../public/icon.svg"),
-    )
+/// SPA fallback: serve index.html for all unmatched routes (client-side routing)
+async fn spa_fallback() -> Response {
+    match StaticAssets::get("index.html") {
+        Some(content) => {
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "text/html")],
+                content.data.into_owned(),
+            ).into_response()
+        }
+        None => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "index.html not found").into_response()
+        }
+    }
 }
 
 /// POST /api/login - User login
@@ -8825,15 +8857,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/clash/ws/logs", get(clash_ws_logs));
 
     let app = Router::new()
-        .route("/", get(serve_index))           // 首页可访问（前端会检查）
-        .route("/icon.svg", get(serve_icon))    // 网站图标
+        // API routes (highest priority)
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/init", post(setup_init))
-        .route("/api/login", post(login))       // 登录接口
-        .route("/api/version", get(get_version)) // 版本信息与更新检查（公开，便于探活）
+        .route("/api/login", post(login))
+        .route("/api/version", get(get_version))
         .merge(ws_routes)
-        .merge(protected_routes)                // 合并受保护的路由
-        .with_state(app_state);
+        .merge(protected_routes)
+        // Static assets route (matches files in public/)
+        .route("/{*path}", get(serve_static))
+        .with_state(app_state)
+        // SPA fallback (must be last, catches all unmatched routes)
+        .fallback(spa_fallback);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     println!("✅ Miao 控制面板已启动: http://localhost:{}", port);
