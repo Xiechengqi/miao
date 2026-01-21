@@ -36,7 +36,6 @@ jobs:
           cd miao-web
           pnpm install --no-frozen-lockfile
           pnpm run build
-          pnpm exec next export
           cd ..
           find public -mindepth 1 -maxdepth 1 ! -name 'icon.svg' -exec rm -rf {} +
           cp -r miao-web/out/* public/
