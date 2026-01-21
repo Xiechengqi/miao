@@ -14,38 +14,44 @@ export function useLogs() {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const wsUrl = getLogsWsUrl();
-    const ws = new WebSocket(wsUrl);
+    try {
+      const wsUrl = getLogsWsUrl();
+      const ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => {
-      reconnectAttemptsRef.current = 0;
-      setLogWsConnected(true);
-    };
+      ws.onopen = () => {
+        reconnectAttemptsRef.current = 0;
+        setLogWsConnected(true);
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const data: LogEntry = JSON.parse(event.data);
-        addLog(data);
-      } catch (error) {
-        console.error("Failed to parse log entry:", error);
-      }
-    };
+      ws.onmessage = (event) => {
+        try {
+          const data: LogEntry = JSON.parse(event.data);
+          addLog(data);
+        } catch (error) {
+          console.error("Failed to parse log entry:", error);
+        }
+      };
 
-    ws.onclose = () => {
+      ws.onclose = () => {
+        setLogWsConnected(false);
+        // Attempt to reconnect after delay
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          reconnectAttemptsRef.current++;
+          connect();
+        }, delay);
+      };
+
+      ws.onerror = (error) => {
+        console.error("Logs WebSocket error:", error);
+      };
+
+      wsRef.current = ws;
+    } catch (error) {
+      // If no token is available, don't attempt to connect
+      console.warn("Cannot connect to logs WebSocket:", error);
       setLogWsConnected(false);
-      // Attempt to reconnect after delay
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-      reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectAttemptsRef.current++;
-        connect();
-      }, delay);
-    };
-
-    ws.onerror = (error) => {
-      console.error("Logs WebSocket error:", error);
-    };
-
-    wsRef.current = ws;
+    }
   }, [addLog, setLogWsConnected]);
 
   const disconnect = useCallback(() => {

@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "NEXT_PUBLIC_API_URL= ENABLE_MOCK=true next dev",
-    "dev:mock": "NEXT_PUBLIC_API_URL= ENABLE_MOCK=true next dev",
-    "dev:real": "ENABLE_MOCK=false next dev",
+    "dev": "NEXT_PUBLIC_API_URL= NEXT_PUBLIC_ENABLE_MOCK=true next dev",
+    "dev:mock": "NEXT_PUBLIC_API_URL= NEXT_PUBLIC_ENABLE_MOCK=true next dev",
+    "dev:real": "NEXT_PUBLIC_ENABLE_MOCK=false next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

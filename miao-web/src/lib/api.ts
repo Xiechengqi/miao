@@ -20,7 +20,8 @@ import {
 } from "@/types/api";
 
 // API 配置
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// 前端和后端在同一个域名端口下，使用空字符串表示相对路径
+const API_BASE = "";
 
 class ApiClient {
   private token: string | null = null;
@@ -518,12 +519,18 @@ export const api = new ApiClient();
 // WebSocket helper functions
 export function getTrafficWsUrl(): string {
   const token = localStorage.getItem("miao_token");
+  if (!token) {
+    throw new Error("No authentication token found. Please login first.");
+  }
   const wsBase = API_BASE.replace("http", "ws");
   return `${wsBase}/api/clash/ws/traffic?token=${token}`;
 }
 
 export function getLogsWsUrl(): string {
   const token = localStorage.getItem("miao_token");
+  if (!token) {
+    throw new Error("No authentication token found. Please login first.");
+  }
   const wsBase = API_BASE.replace("http", "ws");
   return `${wsBase}/api/clash/ws/logs?token=${token}`;
 }

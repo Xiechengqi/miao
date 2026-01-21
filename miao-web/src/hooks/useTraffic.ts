@@ -14,43 +14,48 @@ export function useTraffic() {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const wsUrl = getTrafficWsUrl();
-    const ws = new WebSocket(wsUrl);
+    try {
+      const wsUrl = getTrafficWsUrl();
+      const ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => {
-      reconnectAttemptsRef.current = 0;
-    };
+      ws.onopen = () => {
+        reconnectAttemptsRef.current = 0;
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const data: TrafficData = JSON.parse(event.data);
-        setTraffic(data);
+      ws.onmessage = (event) => {
+        try {
+          const data: TrafficData = JSON.parse(event.data);
+          setTraffic(data);
 
-        // Update page title with current speed
-        if (typeof document !== "undefined") {
-          const upSpeed = formatSpeed(data.up);
-          const downSpeed = formatSpeed(data.down);
-          document.title = `↑${upSpeed} ↓${downSpeed}`;
+          // Update page title with current speed
+          if (typeof document !== "undefined") {
+            const upSpeed = formatSpeed(data.up);
+            const downSpeed = formatSpeed(data.down);
+            document.title = `↑${upSpeed} ↓${downSpeed}`;
+          }
+        } catch (error) {
+          console.error("Failed to parse traffic data:", error);
         }
-      } catch (error) {
-        console.error("Failed to parse traffic data:", error);
-      }
-    };
+      };
 
-    ws.onclose = () => {
-      // Attempt to reconnect after delay
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-      reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectAttemptsRef.current++;
-        connect();
-      }, delay);
-    };
+      ws.onclose = () => {
+        // Attempt to reconnect after delay
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          reconnectAttemptsRef.current++;
+          connect();
+        }, delay);
+      };
 
-    ws.onerror = (error) => {
-      console.error("Traffic WebSocket error:", error);
-    };
+      ws.onerror = (error) => {
+        console.error("Traffic WebSocket error:", error);
+      };
 
-    wsRef.current = ws;
+      wsRef.current = ws;
+    } catch (error) {
+      // If no token is available, don't attempt to connect
+      console.warn("Cannot connect to traffic WebSocket:", error);
+    }
   }, [setTraffic]);
 
   const disconnect = useCallback(() => {

@@ -57,7 +57,7 @@ const handlers: Record<string, Record<HttpMethod, (req: NextRequest, pathParts: 
   // Auth
   "login": {
     GET: () => errorResponse("Method not allowed", 405),
-    POST: () => successResponse(mockAuth),
+    POST: () => NextResponse.json(mockAuth),
     PUT: () => errorResponse("Method not allowed", 405),
     DELETE: () => errorResponse("Method not allowed", 405),
   },
