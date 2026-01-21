@@ -1,0 +1,9 @@
+port: 6161
+password: admin123
+selections: {}
+nodes: []
+metrics:
+  enabled: true
+  storage_path: ./metrics.sqlite
+  retention_days: 7
+  sample_interval_secs: 5

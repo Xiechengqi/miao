@@ -33,12 +33,12 @@ jobs:
 
       - name: Build frontend
         run: |
-          cd miao-web
+          cd frontend
           pnpm install --no-frozen-lockfile
           pnpm run build
           cd ..
-          find public -mindepth 1 -maxdepth 1 ! -name 'icon.svg' -exec rm -rf {} +
-          cp -r miao-web/out/* public/
+          rm -rf public/*
+          cp -r frontend/out/* public/
 
       - name: Determine required Go version
         id: go-version
