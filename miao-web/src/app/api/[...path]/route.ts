@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mockHandler } from "@/mocks/handlers";
 
+export const dynamic = "force-static";
+export const revalidate = 0;
+
 const API_BASE = process.env.API_URL || "http://127.0.0.1:8080";
 const ENABLE_MOCK = process.env.ENABLE_MOCK === "true";
 
