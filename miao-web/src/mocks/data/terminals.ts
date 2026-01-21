@@ -1,0 +1,43 @@
+import type { Terminal } from "@/types/api";
+
+export const mockTerminals: Terminal[] = [
+  {
+    id: "1",
+    name: "Main Server",
+    enabled: true,
+    addr: "0.0.0.0",
+    port: 7681,
+    command: "/bin/bash",
+    command_args: ["-l"],
+    auth_username: "root",
+    auth_password: "secret",
+    extra_args: ["--enable-idle-alert"],
+    status: { running: true, pid: 23145, uptime_secs: 3600 },
+  },
+  {
+    id: "2",
+    name: "Dev Server",
+    enabled: false,
+    addr: "127.0.0.1",
+    port: 7682,
+    command: "/bin/bash",
+    command_args: ["-l"],
+    auth_username: "dev",
+    auth_password: "",
+    extra_args: [],
+    status: { running: false },
+  },
+  {
+    id: "3",
+    name: "Staging",
+    enabled: true,
+    addr: "0.0.0.0",
+    port: 7683,
+    command: "/bin/sh",
+    command_args: [],
+    auth_username: "deploy",
+    auth_password: "",
+    extra_args: [],
+    status: { running: true, pid: 5112, uptime_secs: 420 },
+  },
+];

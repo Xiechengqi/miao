@@ -21,6 +21,26 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.88.0
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Build frontend
+        run: |
+          cd miao-web
+          pnpm install --frozen-lockfile
+          pnpm run build
+          pnpm exec next export
+          cd ..
+          find public -mindepth 1 -maxdepth 1 ! -name 'icon.svg' -exec rm -rf {} +
+          cp -r miao-web/out/* public/
+
       - name: Determine required Go version
         id: go-version
         run: |

@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+@theme {
+  /* Colors - Corporate Trust Palette */
+  --color-background: #F8FAFC;
+  --color-surface: #FFFFFF;
+  --color-primary: #4F46E5;
+  --color-secondary: #7C3AED;
+  --color-text-main: #0F172A;
+  --color-text-muted: #64748B;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-border: #E2E8F0;
+
+  /* Gradient Colors */
+  --color-gradient-from: #4F46E5;
+  --color-gradient-to: #7C3AED;
+
+  /* Shadows - Colored elevation shadows */
+  --shadow-card:
+    0 4px 20px -2px rgba(79, 70, 229, 0.1);
+
+  --shadow-card-hover:
+    0 10px 25px -5px rgba(79, 70, 229, 0.15),
+    0 8px 10px -6px rgba(79, 70, 229, 0.1);
+
+  --shadow-button:
+    0 4px 14px 0 rgba(79, 70, 229, 0.3);
+
+  --shadow-button-hover:
+    0 6px 20px 0 rgba(79, 70, 229, 0.4);
+
+  --shadow-glow:
+    0 0 20px rgba(79, 70, 229, 0.5);
+
+  --shadow-soft:
+    0 2px 8px rgba(79, 70, 229, 0.08);
+
+  /* Font families */
+  --font-heading: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* Border radius */
+  --radius-xl: 12px;
+  --radius-lg: 8px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+  --radius-full: 9999px;
+
+  /* Animations */
+  --animate-float: gentle-float 4s ease-in-out infinite;
+  --animate-pulse-slow: pulse-slow 4s ease-in-out infinite;
+}
+
+@keyframes gentle-float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.5; }
+}
+
+/* Base styles */
+:root {
+  --background: var(--color-background);
+  --foreground: var(--color-text-main);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+/* Utility classes */
+@layer utilities {
+  /* Gradient text for headlines */
+  .text-gradient {
+    background: linear-gradient(135deg, var(--color-gradient-from) 0%, var(--color-gradient-to) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Glass morphism for overlays */
+  .bg-glass {
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+  }
+
+  /* Elevated card surface */
+  .surface-elevated {
+    background: var(--color-surface);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
+    border: 1px solid var(--color-border);
+  }
+
+  /* Isometric 3D transforms */
+  .isometric {
+    transform: perspective(2000px) rotateX(5deg) rotateY(-12deg);
+  }
+
+  .isometric-sm {
+    transform: perspective(1000px) rotateX(2deg) rotateY(-6deg);
+  }
+
+  /* Hover lift effect */
+  .hover-lift {
+    transition: transform 200ms ease-out, box-shadow 200ms ease-out;
+  }
+
+  .hover-lift:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-card-hover);
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(226, 232, 240, 0.5);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(79, 70, 229, 0.2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 70, 229, 0.4);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

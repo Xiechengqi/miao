@@ -1,0 +1,42 @@
+import type { App } from "@/types/api";
+
+export const mockApps: App[] = [
+  {
+    id: "1",
+    name: "Chromium Browser",
+    type: "chromium",
+    enabled: true,
+    vnc_session_id: "1",
+    display: ":10",
+    command: "chromium",
+    args: ["--no-sandbox"],
+    env: { LANG: "en_US.UTF-8" },
+    status: { running: true, pid: 2011, uptime_secs: 1800 },
+    port: 9222,
+  },
+  {
+    id: "2",
+    name: "Firefox Browser",
+    type: "firefox",
+    enabled: false,
+    vnc_session_id: "",
+    display: ":11",
+    command: "firefox",
+    args: [],
+    env: {},
+    status: { running: false },
+  },
+  {
+    id: "3",
+    name: "Custom App",
+    type: "appimage",
+    enabled: true,
+    vnc_session_id: "",
+    display: ":12",
+    command: "/opt/custom.AppImage",
+    args: ["--config", "/etc/app.conf"],
+    env: { APP_ENV: "prod" },
+    status: { running: true, pid: 3022, uptime_secs: 600 },
+    port: 8080,
+  },
+];

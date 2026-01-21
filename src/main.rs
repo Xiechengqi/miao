@@ -12,9 +12,12 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
+use machine_info::Machine;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::{Pid, Uid};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
@@ -26,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio_tungstenite::connect_async;
 use tokio::sync::Mutex;
+use tokio::task::spawn_blocking;
 use tokio::time::{sleep, Duration};
 use tokio::io::AsyncWriteExt;
 use base64::Engine;
@@ -100,6 +104,22 @@ fn default_tunnel_set_start_batch_interval_ms() -> u64 {
 
 fn default_schedule_timezone() -> String {
     "Asia/Shanghai".to_string()
+}
+
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_storage_path() -> String {
+    "./metrics.sqlite".to_string()
+}
+
+fn default_metrics_retention_days() -> u32 {
+    7
+}
+
+fn default_metrics_sample_interval_secs() -> u64 {
+    5
 }
 
 fn default_terminal_addr() -> String {
@@ -507,6 +527,29 @@ impl Default for AppConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+struct MetricsConfig {
+    #[serde(default = "default_metrics_enabled")]
+    enabled: bool,
+    #[serde(default = "default_metrics_storage_path")]
+    storage_path: String,
+    #[serde(default = "default_metrics_retention_days")]
+    retention_days: u32,
+    #[serde(default = "default_metrics_sample_interval_secs")]
+    sample_interval_secs: u64,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        MetricsConfig {
+            enabled: default_metrics_enabled(),
+            storage_path: default_metrics_storage_path(),
+            retention_days: default_metrics_retention_days(),
+            sample_interval_secs: default_metrics_sample_interval_secs(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
@@ -563,6 +606,9 @@ struct Config {
     // Full tunnels (optional)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tcp_tunnel_sets: Vec<TcpTunnelSetConfig>,
+
+    #[serde(default)]
+    metrics: MetricsConfig,
 }
 
 const DEFAULT_PORT: u16 = 6161;
@@ -910,6 +956,22 @@ struct WsAuthQuery {
     level: Option<String>,
 }
 
+struct SystemMonitor {
+    machine: Mutex<Machine>,
+    info_cache: Mutex<Option<serde_json::Value>>,
+    status_cache: Mutex<Option<serde_json::Value>>,
+}
+
+impl SystemMonitor {
+    fn new() -> Self {
+        Self {
+            machine: Mutex::new(Machine::new()),
+            info_cache: Mutex::new(None),
+            status_cache: Mutex::new(None),
+        }
+    }
+}
+
 struct AppState {
     config: Mutex<Config>,
     sing_box_home: String,
@@ -924,6 +986,8 @@ struct AppState {
     tcp_tunnel: tcp_tunnel::TunnelManager,
     full_tunnel: full_tunnel::FullTunnelManager,
     sync_manager: sync::SyncManager,
+    system_monitor: SystemMonitor,
+    metrics_config: MetricsConfig,
 }
 
 #[derive(Clone)]
@@ -1470,6 +1534,356 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
             pid,
             uptime_secs,
         },
+    ))
+}
+
+async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
+    let mut machine = state.system_monitor.machine.lock().await;
+    let info = machine.system_info();
+    let status = machine
+        .system_status()
+        .map_err(|e| format!("Failed to read system status: {}", e))?;
+    let graphics = machine.graphics_status();
+    drop(machine);
+
+    let sample_period_secs = state.metrics_config.sample_interval_secs.max(1);
+    let (primary_disk_used, primary_disk_total) =
+        select_primary_disk(&info).unwrap_or((0, 0));
+    let gpu_percent = average_gpu_percent(&graphics);
+
+    let disks_usage = info
+        .disks
+        .iter()
+        .map(|disk| {
+            json!({
+                "name": disk.name,
+                "used": disk.size.saturating_sub(disk.available),
+                "total": disk.size
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let info_value = serde_json::to_value(&info)
+        .map_err(|e| format!("Failed to serialize system info: {}", e))?;
+    let status_value = json!({
+        "timestamp": chrono::Utc::now().timestamp(),
+        "samplePeriodSecs": sample_period_secs,
+        "cpuPercent": status.cpu,
+        "memoryUsedKb": status.memory,
+        "graphics": graphics,
+        "disks": disks_usage,
+        "nvidiaAvailable": !graphics.is_empty()
+    });
+
+    *state.system_monitor.info_cache.lock().await = Some(info_value);
+    *state.system_monitor.status_cache.lock().await = Some(status_value);
+
+    if state.metrics_config.enabled {
+        let record = MetricsRecord {
+            timestamp: chrono::Utc::now().timestamp(),
+            cpu_percent: status.cpu,
+            memory_used_kb: status.memory,
+            gpu_percent,
+            disk_used_bytes: primary_disk_used,
+            disk_total_bytes: primary_disk_total,
+        };
+        write_metrics_record(&state.metrics_config, record).await?;
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct MetricsPoint {
+    timestamp: i64,
+    cpu_percent: i32,
+    memory_used_kb: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_percent: Option<i32>,
+    disk_used_bytes: u64,
+    disk_total_bytes: u64,
+}
+
+struct MetricsRecord {
+    timestamp: i64,
+    cpu_percent: i32,
+    memory_used_kb: i32,
+    gpu_percent: Option<i32>,
+    disk_used_bytes: u64,
+    disk_total_bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct MetricsQuery {
+    range: Option<String>,
+    step: Option<String>,
+}
+
+fn parse_duration_to_secs(input: &str) -> Option<i64> {
+    if input.len() < 2 {
+        return None;
+    }
+    let (value, unit) = input.split_at(input.len() - 1);
+    let value = value.parse::<i64>().ok()?;
+    match unit {
+        "s" => Some(value),
+        "m" => Some(value * 60),
+        "h" => Some(value * 3600),
+        "d" => Some(value * 86400),
+        _ => None,
+    }
+}
+
+fn default_step_label(range_secs: i64) -> String {
+    if range_secs <= 3600 {
+        "30s".to_string()
+    } else if range_secs <= 21600 {
+        "1m".to_string()
+    } else if range_secs <= 86400 {
+        "5m".to_string()
+    } else {
+        "15m".to_string()
+    }
+}
+
+fn select_primary_disk(info: &machine_info::SystemInfo) -> Option<(u64, u64)> {
+    if let Some(disk) = info.disks.iter().find(|disk| disk.mount_point == "/") {
+        return Some((disk.size.saturating_sub(disk.available), disk.size));
+    }
+    info.disks
+        .first()
+        .map(|disk| (disk.size.saturating_sub(disk.available), disk.size))
+}
+
+fn average_gpu_percent(graphics: &[machine_info::GraphicsUsage]) -> Option<i32> {
+    if graphics.is_empty() {
+        return None;
+    }
+    let sum: u32 = graphics.iter().map(|g| g.gpu).sum();
+    Some((sum / graphics.len() as u32) as i32)
+}
+
+fn init_metrics_db(path: &str) -> Result<(), String> {
+    let conn = Connection::open(path)
+        .map_err(|e| format!("Failed to open metrics db: {}", e))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS system_metrics (
+            timestamp INTEGER NOT NULL,
+            cpu_percent INTEGER NOT NULL,
+            memory_used_kb INTEGER NOT NULL,
+            gpu_percent INTEGER,
+            disk_used_bytes INTEGER NOT NULL,
+            disk_total_bytes INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_system_metrics_ts ON system_metrics(timestamp);",
+    )
+    .map_err(|e| format!("Failed to init metrics db: {}", e))?;
+    Ok(())
+}
+
+fn insert_metrics_record(path: &str, record: &MetricsRecord) -> Result<(), String> {
+    let conn = Connection::open(path)
+        .map_err(|e| format!("Failed to open metrics db: {}", e))?;
+    conn.execute(
+        "INSERT INTO system_metrics (timestamp, cpu_percent, memory_used_kb, gpu_percent, disk_used_bytes, disk_total_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            record.timestamp,
+            record.cpu_percent,
+            record.memory_used_kb,
+            record.gpu_percent,
+            record.disk_used_bytes as i64,
+            record.disk_total_bytes as i64,
+        ],
+    )
+    .map_err(|e| format!("Failed to insert metrics: {}", e))?;
+    Ok(())
+}
+
+fn prune_metrics(path: &str, cutoff_ts: i64) -> Result<(), String> {
+    let conn = Connection::open(path)
+        .map_err(|e| format!("Failed to open metrics db: {}", e))?;
+    conn.execute(
+        "DELETE FROM system_metrics WHERE timestamp < ?1",
+        params![cutoff_ts],
+    )
+    .map_err(|e| format!("Failed to prune metrics: {}", e))?;
+    Ok(())
+}
+
+async fn write_metrics_record(
+    config: &MetricsConfig,
+    record: MetricsRecord,
+) -> Result<(), String> {
+    let storage_path = config.storage_path.clone();
+    let retention_days = config.retention_days;
+    let cutoff_ts = record.timestamp - (retention_days as i64 * 86400);
+    spawn_blocking(move || {
+        init_metrics_db(&storage_path)?;
+        insert_metrics_record(&storage_path, &record)?;
+        if retention_days > 0 {
+            prune_metrics(&storage_path, cutoff_ts)?;
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("Metrics task failed: {}", e))??;
+    Ok(())
+}
+
+fn load_metrics_series(
+    path: &str,
+    start_ts: i64,
+    end_ts: i64,
+    step_secs: i64,
+) -> Result<Vec<MetricsPoint>, String> {
+    let conn = Connection::open(path)
+        .map_err(|e| format!("Failed to open metrics db: {}", e))?;
+    let mut stmt = conn
+        .prepare(
+            "WITH bucketed AS (
+                SELECT
+                    timestamp,
+                    cpu_percent,
+                    memory_used_kb,
+                    gpu_percent,
+                    disk_used_bytes,
+                    disk_total_bytes,
+                    (timestamp / ?1) * ?1 AS bucket_ts
+                FROM system_metrics
+                WHERE timestamp >= ?2 AND timestamp <= ?3
+            ),
+            latest_in_bucket AS (
+                SELECT bucket_ts, MAX(timestamp) AS latest_ts
+                FROM bucketed
+                GROUP BY bucket_ts
+            )
+            SELECT
+                b.bucket_ts AS timestamp,
+                CAST(AVG(b.cpu_percent) AS INTEGER) AS cpu_percent,
+                CAST(AVG(b.gpu_percent) AS INTEGER) AS gpu_percent,
+                b2.memory_used_kb AS memory_used_kb,
+                b2.disk_used_bytes AS disk_used_bytes,
+                b2.disk_total_bytes AS disk_total_bytes
+            FROM bucketed b
+            JOIN latest_in_bucket l ON b.bucket_ts = l.bucket_ts
+            JOIN bucketed b2 ON b2.bucket_ts = l.bucket_ts AND b2.timestamp = l.latest_ts
+            GROUP BY b.bucket_ts, b2.memory_used_kb, b2.disk_used_bytes, b2.disk_total_bytes
+            ORDER BY b.bucket_ts ASC",
+        )
+        .map_err(|e| format!("Failed to prepare metrics query: {}", e))?;
+    let rows = stmt
+        .query_map(params![step_secs, start_ts, end_ts], |row| {
+            Ok(MetricsPoint {
+                timestamp: row.get(0)?,
+                cpu_percent: row.get(1)?,
+                gpu_percent: row.get(2)?,
+                memory_used_kb: row.get(3)?,
+                disk_used_bytes: row.get::<_, i64>(4)? as u64,
+                disk_total_bytes: row.get::<_, i64>(5)? as u64,
+            })
+        })
+        .map_err(|e| format!("Failed to load metrics: {}", e))?;
+
+    let mut points = Vec::new();
+    for row in rows {
+        points.push(row.map_err(|e| format!("Failed to parse metrics row: {}", e))?);
+    }
+    Ok(points)
+}
+
+async fn get_system_info(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    {
+        let cache = state.system_monitor.info_cache.lock().await;
+        if let Some(value) = cache.as_ref() {
+            return Json(ApiResponse::success("System info", value.clone()));
+        }
+    }
+
+    if let Err(e) = refresh_system_metrics(&state).await {
+        return Json(ApiResponse::error(e));
+    }
+
+    let cache = state.system_monitor.info_cache.lock().await;
+    match cache.as_ref() {
+        Some(value) => Json(ApiResponse::success("System info", value.clone())),
+        None => Json(ApiResponse::error("System info not available")),
+    }
+}
+
+async fn get_system_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    {
+        let cache = state.system_monitor.status_cache.lock().await;
+        if let Some(value) = cache.as_ref() {
+            return Json(ApiResponse::success("System status", value.clone()));
+        }
+    }
+
+    if let Err(e) = refresh_system_metrics(&state).await {
+        return Json(ApiResponse::error(e));
+    }
+
+    let cache = state.system_monitor.status_cache.lock().await;
+    match cache.as_ref() {
+        Some(value) => Json(ApiResponse::success("System status", value.clone())),
+        None => Json(ApiResponse::error("System status not available")),
+    }
+}
+
+async fn get_system_metrics(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MetricsQuery>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    if !state.metrics_config.enabled {
+        return Json(ApiResponse::error("Metrics storage is disabled"));
+    }
+
+    let range_label = query.range.unwrap_or_else(|| "1h".to_string());
+    let range_secs = match parse_duration_to_secs(&range_label) {
+        Some(value) if value > 0 => value,
+        _ => return Json(ApiResponse::error("Invalid range")),
+    };
+
+    let step_label = query
+        .step
+        .unwrap_or_else(|| default_step_label(range_secs));
+    let step_secs = match parse_duration_to_secs(&step_label) {
+        Some(value) if value > 0 => value,
+        _ => return Json(ApiResponse::error("Invalid step")),
+    };
+
+    if step_secs > range_secs {
+        return Json(ApiResponse::error("Step must be <= range"));
+    }
+
+    let end_ts = chrono::Utc::now().timestamp();
+    let start_ts = end_ts - range_secs;
+    let storage_path = state.metrics_config.storage_path.clone();
+
+    let result = spawn_blocking(move || {
+        init_metrics_db(&storage_path)?;
+        load_metrics_series(&storage_path, start_ts, end_ts, step_secs)
+    })
+    .await
+    .map_err(|e| format!("Metrics task failed: {}", e));
+
+    let series = match result {
+        Ok(Ok(series)) => series,
+        Ok(Err(err)) => return Json(ApiResponse::error(err)),
+        Err(err) => return Json(ApiResponse::error(err)),
+    };
+
+    Json(ApiResponse::success(
+        "System metrics",
+        json!({
+            "range": range_label,
+            "step": step_label,
+            "series": series
+        }),
     ))
 }
 
@@ -8172,6 +8586,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 proxy_pause_ms: None,
                 tcp_tunnels: vec![],
                 tcp_tunnel_sets: vec![],
+                metrics: MetricsConfig::default(),
             },
             true,
         ),
@@ -8271,6 +8686,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tcp_tunnel: tcp_tunnel::TunnelManager::new(),
         full_tunnel: full_tunnel::FullTunnelManager::new(),
         sync_manager: sync::SyncManager::new(),
+        system_monitor: SystemMonitor::new(),
+        metrics_config: config.metrics.clone(),
     });
 
     // Apply initial TCP tunnel config (best-effort).
@@ -8296,6 +8713,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::spawn(async move { proxy_health_monitor(state_clone).await });
     }
 
+    {
+        let state_clone = app_state.clone();
+        let interval_secs = app_state.metrics_config.sample_interval_secs.max(1);
+        tokio::spawn(async move {
+            if let Err(e) = refresh_system_metrics(&state_clone).await {
+                eprintln!("Failed to refresh system metrics: {}", e);
+            }
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                if let Err(e) = refresh_system_metrics(&state_clone).await {
+                    eprintln!("Failed to refresh system metrics: {}", e);
+                }
+            }
+        });
+    }
+
 
 
     // Build router with API endpoints
@@ -8304,6 +8738,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let protected_routes = Router::new()
         // Status and service control
         .route("/api/status", get(get_status))
+        .route("/api/system/info", get(get_system_info))
+        .route("/api/system/status", get(get_system_status))
+        .route("/api/system/metrics", get(get_system_metrics))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
         .route("/api/service/restart", post(restart_service))
