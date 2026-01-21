@@ -33,12 +33,14 @@ jobs:
 
       - name: Build frontend
         run: |
+          rm -rf public
           cd frontend
+          rm -rf out
           pnpm install --no-frozen-lockfile
           pnpm run build
+          ls out
+          cp -rf -v out ../public
           cd ..
-          rm -rf public/*
-          cp -r frontend/out/* public/
 
       - name: Determine required Go version
         id: go-version
