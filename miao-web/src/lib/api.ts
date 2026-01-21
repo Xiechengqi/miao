@@ -75,7 +75,14 @@ class ApiClient {
       throw new Error(error?.error || `API Error: ${response.statusText}`);
     }
 
-    return response.json();
+    const data = await response.json();
+
+    // Check for application-level errors (success: false)
+    if (data && typeof data.success === 'boolean' && !data.success) {
+      throw new Error(data.message || 'API request failed');
+    }
+
+    return data;
   }
 
   // Auth

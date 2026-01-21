@@ -126,38 +126,85 @@ test_setup_if_needed() {
     fi
 }
 
-# Test: Login functionality
-test_login() {
-    log_info "Test 4: Login with valid credentials"
+# Test: Login with wrong password
+test_login_wrong_password() {
+    log_info "Test 4: Login with wrong password should show error"
 
-    # Navigate to login page
+    # Navigate to login page (fresh state)
     agent-browser open "$BASE_URL/login" > /dev/null 2>&1
     sleep 2
 
-    # Fill password
-    agent-browser fill @e1 "$TEST_PASSWORD" > /dev/null 2>&1
+    # Fill wrong password
+    agent-browser fill @e1 "wrongpassword" > /dev/null 2>&1
     sleep 0.5
 
     # Click login button
     agent-browser click @e2 > /dev/null 2>&1
     sleep 3
 
+    # Check if error message is displayed
+    local snapshot=$(agent-browser snapshot 2>/dev/null || echo "")
+
+    if [[ "$snapshot" == *"密码错误"* ]] || [[ "$snapshot" == *"错误"* ]] || [[ "$snapshot" == *"invalid"* ]]; then
+        log_success "Wrong password shows error message"
+        agent-browser screenshot "$SCREENSHOT_DIR/02-wrong-password.png" 2>/dev/null || true
+    else
+        log_error "No error message displayed for wrong password"
+        agent-browser screenshot "$SCREENSHOT_DIR/error-no-error-msg.png" 2>/dev/null || true
+        return 1
+    fi
+
+    # Verify still on login page
+    local current_url=$(agent-browser get url 2>/dev/null || echo "")
+
+    if [[ "$current_url" != *"/dashboard"* ]]; then
+        log_success "User not logged in with wrong password"
+    else
+        log_error "User was logged in with wrong password!"
+        return 1
+    fi
+
+    # Clear the password field for next test
+    agent-browser eval "document.querySelector('input[type=\"password\"]').value = ''" > /dev/null 2>&1 || true
+}
+
+# Test: Login functionality
+test_login() {
+    log_info "Test 5: Login with valid credentials"
+
+    # Navigate to login page (fresh state after wrong password test)
+    agent-browser open "$BASE_URL/login" > /dev/null 2>&1
+    sleep 3
+
+    # Get fresh element references
+    local snapshot=$(agent-browser snapshot -i 2>/dev/null || echo "")
+    local password_ref=$(echo "$snapshot" | grep -o "textbox.*\[ref=e[0-9]\+\]" | grep -o "e[0-9]\+" | head -1)
+    local button_ref=$(echo "$snapshot" | grep -o "button.*登录.*\[ref=e[0-9]\+\]" | grep -o "e[0-9]\+" | head -1)
+
+    # Fill password
+    agent-browser fill "@$password_ref" "$TEST_PASSWORD" > /dev/null 2>&1
+    sleep 0.5
+
+    # Click login button
+    agent-browser click "@$button_ref" > /dev/null 2>&1
+    sleep 4
+
     # Check if redirected to dashboard
     local current_url=$(agent-browser get url 2>/dev/null || echo "")
 
     if [[ "$current_url" == *"/dashboard"* ]]; then
         log_success "Login successful, redirected to dashboard"
-        agent-browser screenshot "$SCREENSHOT_DIR/02-dashboard.png" > /dev/null 2>&1
+        agent-browser screenshot "$SCREENSHOT_DIR/03-dashboard.png" > /dev/null 2>&1
     else
         log_error "Login failed, not redirected to dashboard (current: $current_url)"
-        agent-browser screenshot "$SCREENSHOT_DIR/02-error-login.png" > /dev/null 2>&1
+        agent-browser screenshot "$SCREENSHOT_DIR/error-login.png" > /dev/null 2>&1
         return 1
     fi
 }
 
 # Test: Token storage
 test_token_storage() {
-    log_info "Test 5: Authentication token should be stored"
+    log_info "Test 6: Authentication token should be stored"
 
     local token=$(agent-browser eval "localStorage.getItem('miao_token')" 2>/dev/null || echo "null")
 
@@ -171,7 +218,7 @@ test_token_storage() {
 
 # Test: Dashboard content
 test_dashboard_content() {
-    log_info "Test 6: Dashboard should display system metrics"
+    log_info "Test 7: Dashboard should display system metrics"
 
     local snapshot=$(agent-browser snapshot -i 2>/dev/null || echo "")
 
@@ -185,7 +232,7 @@ test_dashboard_content() {
 
 # Test: Navigation to Proxies page
 test_navigation_proxies() {
-    log_info "Test 7: Navigation to Proxies page"
+    log_info "Test 8: Navigation to Proxies page"
 
     # Click on 代理 link
     agent-browser click @e2 > /dev/null 2>&1
@@ -204,7 +251,7 @@ test_navigation_proxies() {
 
 # Test: Navigation to Sync page
 test_navigation_sync() {
-    log_info "Test 8: Navigation to Sync page"
+    log_info "Test 9: Navigation to Sync page"
 
     agent-browser click @e3 > /dev/null 2>&1
     sleep 2
@@ -222,7 +269,7 @@ test_navigation_sync() {
 
 # Test: Return to Dashboard
 test_return_to_dashboard() {
-    log_info "Test 9: Return to Dashboard home"
+    log_info "Test 10: Return to Dashboard home"
 
     # Use JavaScript navigation to ensure it works
     agent-browser eval "window.location.href = '/dashboard'" > /dev/null 2>&1
@@ -241,7 +288,7 @@ test_return_to_dashboard() {
 
 # Test: Logout functionality
 test_logout() {
-    log_info "Test 10: Logout functionality"
+    log_info "Test 11: Logout functionality"
 
     # Get fresh snapshot to find logout button
     local snapshot=$(agent-browser snapshot -i 2>/dev/null || echo "")
@@ -274,7 +321,7 @@ test_logout() {
 
 # Test: Token cleared after logout
 test_token_cleared() {
-    log_info "Test 11: Token should be cleared after logout"
+    log_info "Test 12: Token should be cleared after logout"
 
     local token=$(agent-browser eval "localStorage.getItem('miao_token')" 2>/dev/null || echo "null")
 
@@ -288,7 +335,7 @@ test_token_cleared() {
 
 # Test: Protected route access
 test_protected_route() {
-    log_info "Test 12: Protected routes should redirect to login"
+    log_info "Test 13: Protected routes should redirect to login"
 
     agent-browser open "$BASE_URL/dashboard" > /dev/null 2>&1
     sleep 2
@@ -356,6 +403,7 @@ main() {
     test_homepage_redirect || true
     test_login_page_elements || true
     test_setup_if_needed || true
+    test_login_wrong_password || true
     test_login || true
     test_token_storage || true
     test_dashboard_content || true
