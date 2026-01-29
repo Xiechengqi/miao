@@ -9,6 +9,7 @@ import {
   ManualNode,
   ProxyGroup,
   SubFilesResponse,
+  SubscriptionItem,
   SyncConfig,
   TcpTunnel,
   Terminal,
@@ -16,12 +17,40 @@ import {
   App,
   AppTemplate,
   TrafficData,
-  LogEntry,
+  VersionInfo,
+  Host,
 } from "@/types/api";
 
-// API 配置
+// 重试配置
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_DELAY = 500; // ms
+
+/**
+ * 带重试的异步函数
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = DEFAULT_MAX_RETRIES,
+  retryDelay = DEFAULT_RETRY_DELAY
+): Promise<T> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      // 如果还有重试次数，等待后重试
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay * (attempt + 1)));
+      }
+    }
+  }
+
+  throw lastError;
+}
 // 前端和后端在同一个域名端口下，使用空字符串表示相对路径
-const API_BASE = "";
+const API_BASE: string = "";
 
 class ApiClient {
   private token: string | null = null;
@@ -72,7 +101,7 @@ class ApiClient {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: response.statusText }));
-      throw new Error(error?.error || `API Error: ${response.statusText}`);
+      throw new Error(error?.error || error?.message || `API Error: ${response.statusText}`);
     }
 
     const data = await response.json();
@@ -103,7 +132,8 @@ class ApiClient {
   }
 
   async checkSetupRequired(): Promise<{ required: boolean }> {
-    return this.fetch("/api/setup/status");
+    const res = await this.fetch<{ data: { required: boolean } }>("/api/setup/status");
+    return res.data;
   }
 
   // Status
@@ -127,35 +157,58 @@ class ApiClient {
     if (step) {
       params.set("step", step);
     }
-    const res = await this.fetch<{ data: SystemMetricsResponse }>(
+    const res = await this.fetch<{
+      data: {
+        range: string;
+        step: string;
+        series: Array<{
+          timestamp: number;
+          cpu_percent: number;
+          memory_used_kb: number;
+          gpu_percent?: number;
+          disk_used_bytes: number;
+          disk_total_bytes: number;
+        }>;
+      };
+    }>(
       `/api/system/metrics?${params.toString()}`
     );
-    return res.data;
+    return {
+      range: res.data.range,
+      step: res.data.step,
+      series: res.data.series.map((point) => ({
+        timestamp: point.timestamp,
+        cpuPercent: point.cpu_percent,
+        memoryUsedKb: point.memory_used_kb,
+        gpuPercent: point.gpu_percent,
+        diskUsedBytes: point.disk_used_bytes,
+        diskTotalBytes: point.disk_total_bytes,
+      })),
+    };
   }
 
-  async startService(): Promise<Status> {
-    const res = await this.fetch<{ data: Status }>("/api/status/start", {
+  async startService(): Promise<void> {
+    await this.fetch("/api/service/start", {
       method: "POST",
     });
-    return res.data;
   }
 
-  async stopService(): Promise<Status> {
-    const res = await this.fetch<{ data: Status }>("/api/status/stop", {
+  async stopService(): Promise<void> {
+    await this.fetch("/api/service/stop", {
       method: "POST",
     });
-    return res.data;
   }
 
   // DNS
   async getDnsStatus(): Promise<DnsStatus> {
-    const res = await this.fetch<{ data: DnsStatus }>("/api/dns");
+    const res = await this.fetch<{ data: DnsStatus }>("/api/dns/status");
     return res.data;
   }
 
-  async checkDns(): Promise<DnsStatus> {
-    const res = await this.fetch<{ data: DnsStatus }>("/api/dns/check");
-    return res.data;
+  async checkDns(): Promise<void> {
+    await this.fetch("/api/dns/check", {
+      method: "POST",
+    });
   }
 
   async switchDns(name: string): Promise<void> {
@@ -173,6 +226,63 @@ class ApiClient {
 
   async reloadSubFiles(): Promise<void> {
     await this.fetch("/api/sub-files/reload", {
+      method: "POST",
+    });
+  }
+
+  // Subscriptions
+  async getSubscriptions(): Promise<SubscriptionItem[]> {
+    const res = await this.fetch<{ data: { items: SubscriptionItem[] } }>("/api/subscriptions");
+    return res.data.items;
+  }
+
+  async createSubscription(config: {
+    name?: string | null;
+    enabled?: boolean;
+    type: "url" | "git" | "path";
+    url?: string;
+    repo?: string;
+    path?: string;
+  }): Promise<SubscriptionItem> {
+    const res = await this.fetch<{ data: { item: SubscriptionItem } }>("/api/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+    return res.data.item;
+  }
+
+  async updateSubscription(
+    id: string,
+    config: {
+      name?: string | null;
+      enabled?: boolean;
+      type: "url" | "git" | "path";
+      url?: string;
+      repo?: string;
+      path?: string;
+    }
+  ): Promise<SubscriptionItem> {
+    const res = await this.fetch<{ data: { item: SubscriptionItem } }>(`/api/subscriptions/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+    return res.data.item;
+  }
+
+  async deleteSubscription(id: string): Promise<void> {
+    await this.fetch(`/api/subscriptions/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  async reloadSubscription(id: string): Promise<void> {
+    await this.fetch(`/api/subscriptions/${id}/reload`, {
+      method: "POST",
+    });
+  }
+
+  async reloadSubscriptions(): Promise<void> {
+    await this.fetch("/api/subscriptions/reload", {
       method: "POST",
     });
   }
@@ -232,28 +342,92 @@ class ApiClient {
     return res.data;
   }
 
-  async testDelay(nodeName: string): Promise<number> {
-    const res = await this.fetch<{ data: number }>("/api/clash/delays", {
-      method: "POST",
-      body: JSON.stringify({ name: nodeName }),
-    });
-    return res.data;
+  async testDelay(nodeName: string, url?: string, signal?: AbortSignal): Promise<number> {
+    let endpoint = `/api/clash/proxies/${encodeURIComponent(nodeName)}/delay`;
+    const params = new URLSearchParams();
+    if (url) params.set("url", url);
+    if (params.toString()) {
+      endpoint += `?${params.toString()}`;
+    }
+
+    return withRetry(async () => {
+      const res = await this.fetch<{ data: number }>(endpoint, {
+        method: "GET",
+        signal,
+      });
+      return res.data;
+    }, 2, 300);
+  }
+
+  async testBatchDelay(nodes: string[], url?: string, timeout?: number): Promise<Record<string, number>> {
+    return withRetry(async () => {
+      const res = await this.fetch<{
+        data: {
+          results: Array<{ node: string; delay: number | null; success: boolean }>;
+        };
+      }>("/api/clash/proxies/delay", {
+        method: "POST",
+        body: JSON.stringify({ nodes, url, timeout }),
+      });
+      const result: Record<string, number> = {};
+      for (const item of res.data.results) {
+        result[item.node] = item.delay ?? 0;
+      }
+      return result;
+    }, 2, 500);
   }
 
   async switchProxy(group: string, name: string): Promise<void> {
-    await this.fetch("/api/clash/switch", {
-      method: "POST",
-      body: JSON.stringify({ group, name }),
+    await this.fetch(`/api/clash/proxies/${encodeURIComponent(group)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name }),
     });
   }
 
   // Sync (Backup)
   async getSyncs(): Promise<SyncConfig[]> {
-    const res = await this.fetch<{ data: SyncConfig[] }>("/api/syncs");
-    return res.data;
+    const res = await this.fetch<{
+      data: {
+        items: Array<{
+          id: string;
+          name?: string | null;
+          enabled: boolean;
+          local_paths: Array<{ path: string }>;
+          remote_path?: string | null;
+          ssh: { host: string; port: number; username: string };
+          auth?: { type: "password"; password?: string | null } | { type: "private_key_path"; path: string } | { type: "ssh_agent" };
+          options?: SyncConfig["options"];
+          schedule?: SyncConfig["schedule"];
+          status?: SyncConfig["status"];
+        }>;
+      };
+    }>("/api/syncs");
+
+    return res.data.items.map((item) => {
+      const auth = item.auth
+        ? item.auth.type === "password"
+          ? { type: "password" as const, password: item.auth.password ?? null }
+          : item.auth.type === "ssh_agent"
+          ? { type: "ssh_agent" as const }
+          : undefined
+        : undefined;
+
+      return {
+        id: item.id,
+        name: item.name ?? null,
+        enabled: item.enabled,
+        local_paths: (item.local_paths || []).map((entry) => entry.path),
+        remote_path: item.remote_path ?? null,
+        ssh: item.ssh,
+        auth,
+        options: item.options,
+        schedule: item.schedule,
+        status: item.status,
+      };
+    });
   }
 
-  async createSync(config: Omit<SyncConfig, "id">): Promise<SyncConfig> {
+  async createSync(config: Record<string, unknown>): Promise<SyncConfig> {
     const res = await this.fetch<{ data: SyncConfig }>("/api/syncs", {
       method: "POST",
       body: JSON.stringify(config),
@@ -261,7 +435,7 @@ class ApiClient {
     return res.data;
   }
 
-  async updateSync(id: string, config: Partial<SyncConfig>): Promise<void> {
+  async updateSync(id: string, config: Record<string, unknown>): Promise<void> {
     await this.fetch(`/api/syncs/${id}`, {
       method: "PUT",
       body: JSON.stringify(config),
@@ -293,12 +467,72 @@ class ApiClient {
   }
 
   // TCP Tunnels
-  async getTcpTunnels(): Promise<TcpTunnel[]> {
-    const res = await this.fetch<{ data: TcpTunnel[] }>("/api/tcp-tunnels");
-    return res.data;
+  async getTcpTunnels(): Promise<{ supported: boolean; items: TcpTunnel[] }> {
+    const res = await this.fetch<{
+      data: {
+        supported: boolean;
+        items: Array<{
+          id: string;
+          name?: string | null;
+          enabled: boolean;
+          local_addr: string;
+          local_port: number;
+          remote_bind_addr: string;
+          remote_port: number;
+          ssh_host: string;
+          ssh_port: number;
+          username: string;
+          auth:
+            | { type: "password"; password?: string }
+            | { type: "private_key_path"; path: string }
+            | { type: "ssh_agent" };
+          strict_host_key_checking: boolean;
+          host_key_fingerprint: string;
+          allow_public_bind: boolean;
+          connect_timeout_ms: number;
+          keepalive_interval_ms: number;
+          reconnect_backoff_ms: { base_ms: number; max_ms: number };
+          status: TcpTunnel["status"];
+        }>;
+      };
+    }>("/api/tcp-tunnels");
+
+    const items = res.data.items.map((item) => {
+      const authType = item.auth?.type ?? "password";
+      const password = item.auth?.type === "password" ? item.auth.password : undefined;
+      const privateKeyPath = item.auth?.type === "private_key_path" ? item.auth.path : undefined;
+
+      return {
+        id: item.id,
+        name: item.name ?? undefined,
+        mode: "single" as const,
+        enabled: item.enabled,
+        local_addr: item.local_addr,
+        local_port: item.local_port,
+        remote_bind_addr: item.remote_bind_addr,
+        remote_port: item.remote_port,
+        ssh_host: item.ssh_host,
+        ssh_port: item.ssh_port,
+        username: item.username,
+        auth_type: authType,
+        password,
+        private_key_path: privateKeyPath,
+        strict_host_key_checking: item.strict_host_key_checking,
+        host_key_fingerprint: item.host_key_fingerprint,
+        allow_public_bind: item.allow_public_bind,
+        connect_timeout_ms: item.connect_timeout_ms,
+        keepalive_interval_ms: item.keepalive_interval_ms,
+        backoff_base_ms: item.reconnect_backoff_ms?.base_ms,
+        backoff_max_ms: item.reconnect_backoff_ms?.max_ms,
+        status: item.status,
+      };
+    });
+
+    const supported = res.data.supported ?? true;
+    return { supported, items };
   }
 
-  async createTcpTunnel(config: Omit<TcpTunnel, "id" | "status">): Promise<TcpTunnel> {
+  async createTcpTunnel(config: Record<string, unknown>): Promise<TcpTunnel> {
     const res = await this.fetch<{ data: TcpTunnel }>("/api/tcp-tunnels", {
       method: "POST",
       body: JSON.stringify(config),
@@ -306,7 +540,7 @@ class ApiClient {
     return res.data;
   }
 
-  async updateTcpTunnel(id: string, config: Partial<TcpTunnel>): Promise<void> {
+  async updateTcpTunnel(id: string, config: Record<string, unknown>): Promise<void> {
     await this.fetch(`/api/tcp-tunnels/${id}`, {
       method: "PUT",
       body: JSON.stringify(config),
@@ -351,8 +585,8 @@ class ApiClient {
 
   // Terminals
   async getTerminals(): Promise<Terminal[]> {
-    const res = await this.fetch<{ data: Terminal[] }>("/api/terminals");
-    return res.data;
+    const res = await this.fetch<{ data: { items: Terminal[] } }>("/api/terminals");
+    return res.data.items;
   }
 
   async createTerminal(config: Omit<Terminal, "id" | "status">): Promise<Terminal> {
@@ -395,15 +629,15 @@ class ApiClient {
   }
 
   async upgradeGotty(): Promise<void> {
-    await this.fetch("/api/terminals/upgrade", {
+    await this.fetch("/api/gotty/upgrade", {
       method: "POST",
     });
   }
 
   // VNC
   async getVncSessions(): Promise<VncSession[]> {
-    const res = await this.fetch<{ data: VncSession[] }>("/api/vnc-sessions");
-    return res.data;
+    const res = await this.fetch<{ data: { items: VncSession[] } }>("/api/vnc-sessions");
+    return res.data.items;
   }
 
   async createVncSession(config: Record<string, unknown>): Promise<VncSession> {
@@ -447,8 +681,8 @@ class ApiClient {
 
   // Apps
   async getApps(): Promise<App[]> {
-    const res = await this.fetch<{ data: App[] }>("/api/apps");
-    return res.data;
+    const res = await this.fetch<{ data: { items: App[] } }>("/api/apps");
+    return res.data.items;
   }
 
   async getAppTemplates(): Promise<{ templates: AppTemplate[] }> {
@@ -496,40 +730,93 @@ class ApiClient {
   }
 
   // Update
-  async checkUpdate(): Promise<{ version: string; url: string }> {
-    const res = await this.fetch<{ data: { version: string; url: string } }>("/api/update");
+  async getVersion(): Promise<VersionInfo> {
+    const res = await this.fetch<{ data: VersionInfo }>("/api/version");
     return res.data;
   }
 
-  async performUpdate(): Promise<void> {
-    await this.fetch("/api/update", {
+  async upgrade(): Promise<string> {
+    const res = await this.fetch<{ data: string }>("/api/upgrade", {
       method: "POST",
     });
-  }
-
-  // Reload
-  async reloadSubscription(): Promise<void> {
-    await this.fetch("/api/clash/reload", {
-      method: "POST",
-    });
-  }
-
-  // Logs
-  async getLogs(): Promise<LogEntry[]> {
-    const res = await this.fetch<{ data: LogEntry[] }>("/api/logs");
     return res.data;
+  }
+
+  async updatePassword(password: string): Promise<void> {
+    await this.fetch("/api/password", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+  }
+
+  // Hosts
+  async getHosts(): Promise<Host[]> {
+    const res = await this.fetch<{ data: { items: Host[] } }>("/api/hosts");
+    return res.data.items;
+  }
+
+  async getHostDefaultKeyPath(): Promise<string | null> {
+    const res = await this.fetch<{ data: { path: string | null } }>("/api/hosts/default-key-path");
+    return res.data.path;
+  }
+
+  async testHostConfig(config: Partial<Host> & { auth_type: string }): Promise<void> {
+    await this.fetch("/api/hosts/test", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async getHost(id: string): Promise<Host> {
+    const res = await this.fetch<{ data: Host }>(`/api/hosts/${id}`);
+    return res.data;
+  }
+
+  async createHost(config: Omit<Host, "id">): Promise<Host> {
+    const res = await this.fetch<{ data: Host }>("/api/hosts", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+    return res.data;
+  }
+
+  async updateHost(id: string, config: Partial<Host>): Promise<void> {
+    await this.fetch(`/api/hosts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async deleteHost(id: string): Promise<void> {
+    await this.fetch(`/api/hosts/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  async testHost(id: string): Promise<void> {
+    await this.fetch(`/api/hosts/${id}/test`, {
+      method: "POST",
+    });
   }
 }
 
 export const api = new ApiClient();
 
 // WebSocket helper functions
+function getWsBase(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/^http/, "ws");
+  }
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${window.location.host}`;
+}
+
 export function getTrafficWsUrl(): string {
   const token = localStorage.getItem("miao_token");
   if (!token) {
     throw new Error("No authentication token found. Please login first.");
   }
-  const wsBase = API_BASE.replace("http", "ws");
+  const wsBase = getWsBase();
   return `${wsBase}/api/clash/ws/traffic?token=${token}`;
 }
 
@@ -538,6 +825,6 @@ export function getLogsWsUrl(): string {
   if (!token) {
     throw new Error("No authentication token found. Please login first.");
   }
-  const wsBase = API_BASE.replace("http", "ws");
+  const wsBase = getWsBase();
   return `${wsBase}/api/clash/ws/logs?token=${token}`;
 }

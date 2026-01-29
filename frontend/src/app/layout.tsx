@@ -1,14 +1,8 @@
 import type { Metadata } from "next";
-import { Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
+import "@/components/onboarding/driver-custom.css";
 import { MockProvider } from "@/components/MockProvider";
-
-const plusJakartaSans = Plus_Jakarta_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
-  variable: "--font-plus-jakarta",
-  display: "swap",
-});
+import { OnboardingProvider, OnboardingTour } from "@/components/onboarding";
 
 export const metadata: Metadata = {
   title: "Miao 控制面板",
@@ -26,10 +20,15 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body
-        className={`${plusJakartaSans.variable} antialiased`}
-        style={{ fontFamily: "var(--font-plus-jakarta), -apple-system, BlinkMacSystemFont, sans-serif" }}
+        className="antialiased"
+        style={{ fontFamily: "-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif" }}
       >
-        <MockProvider>{children}</MockProvider>
+        <MockProvider>
+          <OnboardingProvider>
+            {children}
+            <OnboardingTour />
+          </OnboardingProvider>
+        </MockProvider>
       </body>
     </html>
   );

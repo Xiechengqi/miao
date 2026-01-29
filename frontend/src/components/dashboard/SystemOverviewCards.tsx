@@ -1,21 +1,14 @@
 "use client";
 
-import { Cpu, HardDrive, MemoryStick, Monitor } from "lucide-react";
+import { Clock, Cpu, HardDrive, MemoryStick } from "lucide-react";
 import { Card } from "@/components/ui/Card/Card";
 import { formatBytes, formatKb, formatPercent } from "@/lib/format";
+import { formatUptime } from "@/lib/utils";
 import { SystemInfo, SystemStatus } from "@/types/api";
 
 interface SystemOverviewCardsProps {
   info?: SystemInfo | null;
   status?: SystemStatus | null;
-}
-
-function averageGpuPercent(status?: SystemStatus | null): number | undefined {
-  if (!status || status.graphics.length === 0) {
-    return undefined;
-  }
-  const total = status.graphics.reduce((sum, gpu) => sum + gpu.gpu, 0);
-  return total / status.graphics.length;
 }
 
 function primaryDiskUsage(status?: SystemStatus | null): { used: number; total: number } | null {
@@ -26,7 +19,6 @@ function primaryDiskUsage(status?: SystemStatus | null): { used: number; total: 
 }
 
 export function SystemOverviewCards({ info, status }: SystemOverviewCardsProps) {
-  const gpuPercent = averageGpuPercent(status);
   const diskUsage = primaryDiskUsage(status);
   const memoryUsed = status ? formatKb(status.memoryUsedKb) : "-";
   const memoryTotal = info ? formatBytes(info.memory) : "-";
@@ -34,13 +26,29 @@ export function SystemOverviewCards({ info, status }: SystemOverviewCardsProps) 
   const diskTotal = diskUsage ? formatBytes(diskUsage.total) : "-";
 
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
+    <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <Card className="h-full p-5">
+        <div className="flex h-full items-center justify-between">
+          <div>
+            <p className="text-sm text-slate-500">开机时长</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">
+              {formatUptime(status?.uptimeSecs ?? undefined)}
+            </p>
+          </div>
+          <div className="rounded-lg bg-slate-100 p-3 text-slate-600">
+            <Clock className="h-5 w-5" />
+          </div>
+        </div>
+      </Card>
+      <Card className="h-full p-5">
+        <div className="flex h-full items-center justify-between">
           <div>
             <p className="text-sm text-slate-500">CPU 使用率</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">
               {formatPercent(status?.cpuPercent)}
+            </p>
+            <p className="text-xs text-slate-400">
+              核心 {info?.totalProcessors ?? "-"}
             </p>
           </div>
           <div className="rounded-lg bg-indigo-50 p-3 text-indigo-600">
@@ -48,8 +56,8 @@ export function SystemOverviewCards({ info, status }: SystemOverviewCardsProps) 
           </div>
         </div>
       </Card>
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
+      <Card className="h-full p-5">
+        <div className="flex h-full items-center justify-between">
           <div>
             <p className="text-sm text-slate-500">内存使用</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">
@@ -62,24 +70,8 @@ export function SystemOverviewCards({ info, status }: SystemOverviewCardsProps) 
           </div>
         </div>
       </Card>
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm text-slate-500">GPU 使用率</p>
-            <p className="mt-2 text-2xl font-semibold text-slate-900">
-              {formatPercent(gpuPercent)}
-            </p>
-            {gpuPercent === undefined && (
-              <p className="text-xs text-slate-400">未检测到 GPU</p>
-            )}
-          </div>
-          <div className="rounded-lg bg-purple-50 p-3 text-purple-600">
-            <Monitor className="h-5 w-5" />
-          </div>
-        </div>
-      </Card>
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
+      <Card className="h-full p-5 xl:col-span-2">
+        <div className="flex h-full items-center justify-between">
           <div>
             <p className="text-sm text-slate-500">磁盘使用</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">

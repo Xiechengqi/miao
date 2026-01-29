@@ -5,7 +5,7 @@ use axum::{
     },
     http::{Request, StatusCode},
     middleware::{self, Next},
-    response::{Html, Json, Response},
+    response::{Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -21,18 +21,21 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path as StdPath, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_tungstenite::connect_async;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::spawn_blocking;
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
 use tokio::io::AsyncWriteExt;
 use base64::Engine;
+use chrono::Utc;
 use rust_embed::RustEmbed;
 use axum::response::IntoResponse;
 
@@ -185,6 +188,7 @@ enum TcpTunnelAuth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         passphrase: Option<String>,
     },
+    SshAgent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -557,6 +561,105 @@ impl Default for MetricsConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum SubscriptionSource {
+    Url { url: String },
+    Git { repo: String },
+    Path { path: String },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SubscriptionConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(flatten)]
+    source: SubscriptionSource,
+}
+
+// Host configuration for SSH connections
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum HostAuth {
+    Password {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+    PrivateKeyPath {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase: Option<String>,
+    },
+    SshAgent,
+}
+
+fn default_private_key_path() -> Option<String> {
+    let candidates = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
+    for name in candidates {
+        let path = format!("/root/.ssh/{}", name);
+        if fs::metadata(&path).map(|meta| meta.is_file()).unwrap_or(false) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn resolve_private_key_path(path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    if !trimmed.is_empty() {
+        return Ok(trimmed.to_string());
+    }
+    default_private_key_path().ok_or_else(|| "Private key path is required".to_string())
+}
+
+async fn test_host_connection(cfg: &HostConfig) -> Result<(), String> {
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-o").arg("BatchMode=yes")
+       .arg("-o").arg("ConnectTimeout=5")
+       .arg("-o").arg("StrictHostKeyChecking=no")
+       .arg("-p").arg(cfg.port.to_string());
+
+    match &cfg.auth {
+        HostAuth::PrivateKeyPath { path, .. } => {
+            let resolved_path = resolve_private_key_path(path)?;
+            cmd.arg("-i").arg(resolved_path);
+        }
+        _ => {}
+    }
+
+    cmd.arg(format!("{}@{}", cfg.username, cfg.host))
+       .arg("echo")
+       .arg("ok");
+
+    let output = cmd.output().await.map_err(|e| format!("Failed to run SSH: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Connection failed: {}", stderr.trim()))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct HostConfig {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    host: String,
+    #[serde(default = "default_ssh_port")]
+    port: u16,
+    username: String,
+    auth: HostAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
@@ -614,6 +717,12 @@ struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tcp_tunnel_sets: Vec<TcpTunnelSetConfig>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    subscriptions: Vec<SubscriptionConfig>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hosts: Vec<HostConfig>,
+
     #[serde(default)]
     metrics: MetricsConfig,
 }
@@ -643,6 +752,11 @@ struct LoginRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct PasswordChangeRequest {
+    password: String,
+}
+
 // 登录响应结构
 #[derive(Serialize)]
 struct LoginResponse {
@@ -664,6 +778,7 @@ struct SelectionsResponse {
 enum TcpTunnelAuthPublic {
     Password { password: String },
     PrivateKeyPath { path: String },
+    SshAgent,
 }
 
 #[derive(Serialize)]
@@ -754,6 +869,8 @@ struct TcpTunnelUpsertRequest {
     name: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    host_id: Option<String>,
     #[serde(default)]
     local_addr: Option<String>,
     local_port: u16,
@@ -884,6 +1001,7 @@ impl Default for SyncRuntimeStatus {
 enum SyncAuthPublic {
     Password { password: String },
     PrivateKeyPath { path: String },
+    SshAgent,
 }
 
 #[derive(Serialize)]
@@ -928,6 +1046,8 @@ struct SyncUpsertRequest {
     name: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    host_id: Option<String>,
     local_paths: Vec<String>,
     #[serde(default)]
     remote_path: Option<String>,
@@ -940,6 +1060,60 @@ struct SyncUpsertRequest {
     options: SyncOptions,
     #[serde(default)]
     schedule: Option<SyncSchedule>,
+}
+
+// Host API types
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HostAuthTypePublic {
+    Password,
+    PrivateKeyPath,
+    SshAgent,
+}
+
+#[derive(Serialize)]
+struct HostItem {
+    id: String,
+    name: Option<String>,
+    host: String,
+    port: u16,
+    username: String,
+    auth_type: HostAuthTypePublic,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_path: Option<String>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct HostListResponse {
+    items: Vec<HostItem>,
+}
+
+#[derive(Deserialize)]
+struct HostUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    username: String,
+    auth_type: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    private_key_path: Option<String>,
+    #[serde(default)]
+    private_key_passphrase: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HostDefaultKeyPathResponse {
+    path: Option<String>,
+}
+
+fn generate_host_id() -> String {
+    format!("h-{}", uuid::Uuid::new_v4())
 }
 
 fn generate_tunnel_set_id() -> String {
@@ -982,10 +1156,8 @@ impl SystemMonitor {
 struct AppState {
     config: Mutex<Config>,
     sing_box_home: String,
-    sub_dir: PathBuf,
-    sub_source: SubSource,
-    sub_files: Mutex<Vec<SubFileStatus>>,
-    sub_dir_error: Mutex<Option<String>>,
+    subscriptions_root: PathBuf,
+    subscription_status: Mutex<HashMap<String, SubscriptionRuntime>>,
     node_type_by_tag: Mutex<HashMap<String, String>>,
     dns_monitor: Mutex<DnsMonitorState>,
     proxy_monitor: Mutex<ProxyMonitorState>,
@@ -997,25 +1169,11 @@ struct AppState {
     metrics_config: MetricsConfig,
 }
 
-#[derive(Clone)]
-enum SubSource {
-    Path { value: String },
-    Git { url: String },
-}
-
 #[derive(Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum SubSourceResponse {
-    Path { value: String },
-    Git { url: String, workdir: String },
-}
-
-#[derive(Deserialize, Debug)]
-struct IpCheckResponse {
-    ip: String,
-    location: String,
-    #[serde(default)]
-    xad: String,
+struct SubscriptionRuntime {
+    files: Vec<SubFileStatus>,
+    error: Option<String>,
+    updated_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1329,16 +1487,69 @@ struct SubFileStatus {
     loaded: bool,
     node_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
 #[derive(Serialize)]
 struct SubFilesResponse {
     sub_dir: String,
-    sub_source: SubSourceResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub_source: Option<SubscriptionSourceResponse>,
     files: Vec<SubFileStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum SubscriptionSourceResponse {
+    Url { url: String },
+    Git { repo: String, workdir: String },
+    Path { path: String },
+}
+
+#[derive(Serialize)]
+struct SubscriptionItem {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    enabled: bool,
+    source: SubscriptionSourceResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    files: Vec<SubFileStatus>,
+}
+
+#[derive(Serialize)]
+struct SubscriptionListResponse {
+    items: Vec<SubscriptionItem>,
+}
+
+#[derive(Serialize)]
+struct SubscriptionSaveResponse {
+    item: SubscriptionItem,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum SubscriptionSourceInput {
+    Url { url: String },
+    Git { repo: String },
+    Path { path: String },
+}
+
+#[derive(Deserialize)]
+struct SubscriptionUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(flatten)]
+    source: SubscriptionSourceInput,
 }
 
 struct LoadedSubscriptions {
@@ -1442,7 +1653,6 @@ struct GottyProcess {
 struct VncProcess {
     child: tokio::process::Child,
     started_at: Instant,
-    display: String,
 }
 
 struct AppProcess {
@@ -1455,6 +1665,103 @@ lazy_static! {
     static ref GOTTY_PROCESSES: Mutex<HashMap<String, GottyProcess>> = Mutex::new(HashMap::new());
     static ref VNC_PROCESSES: Mutex<HashMap<String, VncProcess>> = Mutex::new(HashMap::new());
     static ref APP_PROCESSES: Mutex<HashMap<String, AppProcess>> = Mutex::new(HashMap::new());
+    static ref WS_CONNECT_ERROR_LOGS: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+    static ref LOG_BROADCAST: broadcast::Sender<String> = {
+        let (tx, _rx) = broadcast::channel(1000);
+        tx
+    };
+    static ref LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
+}
+
+// ============================================================================
+// Logging Infrastructure
+// ============================================================================
+
+fn broadcast_log(level: &str, message: &str) {
+    use chrono::FixedOffset;
+    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+    let entry = serde_json::json!({
+        "time": time_str,
+        "level": level,
+        "message": message
+    });
+    let entry_str = entry.to_string();
+    {
+        let mut buffer = LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.push_back(entry_str.clone());
+        if buffer.len() > 1000 {
+            buffer.pop_front();
+        }
+    }
+    let _ = LOG_BROADCAST.send(entry_str);
+}
+
+macro_rules! log_info {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        println!("{}", msg);
+        crate::broadcast_log("info", &msg);
+    }};
+}
+
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        eprintln!("{}", msg);
+        crate::broadcast_log("error", &msg);
+    }};
+}
+
+macro_rules! log_warning {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        println!("{}", msg);
+        crate::broadcast_log("warning", &msg);
+    }};
+}
+
+/// Spawns a child process with stdout/stderr piped and captured to the log broadcast.
+/// Returns the spawned Child. The caller is responsible for storing/managing the child.
+fn spawn_with_log_capture(
+    command: &mut tokio::process::Command,
+    process_name: String,
+) -> Result<tokio::process::Child, std::io::Error> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    // Capture stdout
+    if let Some(stdout) = child.stdout.take() {
+        let name = process_name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[{}] {}", name, line);
+                let _ = std::io::stdout().flush();
+                broadcast_log("info", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    // Capture stderr
+    if let Some(stderr) = child.stderr.take() {
+        let name = process_name;
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[{}] {}", name, line);
+                let _ = std::io::stderr().flush();
+                broadcast_log("error", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    Ok(child)
 }
 
 // ============================================================================
@@ -1465,20 +1772,38 @@ lazy_static! {
 async fn serve_static(Path(path): Path<String>) -> Response {
     let path = path.trim_start_matches('/');
 
-    match StaticAssets::get(path) {
-        Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            (
-                StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
-                content.data.into_owned(),
-            ).into_response()
-        }
-        None => {
-            // File not found, fall back to serving index.html for SPA routing
-            spa_fallback().await
-        }
+    // 1. Try exact path match
+    if let Some(content) = StaticAssets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+            content.data.into_owned(),
+        ).into_response();
     }
+
+    // 2. Try with .html extension (for Next.js static export)
+    let html_path = format!("{}.html", path);
+    if let Some(content) = StaticAssets::get(&html_path) {
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/html")],
+            content.data.into_owned(),
+        ).into_response();
+    }
+
+    // 3. Try with /index.html (for directory index)
+    let index_path = format!("{}/index.html", path);
+    if let Some(content) = StaticAssets::get(&index_path) {
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/html")],
+            content.data.into_owned(),
+        ).into_response();
+    }
+
+    // 4. Fall back to SPA routing (serve root index.html)
+    spa_fallback().await
 }
 
 /// SPA fallback: serve index.html for all unmatched routes (client-side routing)
@@ -1502,18 +1827,10 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Json<ApiResponse<LoginResponse>> {
-    if state.setup_required.load(Ordering::Relaxed) {
-        return Json(ApiResponse {
-            success: false,
-            message: "未初始化，请先完成初始化设置".to_string(),
-            data: None,
-        });
-    }
-
     let config = state.config.lock().await;
 
-    // 获取配置中的密码，如果未设置则使用默认密码 "admin"
-    let expected_password = config.password.as_deref().unwrap_or("admin");
+    // 获取配置中的密码，如果未设置则使用默认密码 "admin123"
+    let expected_password = config.password.as_deref().unwrap_or("admin123");
 
     // 验证密码
     if req.password != expected_password {
@@ -1537,6 +1854,25 @@ async fn login(
             data: None,
         }),
     }
+}
+
+/// POST /api/password - Update login password
+async fn update_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PasswordChangeRequest>,
+) -> Json<ApiResponse<()>> {
+    let password = req.password.trim();
+    if password.len() < 4 {
+        return Json(ApiResponse::error("密码至少 4 位"));
+    }
+
+    let mut config = state.config.lock().await;
+    config.password = Some(password.to_string());
+    if let Err(e) = save_config(&config).await {
+        return Json(ApiResponse::error(format!("保存配置失败: {}", e)));
+    }
+
+    Json(ApiResponse::success_no_data("密码已更新"))
 }
 
 /// GET /api/status - Get sing-box running status
@@ -1571,21 +1907,36 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
 
 async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
     let mut machine = state.system_monitor.machine.lock().await;
-    let info = machine.system_info();
+    let mut info = machine.system_info();
     let status = machine
         .system_status()
         .map_err(|e| format!("Failed to read system status: {}", e))?;
     let graphics = machine.graphics_status();
     drop(machine);
 
+    if info.processor.brand.trim().is_empty() {
+        if let Some(fallback) = read_cpu_brand_fallback(&info) {
+            info.processor.brand = fallback;
+        }
+    }
+
     let sample_period_secs = state.metrics_config.sample_interval_secs.max(1);
     let (primary_disk_used, primary_disk_total) =
         select_primary_disk(&info).unwrap_or((0, 0));
     let gpu_percent = average_gpu_percent(&graphics);
 
+    let mut seen_mounts: HashSet<String> = HashSet::new();
     let disks_usage = info
         .disks
         .iter()
+        .filter(|disk| {
+            let key = if disk.mount_point.is_empty() {
+                &disk.name
+            } else {
+                &disk.mount_point
+            };
+            seen_mounts.insert(key.to_string())
+        })
         .map(|disk| {
             json!({
                 "name": disk.name,
@@ -1597,11 +1948,13 @@ async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
 
     let info_value = serde_json::to_value(&info)
         .map_err(|e| format!("Failed to serialize system info: {}", e))?;
+    let uptime_secs = read_uptime_secs();
     let status_value = json!({
         "timestamp": chrono::Utc::now().timestamp(),
         "samplePeriodSecs": sample_period_secs,
         "cpuPercent": status.cpu,
         "memoryUsedKb": status.memory,
+        "uptimeSecs": uptime_secs,
         "graphics": graphics,
         "disks": disks_usage,
         "nvidiaAvailable": !graphics.is_empty()
@@ -1623,6 +1976,53 @@ async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn read_uptime_secs() -> Option<u64> {
+    let contents = fs::read_to_string("/proc/uptime").ok()?;
+    let first = contents.split_whitespace().next()?;
+    let seconds = first.parse::<f64>().ok()?;
+    if seconds.is_finite() && seconds >= 0.0 {
+        Some(seconds.floor() as u64)
+    } else {
+        None
+    }
+}
+
+fn read_cpu_brand_fallback(info: &machine_info::SystemInfo) -> Option<String> {
+    if let Some(model) = info.model.as_ref() {
+        let trimmed = model.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").ok()?;
+    let mut hardware = None;
+    let mut processor = None;
+
+    for line in cpuinfo.lines() {
+        if let Some(value) = line.strip_prefix("model name") {
+            let name = value.trim_start_matches(':').trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        if let Some(value) = line.strip_prefix("Hardware") {
+            let name = value.trim_start_matches(':').trim();
+            if !name.is_empty() {
+                hardware = Some(name.to_string());
+            }
+        }
+        if let Some(value) = line.strip_prefix("Processor") {
+            let name = value.trim_start_matches(':').trim();
+            if !name.is_empty() {
+                processor = Some(name.to_string());
+            }
+        }
+    }
+
+    hardware.or(processor)
 }
 
 #[derive(Serialize)]
@@ -2643,7 +3043,7 @@ async fn start_service(
         if proc.child.try_wait().ok().flatten().is_none() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("sing-box is already running")),
+                Json(ApiResponse::error("sing-box 正在运行中")),
             ));
         }
     }
@@ -2655,12 +3055,12 @@ async fn start_service(
             let config = state.config.lock().await;
             let _ = apply_saved_selections(&config).await;
             Ok(Json(ApiResponse::success_no_data(
-                "sing-box started successfully",
+                "sing-box 启动成功",
             )))
         }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to start: {}", e))),
+            Json(ApiResponse::error(e)),
         )),
     }
 }
@@ -3307,7 +3707,7 @@ async fn setup_init(
     let state_clone = state.clone();
     tokio::spawn(async move {
         if let Err(e) = regenerate_and_restart(state_clone).await {
-            eprintln!("Background regenerate failed after setup: {}", e);
+            log_error!("Background regenerate failed after setup: {}", e);
         }
     });
 
@@ -3467,6 +3867,114 @@ async fn clash_test_delay(
     Ok(Json(ApiResponse::success("Delay", json)))
 }
 
+#[derive(Deserialize)]
+struct BatchDelayRequest {
+    nodes: Vec<String>,
+    url: Option<String>,
+    timeout: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct BatchDelayResponse {
+    results: Vec<BatchDelayItem>,
+    total: usize,
+    success: usize,
+}
+
+#[derive(Serialize)]
+struct BatchDelayItem {
+    node: String,
+    delay: Option<u64>,
+    success: bool,
+}
+
+async fn clash_test_batch_delay(
+    Json(req): Json<BatchDelayRequest>,
+) -> Result<Json<ApiResponse<BatchDelayResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to create client: {}", e)))))?;
+
+    // 并行测试所有节点延迟
+    let mut tasks = Vec::with_capacity(req.nodes.len());
+
+    for node in &req.nodes {
+        let client = client.clone();
+        let node = node.clone();
+        let timeout = req.timeout;
+        let url = req.url.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let mut result_url = format!("{}/proxies/{}/delay", CLASH_HTTP_BASE,
+                percent_encoding::utf8_percent_encode(&node, percent_encoding::NON_ALPHANUMERIC));
+
+            let mut params: Vec<(&str, String)> = Vec::new();
+            if let Some(t) = timeout {
+                params.push(("timeout", t.to_string()));
+            }
+            if let Some(ref test_url) = url {
+                params.push(("url", test_url.clone()));
+            }
+
+            if !params.is_empty() {
+                let query_string: String = params.iter()
+                    .map(|(k, v)| format!("{}={}", k, percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC)))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                result_url = format!("{}?{}", result_url, query_string);
+            }
+
+            let resp = client.get(&result_url).send().await;
+
+            let delay_result = match resp {
+                Ok(r) if r.status().is_success() => {
+                    match r.json::<serde_json::Value>().await {
+                        Ok(json) => json.get("delay").and_then(|d| d.as_u64()),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+
+            BatchDelayItem {
+                node,
+                delay: delay_result,
+                success: delay_result.is_some(),
+            }
+        }));
+    }
+
+    // 等待所有任务完成
+    let mut results = Vec::with_capacity(tasks.len());
+    let mut success_count = 0;
+
+    for task in tasks {
+        match task.await {
+            Ok(item) => {
+                if item.success {
+                    success_count += 1;
+                }
+                results.push(item);
+            }
+            Err(_) => {
+                // 任务panic，添加空结果
+                results.push(BatchDelayItem {
+                    node: String::new(),
+                    delay: None,
+                    success: false,
+                });
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success("Batch delay test completed", BatchDelayResponse {
+        results,
+        total: req.nodes.len(),
+        success: success_count,
+    })))
+}
+
 async fn get_selections(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<SelectionsResponse>> {
@@ -3497,16 +4005,100 @@ async fn clash_ws_logs(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let level = q.level.unwrap_or_else(|| "info".to_string());
-    Ok(ws.on_upgrade(move |socket| {
-        proxy_websocket(
-            socket,
-            format!(
-                "{}/logs?level={}",
-                CLASH_WS_BASE,
-                percent_encoding::utf8_percent_encode(&level, percent_encoding::NON_ALPHANUMERIC)
-            ),
-        )
-    }))
+    Ok(ws.on_upgrade(move |socket| handle_logs_websocket(socket, level)))
+}
+
+async fn handle_logs_websocket(mut socket: WebSocket, min_level: String) {
+    let mut rx = LOG_BROADCAST.subscribe();
+
+    // Helper to check if log level passes the filter
+    fn level_passes(log_level: &str, min_level: &str) -> bool {
+        let level_priority = |l: &str| match l.to_lowercase().as_str() {
+            "debug" => 0,
+            "info" => 1,
+            "warning" => 2,
+            "error" => 3,
+            _ => 1,
+        };
+        level_priority(log_level) >= level_priority(min_level)
+    }
+
+    let history: Vec<String> = {
+        let buffer = LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    };
+    for msg in history {
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&msg) {
+            if let Some(level) = entry.get("level").and_then(|v| v.as_str()) {
+                if !level_passes(level, &min_level) {
+                    continue;
+                }
+            }
+        }
+        if socket.send(Message::Text(msg.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        // Parse JSON to check level filter
+                        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&msg) {
+                            if let Some(level) = entry.get("level").and_then(|v| v.as_str()) {
+                                if !level_passes(level, &min_level) {
+                                    continue;
+                                }
+                            }
+                        }
+                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // Client is too slow, some messages were dropped
+                        use chrono::FixedOffset;
+                        let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+                        let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+                        let warning = serde_json::json!({
+                            "time": time_str,
+                            "level": "warning",
+                            "message": format!("Dropped {} log messages (client too slow)", n)
+                        });
+                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn should_log_ws_connect_error(url: &str) -> bool {
+    let mut guard = WS_CONNECT_ERROR_LOGS.lock().await;
+    let now = Instant::now();
+    if let Some(last) = guard.get_mut(url) {
+        if now.duration_since(*last) >= Duration::from_secs(30) {
+            *last = now;
+            return true;
+        }
+        return false;
+    }
+    guard.insert(url.to_string(), now);
+    true
 }
 
 async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
@@ -3514,7 +4106,10 @@ async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
     let (upstream_ws, _) = match upstream {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Failed to connect upstream websocket {}: {}", upstream_url, e);
+            // Only log error if sing-box is running (to avoid spam when service is stopped)
+            if sing_box_running().await && should_log_ws_connect_error(&upstream_url).await {
+                log_error!("Failed to connect upstream websocket {}: {}", upstream_url, e);
+            }
             let _ = client_socket.close().await;
             return;
         }
@@ -3604,7 +4199,7 @@ async fn proxy_websocket(mut client_socket: WebSocket, upstream_url: String) {
                     break;
                 }
                 Err(e) => {
-                    eprintln!("Upstream websocket error: {}", e);
+                    log_error!("Upstream websocket error: {}", e);
                     break;
                 }
                 _ => {}
@@ -3642,28 +4237,6 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-/// Parse version string like "v0.6.10" into comparable tuple
-fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
-    let v = v.strip_prefix('v').unwrap_or(v);
-    let parts: Vec<&str> = v.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some((
-        parts[0].parse().ok()?,
-        parts[1].parse().ok()?,
-        parts[2].parse().ok()?,
-    ))
-}
-
-/// Compare two version strings, returns true if `latest` is newer than `current`
-fn is_newer_version(current: &str, latest: &str) -> bool {
-    match (parse_version(current), parse_version(latest)) {
-        (Some(c), Some(l)) => l > c,
-        _ => false,
-    }
-}
-
 /// GET /api/version - Get current version and check for updates
 async fn get_version() -> Json<ApiResponse<VersionInfo>> {
     let current = format!("v{}", VERSION);
@@ -3695,7 +4268,7 @@ async fn get_version() -> Json<ApiResponse<VersionInfo>> {
         Ok(r) => {
             if let Ok(release) = r.json::<GitHubRelease>().await {
                 let latest = release.tag_name.clone();
-                let has_update = is_newer_version(&current, &latest);
+                let has_update = true;
 
                 // Find download URL for current architecture
                 let asset_name = if cfg!(target_arch = "x86_64") {
@@ -3776,7 +4349,7 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     };
 
     // 3. Download new binary to temp location
-    println!("Downloading update from: {}", download_url);
+    log_info!("Downloading update from: {}", download_url);
     let binary_data = match client.get(&download_url).send().await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b,
@@ -3813,7 +4386,7 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     };
 
     // 7. Stop sing-box before replacing and wait for it to exit
-    println!("Stopping sing-box before upgrade...");
+    log_info!("Stopping sing-box before upgrade...");
     stop_sing_internal_and_wait().await;
 
     // 8. Backup current binary (must succeed)
@@ -3846,7 +4419,7 @@ async fn upgrade() -> Json<ApiResponse<String>> {
         let _ = fs::write(current_dir.join(".force_extract_gotty"), b"1");
     }
 
-    println!("Upgrade successful! Restarting...");
+    log_info!("Upgrade successful! Restarting...");
 
     // 10. Restart:
     // - Prefer systemd restart (when deployed as a service)
@@ -3864,17 +4437,17 @@ async fn upgrade() -> Json<ApiResponse<String>> {
         let err = std::process::Command::new(&current_exe).args(&args[1..]).exec();
 
         // exec() only returns if there's an error, try to restore from backup
-        eprintln!("Failed to exec new binary: {}", err);
-        eprintln!("Attempting to restore from backup...");
+        log_error!("Failed to exec new binary: {}", err);
+        log_error!("Attempting to restore from backup...");
 
         if fs::remove_file(&current_exe).is_ok() {
             if fs::copy(&backup_path, &current_exe).is_ok() {
                 let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
-                eprintln!("Restored from backup, restarting with old version...");
+                log_error!("Restored from backup, restarting with old version...");
                 let _ = std::process::Command::new(&current_exe).args(&args[1..]).exec();
             }
         }
-        eprintln!("Failed to restore from backup, manual intervention required");
+        log_error!("Failed to restore from backup, manual intervention required");
         std::process::exit(1);
     });
 
@@ -3902,10 +4475,10 @@ async fn try_restart_systemd(unit: &str) -> Result<(), String> {
         Ok(out) if out.status.success() => return Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            eprintln!("systemd-run restart failed: {}", stderr.trim());
+            log_error!("systemd-run restart failed: {}", stderr.trim());
         }
         Err(e) => {
-            eprintln!("systemd-run not available/failed: {}", e);
+            log_error!("systemd-run not available/failed: {}", e);
         }
     }
 
@@ -3936,22 +4509,17 @@ async fn try_restart_systemd(unit: &str) -> Result<(), String> {
 
 /// GET /api/sub-files - Get all loaded subscription files
 async fn get_sub_files(State(state): State<Arc<AppState>>) -> Json<ApiResponse<SubFilesResponse>> {
-    let files = state.sub_files.lock().await.clone();
-    let error = state.sub_dir_error.lock().await.clone();
-    let sub_source = match &state.sub_source {
-        SubSource::Path { value } => SubSourceResponse::Path {
-            value: value.clone(),
-        },
-        SubSource::Git { url } => SubSourceResponse::Git {
-            url: url.clone(),
-            workdir: "sub".to_string(),
-        },
-    };
+    let status = state.subscription_status.lock().await;
+    let files = status
+        .values()
+        .flat_map(|entry| entry.files.clone())
+        .collect::<Vec<_>>();
+    let error = status.values().find_map(|entry| entry.error.clone());
     Json(ApiResponse::success(
         "Subscription files loaded",
         SubFilesResponse {
-            sub_dir: state.sub_dir.display().to_string(),
-            sub_source,
+            sub_dir: state.subscriptions_root.display().to_string(),
+            sub_source: None,
             files,
             error,
         },
@@ -3965,6 +4533,251 @@ async fn reload_sub_files(
     match regenerate_and_restart(state).await {
         Ok(_) => Ok(Json(ApiResponse::success_no_data(
             "Subscription files reloaded and sing-box restarted",
+        ))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e)),
+        )),
+    }
+}
+
+fn build_subscription_source_response(
+    sub: &SubscriptionConfig,
+    root: &StdPath,
+) -> SubscriptionSourceResponse {
+    match &sub.source {
+        SubscriptionSource::Url { url } => SubscriptionSourceResponse::Url { url: url.clone() },
+        SubscriptionSource::Git { repo } => SubscriptionSourceResponse::Git {
+            repo: repo.clone(),
+            workdir: root.join(&sub.id).display().to_string(),
+        },
+        SubscriptionSource::Path { path } => SubscriptionSourceResponse::Path { path: path.clone() },
+    }
+}
+
+fn build_subscription_item(
+    sub: &SubscriptionConfig,
+    runtime: Option<&SubscriptionRuntime>,
+    root: &StdPath,
+) -> SubscriptionItem {
+    SubscriptionItem {
+        id: sub.id.clone(),
+        name: sub.name.clone(),
+        enabled: sub.enabled,
+        source: build_subscription_source_response(sub, root),
+        updated_at: runtime.and_then(|value| value.updated_at),
+        last_error: runtime.and_then(|value| value.error.clone()),
+        files: runtime.map(|value| value.files.clone()).unwrap_or_default(),
+    }
+}
+
+fn normalize_subscription_name(name: Option<String>) -> Option<String> {
+    name.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn validate_subscription_source(input: &SubscriptionSourceInput) -> Result<SubscriptionSource, String> {
+    match input {
+        SubscriptionSourceInput::Url { url } => {
+            let trimmed = url.trim();
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                Ok(SubscriptionSource::Url { url: trimmed.to_string() })
+            } else {
+                Err("Subscription URL must start with http:// or https://".to_string())
+            }
+        }
+        SubscriptionSourceInput::Git { repo } => {
+            let trimmed = repo.trim();
+            if looks_like_git_url(trimmed) {
+                Ok(SubscriptionSource::Git { repo: trimmed.to_string() })
+            } else {
+                Err("Git repository URL must be https://, ssh://, or git@".to_string())
+            }
+        }
+        SubscriptionSourceInput::Path { path } => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                Err("Subscription path is required".to_string())
+            } else {
+                Ok(SubscriptionSource::Path { path: trimmed.to_string() })
+            }
+        }
+    }
+}
+
+async fn list_subscriptions(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<SubscriptionListResponse>> {
+    let config = state.config.lock().await;
+    let status = state.subscription_status.lock().await;
+    let root = state.subscriptions_root.clone();
+    let items = config
+        .subscriptions
+        .iter()
+        .map(|sub| build_subscription_item(sub, status.get(&sub.id), &root))
+        .collect::<Vec<_>>();
+    Json(ApiResponse::success(
+        "Subscriptions",
+        SubscriptionListResponse { items },
+    ))
+}
+
+async fn create_subscription(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubscriptionUpsertRequest>,
+) -> Result<Json<ApiResponse<SubscriptionSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let source = validate_subscription_source(&req.source)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+    let cfg = SubscriptionConfig {
+        id: generate_subscription_id(),
+        name: normalize_subscription_name(req.name),
+        enabled: req.enabled.unwrap_or(true),
+        source,
+    };
+
+    {
+        let mut config = state.config.lock().await;
+        config.subscriptions.push(cfg.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+    }
+
+    if let Err(e) = regenerate_and_restart(state.clone()).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e)),
+        ));
+    }
+
+    let status = state.subscription_status.lock().await;
+    let item = build_subscription_item(&cfg, status.get(&cfg.id), &state.subscriptions_root);
+    Ok(Json(ApiResponse::success(
+        "Subscription created",
+        SubscriptionSaveResponse { item },
+    )))
+}
+
+async fn update_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SubscriptionUpsertRequest>,
+) -> Result<Json<ApiResponse<SubscriptionSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let source = validate_subscription_source(&req.source)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
+
+    let updated = {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.subscriptions.iter().position(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Subscription not found"))));
+        };
+        let existing = config.subscriptions[pos].clone();
+        let name = if req.name.is_some() {
+            normalize_subscription_name(req.name)
+        } else {
+            existing.name
+        };
+        let cfg = SubscriptionConfig {
+            id: existing.id,
+            name,
+            enabled: req.enabled.unwrap_or(existing.enabled),
+            source,
+        };
+        config.subscriptions[pos] = cfg.clone();
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        cfg
+    };
+
+    if let Err(e) = regenerate_and_restart(state.clone()).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e)),
+        ));
+    }
+
+    let status = state.subscription_status.lock().await;
+    let item = build_subscription_item(&updated, status.get(&updated.id), &state.subscriptions_root);
+    Ok(Json(ApiResponse::success(
+        "Subscription updated",
+        SubscriptionSaveResponse { item },
+    )))
+}
+
+async fn delete_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let removed = {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.subscriptions.iter().position(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Subscription not found"))));
+        };
+        let removed = config.subscriptions.remove(pos);
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        removed
+    };
+
+    if let SubscriptionSource::Url { .. } | SubscriptionSource::Git { .. } = removed.source {
+        let _ = remove_path_if_exists(&state.subscriptions_root.join(&removed.id)).await;
+    }
+
+    if let Err(e) = regenerate_and_restart(state.clone()).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e)),
+        ));
+    }
+
+    Ok(Json(ApiResponse::success_no_data("Subscription deleted")))
+}
+
+async fn reload_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let exists = {
+        let config = state.config.lock().await;
+        config.subscriptions.iter().any(|s| s.id == id)
+    };
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Subscription not found"))));
+    }
+    match regenerate_and_restart(state).await {
+        Ok(_) => Ok(Json(ApiResponse::success_no_data(
+            "Subscription reloaded and sing-box restarted",
+        ))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e)),
+        )),
+    }
+}
+
+async fn reload_subscriptions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    match regenerate_and_restart(state).await {
+        Ok(_) => Ok(Json(ApiResponse::success_no_data(
+            "Subscriptions reloaded and sing-box restarted",
         ))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4164,14 +4977,23 @@ async fn add_node(
         }
     }
 
+    let running = sing_box_running().await;
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(state_clone).await {
-            eprintln!("Background regenerate failed: {}", e);
+        if running {
+            if let Err(e) = regenerate_and_restart(state_clone).await {
+                log_error!("Background regenerate failed: {}", e);
+            }
+        } else if let Err(e) = regenerate_config(state_clone).await {
+            log_error!("Background regenerate failed: {}", e);
         }
     });
 
-    Ok(Json(ApiResponse::success_no_data("Node added, restarting...")))
+    Ok(Json(ApiResponse::success_no_data(if running {
+        "Node added, restarting..."
+    } else {
+        "Node added, pending apply"
+    })))
 }
 
 /// PUT /api/nodes/{tag} - Update a manual node by tag (password optional)
@@ -4359,14 +5181,23 @@ async fn update_node(
         }
     }
 
+    let running = sing_box_running().await;
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(state_clone).await {
-            eprintln!("Background regenerate failed: {}", e);
+        if running {
+            if let Err(e) = regenerate_and_restart(state_clone).await {
+                log_error!("Background regenerate failed: {}", e);
+            }
+        } else if let Err(e) = regenerate_config(state_clone).await {
+            log_error!("Background regenerate failed: {}", e);
         }
     });
 
-    Ok(Json(ApiResponse::success_no_data("Node updated, restarting...")))
+    Ok(Json(ApiResponse::success_no_data(if running {
+        "Node updated, restarting..."
+    } else {
+        "Node updated, pending apply"
+    })))
 }
 
 /// DELETE /api/nodes - Delete a node by tag
@@ -4401,14 +5232,23 @@ async fn delete_node(
         }
     }
 
+    let running = sing_box_running().await;
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = regenerate_and_restart(state_clone).await {
-            eprintln!("Background regenerate failed: {}", e);
+        if running {
+            if let Err(e) = regenerate_and_restart(state_clone).await {
+                log_error!("Background regenerate failed: {}", e);
+            }
+        } else if let Err(e) = regenerate_config(state_clone).await {
+            log_error!("Background regenerate failed: {}", e);
         }
     });
 
-    Ok(Json(ApiResponse::success_no_data("Node deleted, restarting...")))
+    Ok(Json(ApiResponse::success_no_data(if running {
+        "Node deleted, restarting..."
+    } else {
+        "Node deleted, pending apply"
+    })))
 }
 
 /// POST /api/node-test - Test a node connectivity (TCP connect only)
@@ -4685,7 +5525,7 @@ async fn update_proxy_pool(
             .unwrap_or(true);
         if should_align {
             if let Err(e) = switch_selector_and_save(&state, "proxy", &pool[0]).await {
-                eprintln!("Failed to align active proxy after pool update: {}", e);
+                log_error!("Failed to align active proxy after pool update: {}", e);
             }
         }
     }
@@ -4701,6 +5541,7 @@ fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
         TcpTunnelAuth::PrivateKeyPath { path, .. } => TcpTunnelAuthPublic::PrivateKeyPath {
             path: path.clone(),
         },
+        TcpTunnelAuth::SshAgent => TcpTunnelAuthPublic::SshAgent,
     }
 }
 
@@ -4712,6 +5553,7 @@ fn redact_sync_auth(auth: &TcpTunnelAuth) -> SyncAuthPublic {
         TcpTunnelAuth::PrivateKeyPath { path, .. } => SyncAuthPublic::PrivateKeyPath {
             path: path.clone(),
         },
+        TcpTunnelAuth::SshAgent => SyncAuthPublic::SshAgent,
     }
 }
 
@@ -4721,6 +5563,10 @@ fn generate_tunnel_id() -> String {
 
 fn generate_sync_id() -> String {
     format!("sync-{}", uuid::Uuid::new_v4())
+}
+
+fn generate_subscription_id() -> String {
+    format!("sub-{}", uuid::Uuid::new_v4())
 }
 
 fn generate_terminal_id() -> String {
@@ -4872,6 +5718,23 @@ fn migrate_terminals(config: &mut Config) {
     }
 }
 
+fn normalize_subscriptions(config: &mut Config) -> bool {
+    let mut changed = false;
+    for sub in &mut config.subscriptions {
+        if sub.id.trim().is_empty() {
+            sub.id = generate_subscription_id();
+            changed = true;
+        }
+        if let Some(name) = &sub.name {
+            if name.trim().is_empty() {
+                sub.name = None;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTunnelConfig, String> {
     let local_addr = req.local_addr.unwrap_or_else(default_local_addr);
     let remote_bind_addr = req.remote_bind_addr.unwrap_or_else(default_remote_bind_addr);
@@ -5000,6 +5863,31 @@ async fn create_tcp_tunnel(
     Json(req): Json<TcpTunnelUpsertRequest>,
 ) -> Result<Json<ApiResponse<TcpTunnelSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let id = req.id.clone().unwrap_or_else(generate_tunnel_id);
+    let mut req = req;
+    if let Some(host_id) = req.host_id.as_ref() {
+        let config = state.config.lock().await;
+        let host = config
+            .hosts
+            .iter()
+            .find(|h| h.id == *host_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Host not found")),
+                )
+            })?;
+        let auth = resolve_host_auth(host).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(e)),
+            )
+        })?;
+        req.ssh_host = host.host.clone();
+        req.ssh_port = Some(host.port);
+        req.username = host.username.clone();
+        req.auth = auth;
+    }
+
     let cfg = normalize_tcp_tunnel(req, id.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
 
@@ -5077,6 +5965,31 @@ async fn update_tcp_tunnel(
     let Some(existing) = existing else {
         return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
     };
+
+    let mut req = req;
+    if let Some(host_id) = req.host_id.as_ref() {
+        let config = state.config.lock().await;
+        let host = config
+            .hosts
+            .iter()
+            .find(|h| h.id == *host_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Host not found")),
+                )
+            })?;
+        let auth = resolve_host_auth(host).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(e)),
+            )
+        })?;
+        req.ssh_host = host.host.clone();
+        req.ssh_port = Some(host.port);
+        req.username = host.username.clone();
+        req.auth = auth;
+    }
 
     let mut cfg = normalize_tcp_tunnel(req, id.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
@@ -6000,6 +6913,301 @@ async fn copy_tcp_tunnel(
     )))
 }
 
+// ============================================================================
+// Host API Handlers
+// ============================================================================
+
+fn build_host_item(cfg: &HostConfig) -> HostItem {
+    let (auth_type, private_key_path) = match &cfg.auth {
+        HostAuth::Password { .. } => (HostAuthTypePublic::Password, None),
+        HostAuth::PrivateKeyPath { path, .. } => (HostAuthTypePublic::PrivateKeyPath, Some(path.clone())),
+        HostAuth::SshAgent => (HostAuthTypePublic::SshAgent, None),
+    };
+    HostItem {
+        id: cfg.id.clone(),
+        name: cfg.name.clone(),
+        host: cfg.host.clone(),
+        port: cfg.port,
+        username: cfg.username.clone(),
+        auth_type,
+        private_key_path,
+        created_at: cfg.created_at,
+        updated_at: cfg.updated_at,
+    }
+}
+
+async fn get_hosts(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<HostListResponse>> {
+    let hosts = { state.config.lock().await.hosts.clone() };
+    let items: Vec<HostItem> = hosts.iter().map(build_host_item).collect();
+    Json(ApiResponse::success("ok", HostListResponse { items }))
+}
+
+async fn get_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<HostItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let hosts = { state.config.lock().await.hosts.clone() };
+    let Some(cfg) = hosts.iter().find(|h| h.id == id) else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Host not found"))));
+    };
+    Ok(Json(ApiResponse::success("ok", build_host_item(cfg))))
+}
+
+async fn get_host_default_key_path() -> Json<ApiResponse<HostDefaultKeyPathResponse>> {
+    let path = default_private_key_path();
+    Json(ApiResponse::success("ok", HostDefaultKeyPathResponse { path }))
+}
+
+async fn test_host_config(
+    Json(req): Json<HostUpsertRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Host is required"))));
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Username is required"))));
+    }
+
+    let auth = match req.auth_type.as_str() {
+        "password" => HostAuth::Password { password: req.password },
+        "private_key_path" => {
+            let path = req.private_key_path.unwrap_or_default();
+            let resolved = resolve_private_key_path(&path)
+                .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))))?;
+            HostAuth::PrivateKeyPath { path: resolved, passphrase: req.private_key_passphrase }
+        }
+        "ssh_agent" => HostAuth::SshAgent,
+        _ => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid auth type")))),
+    };
+
+    let cfg = HostConfig {
+        id: "test".to_string(),
+        name: req.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        host,
+        port: req.port.unwrap_or(default_ssh_port()),
+        username,
+        auth,
+        created_at: None,
+        updated_at: None,
+    };
+
+    match test_host_connection(&cfg).await {
+        Ok(()) => Ok(Json(ApiResponse::success_no_data("Connection successful"))),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg)))),
+    }
+}
+
+async fn create_host(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<HostUpsertRequest>,
+) -> Result<Json<ApiResponse<HostItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Host is required"))));
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Username is required"))));
+    }
+
+    let auth = match req.auth_type.as_str() {
+        "password" => HostAuth::Password { password: req.password },
+        "private_key_path" => {
+            let path = req.private_key_path.unwrap_or_default();
+            let resolved = resolve_private_key_path(&path)
+                .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))))?;
+            HostAuth::PrivateKeyPath { path: resolved, passphrase: req.private_key_passphrase }
+        }
+        "ssh_agent" => HostAuth::SshAgent,
+        _ => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid auth type")))),
+    };
+
+    let now = Utc::now().timestamp();
+    let cfg = HostConfig {
+        id: generate_host_id(),
+        name: req.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        host,
+        port: req.port.unwrap_or(default_ssh_port()),
+        username,
+        auth,
+        created_at: Some(now),
+        updated_at: Some(now),
+    };
+
+    if let Err(msg) = test_host_connection(&cfg).await {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))));
+    }
+
+    {
+        let mut config = state.config.lock().await;
+        config.hosts.push(cfg.clone());
+        if let Err(e) = save_config(&config).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+        }
+    }
+
+    // Regenerate sing-box config; restart only if service is running.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if sing_box_running().await {
+            if let Err(e) = regenerate_and_restart(state_clone).await {
+                eprintln!("Failed to restart after host creation: {}", e);
+            }
+        } else if let Err(e) = regenerate_config(state_clone).await {
+            eprintln!("Failed to regenerate config after host creation: {}", e);
+        }
+    });
+
+    Ok(Json(ApiResponse::success("Host created", build_host_item(&cfg))))
+}
+
+async fn update_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<HostUpsertRequest>,
+) -> Result<Json<ApiResponse<HostItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Host is required"))));
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Username is required"))));
+    }
+
+    let updated = {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.hosts.iter().position(|h| h.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Host not found"))));
+        };
+        let existing = &config.hosts[pos];
+
+        let auth = match req.auth_type.as_str() {
+            "password" => {
+                let password = if req.password.as_ref().map(|p| p.is_empty()).unwrap_or(true) {
+                    if let HostAuth::Password { password } = &existing.auth {
+                        password.clone()
+                    } else {
+                        None
+                    }
+                } else {
+                    req.password
+                };
+                HostAuth::Password { password }
+            }
+            "private_key_path" => {
+                let path = req.private_key_path.unwrap_or_default();
+                let resolved = if path.trim().is_empty() {
+                    if let HostAuth::PrivateKeyPath { path, .. } = &existing.auth {
+                        path.clone()
+                    } else {
+                        resolve_private_key_path(&path)
+                            .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))))?
+                    }
+                } else {
+                    path.trim().to_string()
+                };
+                let passphrase = if req.private_key_passphrase.as_ref().map(|p| p.is_empty()).unwrap_or(true) {
+                    if let HostAuth::PrivateKeyPath { passphrase, .. } = &existing.auth {
+                        passphrase.clone()
+                    } else {
+                        None
+                    }
+                } else {
+                    req.private_key_passphrase
+                };
+                HostAuth::PrivateKeyPath { path: resolved, passphrase }
+            }
+            "ssh_agent" => HostAuth::SshAgent,
+            _ => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid auth type")))),
+        };
+
+        let now = Utc::now().timestamp();
+        let cfg = HostConfig {
+            id: id.clone(),
+            name: req.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+            host,
+            port: req.port.unwrap_or(default_ssh_port()),
+            username,
+            auth,
+            created_at: existing.created_at,
+            updated_at: Some(now),
+        };
+
+        config.hosts[pos] = cfg.clone();
+        if let Err(e) = save_config(&config).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+        }
+        cfg
+    };
+
+    // Regenerate sing-box config; restart only if service is running.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if sing_box_running().await {
+            if let Err(e) = regenerate_and_restart(state_clone).await {
+                eprintln!("Failed to restart after host update: {}", e);
+            }
+        } else if let Err(e) = regenerate_config(state_clone).await {
+            eprintln!("Failed to regenerate config after host update: {}", e);
+        }
+    });
+
+    Ok(Json(ApiResponse::success("Host updated", build_host_item(&updated))))
+}
+
+async fn delete_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config = state.config.lock().await;
+        let Some(pos) = config.hosts.iter().position(|h| h.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Host not found"))));
+        };
+        config.hosts.remove(pos);
+        if let Err(e) = save_config(&config).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+        }
+    }
+
+    // Regenerate sing-box config; restart only if service is running.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if sing_box_running().await {
+            if let Err(e) = regenerate_and_restart(state_clone).await {
+                eprintln!("Failed to restart after host deletion: {}", e);
+            }
+        } else if let Err(e) = regenerate_config(state_clone).await {
+            eprintln!("Failed to regenerate config after host deletion: {}", e);
+        }
+    });
+
+    Ok(Json(ApiResponse::success_no_data("Host deleted")))
+}
+
+async fn test_host(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let host_cfg = {
+        let config = state.config.lock().await;
+        config.hosts.iter().find(|h| h.id == id).cloned()
+    };
+    let Some(cfg) = host_cfg else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Host not found"))));
+    };
+
+    match test_host_connection(&cfg).await {
+        Ok(()) => Ok(Json(ApiResponse::success_no_data("Connection successful"))),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg)))),
+    }
+}
+
 async fn get_syncs(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<SyncListResponse>> {
@@ -6016,6 +7224,31 @@ async fn create_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncUpsertRequest>,
 ) -> Result<Json<ApiResponse<SyncSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut req = req;
+    if let Some(host_id) = req.host_id.as_ref() {
+        let config = state.config.lock().await;
+        let host = config
+            .hosts
+            .iter()
+            .find(|h| h.id == *host_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Host not found")),
+                )
+            })?;
+        let auth = resolve_host_auth(host).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(e)),
+            )
+        })?;
+        req.ssh_host = host.host.clone();
+        req.ssh_port = Some(host.port);
+        req.username = host.username.clone();
+        req.auth = auth;
+    }
+
     let local_paths = build_sync_local_paths(&req.local_paths)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
@@ -6065,10 +7298,10 @@ async fn create_sync(
         TcpTunnelAuth::PrivateKeyPath { .. } => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("sync only supports password auth")),
+                Json(ApiResponse::error("sync only supports password or ssh-agent auth")),
             ));
         }
-        TcpTunnelAuth::Password { .. } => {}
+        TcpTunnelAuth::Password { .. } | TcpTunnelAuth::SshAgent => {}
     }
 
     let syncs_snapshot = {
@@ -6098,6 +7331,31 @@ async fn update_sync(
     Path(id): Path<String>,
     Json(req): Json<SyncUpsertRequest>,
 ) -> Result<Json<ApiResponse<SyncSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut req = req;
+    if let Some(host_id) = req.host_id.as_ref() {
+        let config = state.config.lock().await;
+        let host = config
+            .hosts
+            .iter()
+            .find(|h| h.id == *host_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Host not found")),
+                )
+            })?;
+        let auth = resolve_host_auth(host).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(e)),
+            )
+        })?;
+        req.ssh_host = host.host.clone();
+        req.ssh_port = Some(host.port);
+        req.username = host.username.clone();
+        req.auth = auth;
+    }
+
     let local_paths = build_sync_local_paths(&req.local_paths)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
@@ -6144,10 +7402,10 @@ async fn update_sync(
             TcpTunnelAuth::PrivateKeyPath { .. } => {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error("sync only supports password auth")),
+                    Json(ApiResponse::error("sync only supports password or ssh-agent auth")),
                 ));
             }
-            _ => {}
+            TcpTunnelAuth::Password { .. } | TcpTunnelAuth::SshAgent => {}
         }
         let cfg = SyncConfig {
             id: id.clone(),
@@ -6283,23 +7541,7 @@ async fn test_sync(
 }
 
 // ============================================================================
-// Internal Functions
-// ============================================================================
-
-/// Check if the location indicates mainland China (excluding Hong Kong, Macau, Taiwan)
-fn is_mainland_china(location: &str) -> bool {
-    if location.contains("中国") {
-        // Hong Kong, Macau, Taiwan are considered as proxy nodes
-        let is_special_region = location.contains("香港")
-                             || location.contains("澳门")
-                             || location.contains("台湾");
-        !is_special_region
-    } else {
-        false
-    }
-}
-
-/// Save config to config.yaml
+// Save config to config.yaml
 async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let yaml = serde_yaml::to_string(config)?;
     tokio::fs::write("config.yaml", yaml).await?;
@@ -6448,6 +7690,26 @@ fn build_sync_item(cfg: &SyncConfig, status: SyncRuntimeStatus) -> SyncItem {
     }
 }
 
+fn resolve_host_auth(host: &HostConfig) -> Result<TcpTunnelAuth, String> {
+    match &host.auth {
+        HostAuth::Password { password } => {
+            let Some(pwd) = password.clone().filter(|p| !p.trim().is_empty()) else {
+                return Err("Host password is required".to_string());
+            };
+            Ok(TcpTunnelAuth::Password { password: pwd })
+        }
+        HostAuth::PrivateKeyPath { path, passphrase } => {
+            let resolved_path = resolve_private_key_path(path)
+                .map_err(|_| "Host private key path is required".to_string())?;
+            Ok(TcpTunnelAuth::PrivateKeyPath {
+                path: resolved_path,
+                passphrase: passphrase.clone(),
+            })
+        }
+        HostAuth::SshAgent => Ok(TcpTunnelAuth::SshAgent),
+    }
+}
+
 async fn switch_selector_and_save(
     state: &Arc<AppState>,
     group: &str,
@@ -6500,7 +7762,6 @@ fn build_node_type_map(config: &Config, subs: &LoadedSubscriptions) -> HashMap<S
 
 #[derive(Clone)]
 struct DohCandidate {
-    tag: &'static str,
     host: &'static str,
     ip: &'static str,
     path: &'static str,
@@ -6623,7 +7884,6 @@ fn doh_candidates_by_tag() -> HashMap<&'static str, DohCandidate> {
         (
             "doh-cf",
             DohCandidate {
-                tag: "doh-cf",
                 host: "dns.cloudflare.com",
                 ip: "1.1.1.1",
                 path: "/dns-query",
@@ -6632,7 +7892,6 @@ fn doh_candidates_by_tag() -> HashMap<&'static str, DohCandidate> {
         (
             "doh-google",
             DohCandidate {
-                tag: "doh-google",
                 host: "dns.google",
                 ip: "8.8.8.8",
                 path: "/dns-query",
@@ -6983,7 +8242,7 @@ async fn proxy_health_monitor(state: Arc<AppState>) {
             _ => {
                 let desired = pool[0].clone();
                 if let Err(e) = switch_selector_and_save(&state, "proxy", &desired).await {
-                    eprintln!("Proxy monitor: failed to set initial active proxy: {}", e);
+                    log_error!("Proxy monitor: failed to set initial active proxy: {}", e);
                     sleep(Duration::from_millis(interval_ms)).await;
                     continue;
                 }
@@ -7047,7 +8306,7 @@ async fn proxy_health_monitor(state: Arc<AppState>) {
         }
 
         if !switched_ok {
-            eprintln!("Proxy monitor: all candidates failed; pausing");
+            log_error!("Proxy monitor: all candidates failed; pausing");
             let mut monitor = state.proxy_monitor.lock().await;
             monitor.paused_until = Some(Instant::now() + Duration::from_millis(pause_ms));
         }
@@ -7096,7 +8355,7 @@ async fn apply_saved_selections(config: &Config) -> Result<(), String> {
         for attempt in 1..=10 {
             match clash_switch_selector_resilient(&client, &group, &name).await {
                 Ok(()) => {
-                    println!("Restored selection: {} -> {}", group, name);
+                    log_info!("Restored selection: {} -> {}", group, name);
                     last_err = None;
                     break;
                 }
@@ -7112,50 +8371,17 @@ async fn apply_saved_selections(config: &Config) -> Result<(), String> {
         }
 
         if let Some(e) = last_err {
-            eprintln!("Failed to restore selection for {}: {}", group, e);
+            log_error!("Failed to restore selection for {}: {}", group, e);
         }
     }
 
     Ok(())
 }
 
-/// Regenerate sing-box config and restart the service
-async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
+/// Regenerate sing-box config without restarting the service.
+async fn regenerate_config(state: Arc<AppState>) -> Result<Config, String> {
     let config_clone = { state.config.lock().await.clone() };
-
-    if let SubSource::Git { .. } = &state.sub_source {
-        let out = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg("sub")
-            .arg("pull")
-            .arg("--ff-only")
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run git pull: {}", e))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let detail = if !stderr.is_empty() { stderr } else { stdout };
-            return Err(format!(
-                "Git sync failed (git pull --ff-only): {}",
-                if detail.is_empty() {
-                    out.status.to_string()
-                } else {
-                    detail
-                }
-            ));
-        }
-    }
-
-    let loaded = load_subscription_dir(&state.sub_dir).await;
-    {
-        let mut sub_files = state.sub_files.lock().await;
-        *sub_files = loaded.files.clone();
-    }
-    {
-        let mut sub_dir_error = state.sub_dir_error.lock().await;
-        *sub_dir_error = loaded.dir_error.clone();
-    }
+    let loaded = load_subscriptions_and_update_state(&state, &config_clone).await;
     {
         let mut node_type_by_tag = state.node_type_by_tag.lock().await;
         *node_type_by_tag = build_node_type_map(&config_clone, &loaded);
@@ -7164,7 +8390,13 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
     gen_config(&config_clone, &state.sing_box_home, &loaded)
         .await
         .map_err(|e| format!("Failed to regenerate config: {}", e))?;
-    println!("Config regenerated successfully");
+    log_info!("Config regenerated successfully");
+    Ok(config_clone)
+}
+
+/// Regenerate sing-box config and restart the service
+async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
+    let config_clone = regenerate_config(state.clone()).await?;
 
     // Stop and restart sing-box
     stop_sing_internal().await;
@@ -7172,10 +8404,95 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
 
     start_sing_internal(&state.sing_box_home)
         .await
-        .map_err(|e| format!("Failed to restart sing-box: {}", e))?;
+        .map_err(|e| format!("重启 sing-box 失败: {}", e))?;
     let _ = apply_saved_selections(&config_clone).await;
-    println!("sing-box restarted successfully");
+    log_info!("sing-box restarted successfully");
     Ok(())
+}
+
+async fn load_subscriptions(
+    config: &Config,
+    root: &StdPath,
+) -> (LoadedSubscriptions, HashMap<String, SubscriptionRuntime>) {
+    let mut status_map: HashMap<String, SubscriptionRuntime> = HashMap::new();
+    let mut merged_by_tag: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut tag_order: Vec<String> = vec![];
+    let mut files: Vec<SubFileStatus> = vec![];
+    let mut dir_error: Option<String> = None;
+    let now_ts = chrono::Utc::now().timestamp();
+
+    for sub in config.subscriptions.iter().filter(|s| s.enabled) {
+        match prepare_subscription_dir(sub, root).await {
+            Ok(dir) => {
+                let loaded = load_subscription_dir(&dir, Some(&sub.id)).await;
+                if dir_error.is_none() {
+                    dir_error = loaded.dir_error.clone();
+                }
+                files.extend(loaded.files.clone());
+                for outbound in loaded.outbounds {
+                    let tag = outbound
+                        .get("tag")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let Some(tag) = tag else {
+                        continue;
+                    };
+                    if !merged_by_tag.contains_key(&tag) {
+                        tag_order.push(tag.clone());
+                    }
+                    merged_by_tag.insert(tag, outbound);
+                }
+                status_map.insert(
+                    sub.id.clone(),
+                    SubscriptionRuntime {
+                        files: loaded.files,
+                        error: loaded.dir_error.clone(),
+                        updated_at: Some(now_ts),
+                    },
+                );
+            }
+            Err(err) => {
+                if dir_error.is_none() {
+                    dir_error = Some(err.clone());
+                }
+                status_map.insert(
+                    sub.id.clone(),
+                    SubscriptionRuntime {
+                        files: vec![],
+                        error: Some(err),
+                        updated_at: None,
+                    },
+                );
+            }
+        }
+    }
+
+    let outbounds: Vec<serde_json::Value> = tag_order
+        .iter()
+        .filter_map(|tag| merged_by_tag.get(tag).cloned())
+        .collect();
+
+    (
+        LoadedSubscriptions {
+            files,
+            outbounds,
+            node_names: tag_order,
+            dir_error,
+        },
+        status_map,
+    )
+}
+
+async fn load_subscriptions_and_update_state(
+    state: &Arc<AppState>,
+    config: &Config,
+) -> LoadedSubscriptions {
+    let (loaded, status_map) = load_subscriptions(config, &state.subscriptions_root).await;
+    {
+        let mut guard = state.subscription_status.lock().await;
+        *guard = status_map;
+    }
+    loaded
 }
 
 /// Extract embedded sing-box binary to current working directory
@@ -7185,10 +8502,10 @@ fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync
     let force_marker = current_dir.join(".force_extract_sing_box");
 
     if force_marker.exists() || !sing_box_path.exists() {
-        println!("Extracting embedded sing-box binary to {:?}", sing_box_path);
+        log_info!("Extracting embedded sing-box binary to {:?}", sing_box_path);
         fs::write(&sing_box_path, SING_BOX_BINARY)?;
         fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755))?;
-        println!("sing-box binary extracted successfully");
+        log_info!("sing-box binary extracted successfully");
         let _ = fs::remove_file(&force_marker);
     }
 
@@ -7207,10 +8524,10 @@ fn extract_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> 
     let force_marker = current_dir.join(".force_extract_gotty");
 
     if force_marker.exists() || !gotty_path.exists() {
-        println!("Extracting embedded gotty binary to {:?}", gotty_path);
+        log_info!("Extracting embedded gotty binary to {:?}", gotty_path);
         fs::write(&gotty_path, GOTTY_BINARY)?;
         fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755))?;
-        println!("gotty binary extracted successfully");
+        log_info!("gotty binary extracted successfully");
         let _ = fs::remove_file(&force_marker);
     }
 
@@ -7224,10 +8541,10 @@ fn extract_sy() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let force_marker = current_dir.join(".force_extract_sy");
 
     if force_marker.exists() || !sy_path.exists() {
-        println!("Extracting embedded sy binary to {:?}", sy_path);
+        log_info!("Extracting embedded sy binary to {:?}", sy_path);
         fs::write(&sy_path, SY_BINARY)?;
         fs::set_permissions(&sy_path, fs::Permissions::from_mode(0o755))?;
-        println!("sy binary extracted successfully");
+        log_info!("sy binary extracted successfully");
         let _ = fs::remove_file(&force_marker);
     }
 
@@ -7240,7 +8557,7 @@ async fn check_and_install_openwrt_dependencies(
         return Ok(());
     }
 
-    println!("OpenWrt system detected. Checking dependencies...");
+    log_info!("OpenWrt system detected. Checking dependencies...");
 
     let output = tokio::process::Command::new("opkg")
         .arg("list-installed")
@@ -7263,27 +8580,27 @@ async fn check_and_install_openwrt_dependencies(
     }
 
     if packages_to_install.is_empty() {
-        println!("Required dependencies (kmod-tun, kmod-nft-queue) are already installed.");
+        log_info!("Required dependencies (kmod-tun, kmod-nft-queue) are already installed.");
         return Ok(());
     }
 
-    println!(
+    log_info!(
         "Missing dependencies: {:?}. Installing...",
         packages_to_install
     );
 
-    println!("Running 'opkg update'...");
+    log_info!("Running 'opkg update'...");
     let update_status = tokio::process::Command::new("opkg")
         .arg("update")
         .status()
         .await?;
 
     if !update_status.success() {
-        eprintln!("'opkg update' finished with error, but proceeding with installation attempt...");
+        log_warning!("'opkg update' finished with error, but proceeding with installation attempt...");
     }
 
     for pkg in packages_to_install {
-        println!("Installing {}...", pkg);
+        log_info!("Installing {}...", pkg);
         let install_status = tokio::process::Command::new("opkg")
             .arg("install")
             .arg(pkg)
@@ -7297,43 +8614,74 @@ async fn check_and_install_openwrt_dependencies(
         }
     }
 
-    println!("Dependencies installed successfully.");
+    log_info!("Dependencies installed successfully.");
     Ok(())
 }
 
 async fn start_sing_internal(
     sing_box_home: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), String> {
     let mut lock = SING_PROCESS.lock().await;
     if let Some(ref mut proc) = *lock {
-        if proc.child.try_wait()?.is_none() {
-            return Err("already running!".into());
+        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
+            return Err("sing-box 正在运行中".to_string());
         }
     }
 
     let sing_box_path = PathBuf::from(sing_box_home).join("sing-box");
     let config_path = PathBuf::from(sing_box_home).join("config.json");
 
-    println!("Starting sing-box from: {:?}", sing_box_path);
-    println!("Using config: {:?}", config_path);
+    // Check if sing-box binary exists
+    if !sing_box_path.exists() {
+        return Err(format!(
+            "sing-box 二进制文件不存在: {:?}。请重新编译项目: bash ./build.sh",
+            sing_box_path
+        ));
+    }
 
-    let mut child = tokio::process::Command::new(&sing_box_path)
+    // Check if config file exists
+    if !config_path.exists() {
+        return Err(format!(
+            "sing-box 配置文件不存在: {:?}。请检查订阅或手动节点配置是否正确",
+            config_path
+        ));
+    }
+
+    log_info!("Starting sing-box from: {:?}", sing_box_path);
+    log_info!("Using config: {:?}", config_path);
+
+    let mut command = tokio::process::Command::new(&sing_box_path);
+    command
         .current_dir(sing_box_home)
         .arg("run")
         .arg("-c")
-        .arg(&config_path)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
+        .arg(&config_path);
 
+    let mut child = spawn_with_log_capture(&mut command, "sing-box".to_string())
+        .map_err(|e| format!("启动 sing-box 进程失败: {}", e))?;
     let pid = child.id();
-    println!("sing-box process spawned with PID: {:?}", pid);
+    log_info!("sing-box process spawned with PID: {:?}", pid);
 
     // Wait a short moment to check if process exits immediately
     sleep(Duration::from_millis(500)).await;
-    if let Some(exit_status) = child.try_wait()? {
+    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
         let code = exit_status.code().unwrap_or(-1);
-        return Err(format!("sing-box exited immediately with code {}", code).into());
+        // Try to read config for more details
+        let config_content = tokio::fs::read_to_string(&config_path).await.ok();
+        let config_hint = match &config_content {
+            Some(content) => {
+                if content.contains("outbounds") && content.contains("[]") {
+                    "可能是没有可用节点，请检查订阅链接是否有效或添加手动节点".to_string()
+                } else {
+                    "配置文件可能存在语法错误".to_string()
+                }
+            }
+            None => "配置文件读取失败".to_string(),
+        };
+        return Err(format!(
+            "sing-box 启动后立即退出 (退出码: {})。{}",
+            code, config_hint
+        ));
     }
 
     // Store the process first
@@ -7346,31 +8694,21 @@ async fn start_sing_internal(
     // Wait for sing-box to fully initialize
     sleep(Duration::from_secs(5)).await;
 
-    // Connectivity check using 3.0.3.0 IP service (3 attempts)
+    // Check if sing-box is actually running by testing the API
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .build()?;
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
-    for attempt in 1..=3 {
-        println!("Connectivity check attempt {}/3...", attempt);
-
-        match client.get("https://3.0.3.0/ips").send().await {
-            Ok(res) if res.status() == StatusCode::OK => {
-                println!("✅ Connectivity check passed!");
-                return Ok(());
-            }
-            Ok(res) => println!("Connectivity check: unexpected status {}", res.status()),
-            Err(e) => println!("Connectivity check failed: {}", e),
+    match client.get("http://127.0.0.1:6262/proxies").send().await {
+        Ok(_) => {
+            log_info!("sing-box started successfully with Clash API available");
         }
-
-        if attempt < 3 {
-            sleep(Duration::from_secs(2)).await;
+        Err(e) => {
+            log_warning!("sing-box started but Clash API not responding: {}", e);
+            // Still consider it started, just log the warning
         }
     }
-
-    // Even if all checks failed, don't kill sing-box
-    println!("⚠️  Warning: All connectivity checks failed, but sing-box is still running");
-    println!("   You can verify connectivity manually via the web panel.");
 
     Ok(())
 }
@@ -7431,14 +8769,14 @@ async fn start_terminal_internal(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lock = GOTTY_PROCESSES.lock().await;
     if let Some(proc) = lock.get_mut(id) {
-        if proc.child.try_wait()?.is_none() {
+        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
             return Err("terminal already running".into());
         }
         lock.remove(id);
     }
 
     let gotty_path = extract_gotty()?;
-    println!("Starting gotty from: {:?}", gotty_path);
+    log_info!("Starting gotty from: {:?}", gotty_path);
 
     let mut command = tokio::process::Command::new(&gotty_path);
     command
@@ -7462,16 +8800,12 @@ async fn start_terminal_internal(
         command.arg(arg);
     }
 
-    let mut child = command
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
+    let mut child = spawn_with_log_capture(&mut command, format!("gotty-{}", id))?;
     let pid = child.id();
-    println!("gotty process spawned with PID: {:?}", pid);
+    log_info!("gotty process spawned with PID: {:?}", pid);
 
     sleep(Duration::from_millis(300)).await;
-    if let Some(exit_status) = child.try_wait()? {
+    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
         let code = exit_status.code().unwrap_or(-1);
         return Err(format!("gotty exited immediately with code {}", code).into());
     }
@@ -7512,13 +8846,13 @@ async fn stop_terminal_internal(id: &str) -> Result<(), String> {
 /// POST /api/gotty/upgrade - Download and apply gotty binary upgrade
 async fn upgrade_gotty() -> Json<ApiResponse<String>> {
     // 1. Stop all running terminals first
-    println!("Stopping all terminals before gotty upgrade...");
+    log_info!("Stopping all terminals before gotty upgrade...");
     {
         let mut lock = GOTTY_PROCESSES.lock().await;
         for id in lock.keys().cloned().collect::<Vec<_>>() {
             drop(lock);
             if let Err(e) = stop_terminal_internal(&id).await {
-                eprintln!("Failed to stop terminal {}: {}", id, e);
+                log_error!("Failed to stop terminal {}: {}", id, e);
             }
             lock = GOTTY_PROCESSES.lock().await;
         }
@@ -7540,7 +8874,7 @@ async fn upgrade_gotty() -> Json<ApiResponse<String>> {
         return Json(ApiResponse::error("Unsupported architecture"));
     };
 
-    println!("Downloading gotty from {}", download_url);
+    log_info!("Downloading gotty from {}", download_url);
 
     match client.get(download_url).send().await {
         Ok(response) => {
@@ -7571,7 +8905,7 @@ async fn upgrade_gotty() -> Json<ApiResponse<String>> {
                                 e
                             )));
                         }
-                        println!("Backed up current gotty to {:?}", backup_path);
+                        log_info!("Backed up current gotty to {:?}", backup_path);
                     }
 
                     // Write new binary
@@ -7594,7 +8928,7 @@ async fn upgrade_gotty() -> Json<ApiResponse<String>> {
                         )));
                     }
 
-                    println!("Gotty binary upgraded successfully to {:?}", gotty_path);
+                    log_info!("Gotty binary upgraded successfully to {:?}", gotty_path);
 
                     // Clean up backup if successful
                     if PathBuf::from(&backup_path).exists() {
@@ -7662,7 +8996,7 @@ fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send 
 })();
 "#;
         if let Err(e) = fs::write(KASMVNC_DEFAULTS_JS, defaults_js) {
-            eprintln!("Failed to write kasmvnc defaults js: {}", e);
+            log_error!("Failed to write kasmvnc defaults js: {}", e);
             return Ok(());
         }
         let vnc_html_path = PathBuf::from(KASMVNC_HTTPD_DIR).join("vnc.html");
@@ -7673,7 +9007,7 @@ fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send 
                     "<script src=\"./kasmvnc-defaults.js\"></script></head>",
                 );
                 if let Err(e) = fs::write(&vnc_html_path, updated) {
-                    eprintln!("Failed to inject kasmvnc defaults js: {}", e);
+                    log_error!("Failed to inject kasmvnc defaults js: {}", e);
                 }
             }
         }
@@ -7687,7 +9021,7 @@ async fn start_vnc_internal(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lock = VNC_PROCESSES.lock().await;
     if let Some(proc) = lock.get_mut(id) {
-        if proc.child.try_wait()?.is_none() {
+        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
             return Err("vnc already running".into());
         }
         lock.remove(id);
@@ -7774,16 +9108,12 @@ network:
         .env("HOME", &home_dir)
         .current_dir(&home_dir);
 
-    let mut child = command
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
+    let mut child = spawn_with_log_capture(&mut command, format!("vnc-{}", id))?;
     let pid = child.id();
-    println!("kasmvnc process spawned with PID: {:?}", pid);
+    log_info!("kasmvnc process spawned with PID: {:?}", pid);
 
     sleep(Duration::from_millis(500)).await;
-    if let Some(exit_status) = child.try_wait()? {
+    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
         let code = exit_status.code().unwrap_or(-1);
         return Err(format!("kasmvnc exited immediately with code {}", code).into());
     }
@@ -7793,7 +9123,6 @@ network:
         VncProcess {
             child,
             started_at: Instant::now(),
-            display,
         },
     );
     Ok(())
@@ -7837,7 +9166,7 @@ async fn start_app_internal(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lock = APP_PROCESSES.lock().await;
     if let Some(proc) = lock.get_mut(&app.id) {
-        if proc.child.try_wait()?.is_none() {
+        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
             return Err("应用已在运行".into());
         }
         lock.remove(&app.id);
@@ -7881,16 +9210,12 @@ async fn start_app_internal(
         command.env(k, v);
     }
 
-    let mut child = command
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
+    let mut child = spawn_with_log_capture(&mut command, format!("app-{}", app.id))?;
     let pid = child.id();
-    println!("app process spawned with PID: {:?}", pid);
+    log_info!("app process spawned with PID: {:?}", pid);
 
     sleep(Duration::from_millis(300)).await;
-    if let Some(exit_status) = child.try_wait()? {
+    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
         let code = exit_status.code().unwrap_or(-1);
         return Err(format!("app exited immediately with code {}", code).into());
     }
@@ -7929,6 +9254,48 @@ async fn stop_app_internal(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Generate SSH outbounds from hosts configuration
+fn generate_ssh_outbounds_from_hosts(hosts: &[HostConfig]) -> (Vec<String>, Vec<serde_json::Value>) {
+    let mut names = Vec::new();
+    let mut outbounds = Vec::new();
+
+    for host in hosts {
+        let tag = host.name.clone().unwrap_or_else(|| format!("ssh-{}", host.host));
+        names.push(tag.clone());
+
+        let mut outbound = serde_json::json!({
+            "type": "ssh",
+            "tag": tag,
+            "server": host.host,
+            "server_port": host.port,
+            "user": host.username,
+        });
+
+        match &host.auth {
+            HostAuth::Password { password } => {
+                if let Some(pwd) = password {
+                    outbound["password"] = serde_json::Value::String(pwd.clone());
+                }
+            }
+            HostAuth::PrivateKeyPath { path, passphrase } => {
+                if let Ok(resolved_path) = resolve_private_key_path(path) {
+                    outbound["private_key_path"] = serde_json::Value::String(resolved_path);
+                }
+                if let Some(pp) = passphrase {
+                    outbound["private_key_passphrase"] = serde_json::Value::String(pp.clone());
+                }
+            }
+            HostAuth::SshAgent => {
+                // SSH agent doesn't need additional config
+            }
+        }
+
+        outbounds.push(outbound);
+    }
+
+    (names, outbounds)
+}
+
 async fn gen_config(
     config: &Config,
     sing_box_home: &str,
@@ -7944,11 +9311,18 @@ async fn gen_config(
         .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
         .collect();
 
+    // Generate SSH outbounds from hosts
+    let (host_names, host_outbounds) = generate_ssh_outbounds_from_hosts(&config.hosts);
+
     let mut final_outbounds: Vec<serde_json::Value> = vec![];
     let mut final_node_names: Vec<String> = vec![];
 
     final_node_names.extend(subs.node_names.iter().cloned());
     final_outbounds.extend(subs.outbounds.iter().cloned());
+
+    // Add host SSH outbounds
+    final_node_names.extend(host_names);
+    final_outbounds.extend(host_outbounds);
 
     let total_nodes = my_outbounds.len() + final_outbounds.len();
     if total_nodes == 0 {
@@ -8057,19 +9431,19 @@ fn parse_subscription_text(
     // Try parsing as JSON first (sing-box format)
     if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(text) {
         if let Some(outbounds_arr) = json_obj.get("outbounds").and_then(|o| o.as_array()) {
-            println!("Detected sing-box JSON format subscription");
+            log_info!("Detected sing-box JSON format subscription");
             return parse_singbox_json(outbounds_arr);
         }
     }
 
     // Try parsing as Shadowsocks URL list (base64 encoded)
     if let Some(ss_result) = try_parse_ss_urls(text) {
-        println!("Detected Shadowsocks URL format subscription");
+        log_info!("Detected Shadowsocks URL format subscription");
         return ss_result;
     }
 
     // Fall back to YAML parsing (Clash format)
-    println!("Parsing as Clash YAML format");
+    log_info!("Parsing as Clash YAML format");
     let clash_obj: serde_yaml::Value = serde_yaml::from_str(text)?;
     let proxies = clash_obj
         .get("proxies")
@@ -8157,7 +9531,7 @@ async fn load_subscription_file(
     parse_subscription_text(&text)
 }
 
-async fn load_subscription_dir(sub_dir: &StdPath) -> LoadedSubscriptions {
+async fn load_subscription_dir(sub_dir: &StdPath, subscription_id: Option<&str>) -> LoadedSubscriptions {
     let mut file_paths: Vec<(String, PathBuf)> = vec![];
     let mut dir_error: Option<String> = None;
 
@@ -8217,6 +9591,7 @@ async fn load_subscription_dir(sub_dir: &StdPath) -> LoadedSubscriptions {
                     file_path: path.display().to_string(),
                     loaded: true,
                     node_count,
+                    subscription_id: subscription_id.map(|value| value.to_string()),
                     error: None,
                 });
             }
@@ -8226,6 +9601,7 @@ async fn load_subscription_dir(sub_dir: &StdPath) -> LoadedSubscriptions {
                     file_path: path.display().to_string(),
                     loaded: false,
                     node_count: 0,
+                    subscription_id: subscription_id.map(|value| value.to_string()),
                     error: Some(e.to_string()),
                 });
             }
@@ -8305,7 +9681,7 @@ fn parse_singbox_json(
         }
     }
 
-    println!("Parsed {} nodes from sing-box JSON", node_names.len());
+    log_info!("Parsed {} nodes from sing-box JSON", node_names.len());
     Ok((node_names, result_outbounds))
 }
 
@@ -8361,7 +9737,7 @@ fn parse_ss_url_list(content: &str) -> Result<(Vec<String>, Vec<serde_json::Valu
         }
     }
 
-    println!("Parsed {} nodes from Shadowsocks URLs", node_names.len());
+    log_info!("Parsed {} nodes from Shadowsocks URLs", node_names.len());
     Ok((node_names, outbounds))
 }
 
@@ -8485,27 +9861,25 @@ async fn remove_path_if_exists(path: &StdPath) -> Result<(), String> {
     Ok(())
 }
 
-async fn prepare_sub_dir_from_git(url: &str) -> Result<(), String> {
-    let tmp = StdPath::new(".sub");
-    let final_dir = StdPath::new("sub");
-
-    remove_path_if_exists(tmp).await?;
-
-    let out = tokio::process::Command::new("git")
-        .arg("clone")
-        .arg(url)
-        .arg(".sub")
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run git clone: {}", e))?;
-
-    if !out.status.success() {
-        let _ = remove_path_if_exists(tmp).await;
+async fn sync_git_repo(repo: &str, target: &StdPath) -> Result<(), String> {
+    let git_dir = target.join(".git");
+    if tokio::fs::metadata(&git_dir).await.is_ok() {
+        let out = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(target)
+            .arg("pull")
+            .arg("--ff-only")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run git pull: {}", e))?;
+        if out.status.success() {
+            return Ok(());
+        }
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
         return Err(format!(
-            "Git clone failed: {}",
+            "Git sync failed (git pull --ff-only): {}",
             if detail.is_empty() {
                 out.status.to_string()
             } else {
@@ -8514,11 +9888,80 @@ async fn prepare_sub_dir_from_git(url: &str) -> Result<(), String> {
         ));
     }
 
-    remove_path_if_exists(final_dir).await?;
-    tokio::fs::rename(tmp, final_dir)
+    remove_path_if_exists(target).await?;
+    let out = tokio::process::Command::new("git")
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(repo)
+        .arg(target)
+        .output()
         .await
-        .map_err(|e| format!("Failed to move .sub -> sub: {}", e))?;
-    Ok(())
+        .map_err(|e| format!("Failed to run git clone: {}", e))?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(format!(
+        "Git clone failed: {}",
+        if detail.is_empty() {
+            out.status.to_string()
+        } else {
+            detail
+        }
+    ))
+}
+
+async fn fetch_subscription_url(url: &str, dest_dir: &StdPath) -> Result<PathBuf, String> {
+    tokio::fs::create_dir_all(dest_dir)
+        .await
+        .map_err(|e| format!("Failed to create dir {}: {}", dest_dir.display(), e))?;
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Failed to fetch {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Failed to fetch {}: {}", url, resp.status()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+    let target = dest_dir.join("subscription.yaml");
+    tokio::fs::write(&target, bytes)
+        .await
+        .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
+    Ok(target)
+}
+
+async fn prepare_subscription_dir(
+    sub: &SubscriptionConfig,
+    root: &StdPath,
+) -> Result<PathBuf, String> {
+    match &sub.source {
+        SubscriptionSource::Url { url } => {
+            let dir = root.join(&sub.id);
+            let _ = fetch_subscription_url(url, &dir).await?;
+            Ok(dir)
+        }
+        SubscriptionSource::Git { repo } => {
+            let dir = root.join(&sub.id);
+            tokio::fs::create_dir_all(root)
+                .await
+                .map_err(|e| format!("Failed to create dir {}: {}", root.display(), e))?;
+            sync_git_repo(repo, &dir).await?;
+            Ok(dir)
+        }
+        SubscriptionSource::Path { path } => {
+            let dir = PathBuf::from(path);
+            tokio::fs::metadata(&dir)
+                .await
+                .map_err(|e| format!("Subscription path {} is not available: {}", dir.display(), e))?;
+            Ok(dir)
+        }
+    }
 }
 
 // ============================================================================
@@ -8539,7 +9982,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!(
             "Miao - sing-box 管理器\n\n\
 用法:\n  {program} [OPTIONS]\n\n\
-选项:\n  --sub <PATH|GIT_URL>   订阅文件目录或 Git 仓库（默认 ./sub）\n  -h, --help             显示帮助并退出\n\n\
+选项:\n  -h, --help             显示帮助并退出\n\n\
 说明:\n  - 配置文件为当前目录下的 ./config.yaml\n  - 正常运行需要 root 权限（--help 例外）",
             program = program_name
         );
@@ -8548,47 +9991,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Check for root privileges
     if !Uid::effective().is_root() {
-        eprintln!("Error: This application must be run as root.");
+        log_error!("Error: This application must be run as root.");
         std::process::exit(1);
     }
 
-    // CLI args
-    let mut sub_dir = PathBuf::from("sub");
-    let mut sub_source = SubSource::Path {
-        value: "sub".to_string(),
-    };
-    let mut args = rest_args.into_iter();
-    while let Some(arg) = args.next() {
-        if let Some(v) = arg.strip_prefix("--sub=") {
-            if looks_like_git_url(v) {
-                prepare_sub_dir_from_git(v)
-                    .await
-                    .map_err(|e| format!("Failed to prepare subscription dir from git: {}", e))?;
-                sub_dir = PathBuf::from("sub");
-                sub_source = SubSource::Git { url: v.to_string() };
-            } else {
-                sub_dir = PathBuf::from(v);
-                sub_source = SubSource::Path {
-                    value: v.to_string(),
-                };
-            }
-        } else if arg == "--sub" {
-            if let Some(v) = args.next() {
-                if looks_like_git_url(&v) {
-                    prepare_sub_dir_from_git(&v)
-                        .await
-                        .map_err(|e| format!("Failed to prepare subscription dir from git: {}", e))?;
-                    sub_dir = PathBuf::from("sub");
-                    sub_source = SubSource::Git { url: v };
-                } else {
-                    sub_dir = PathBuf::from(&v);
-                    sub_source = SubSource::Path { value: v };
-                }
-            }
-        }
-    }
+    let subscriptions_root = PathBuf::from("sub");
 
-    println!("Reading configuration...");
+    log_info!("Reading configuration...");
     let (mut config, setup_required) = match tokio::fs::read_to_string("config.yaml").await {
         Ok(text) => (serde_yaml::from_str::<Config>(&text)?, false),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
@@ -8618,6 +10027,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 proxy_pause_ms: None,
                 tcp_tunnels: vec![],
                 tcp_tunnel_sets: vec![],
+                subscriptions: vec![],
+                hosts: vec![],
                 metrics: MetricsConfig::default(),
             },
             true,
@@ -8626,6 +10037,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     migrate_terminals(&mut config);
+    let mut subscriptions_changed = normalize_subscriptions(&mut config);
+    if config.subscriptions.is_empty()
+        && tokio::fs::metadata(&subscriptions_root).await.is_ok()
+    {
+        config.subscriptions.push(SubscriptionConfig {
+            id: generate_subscription_id(),
+            name: Some("本地订阅".to_string()),
+            enabled: true,
+            source: SubscriptionSource::Path {
+                path: subscriptions_root.display().to_string(),
+            },
+        });
+        subscriptions_changed = true;
+    }
+    if subscriptions_changed && !setup_required {
+        let _ = save_config(&config).await;
+    }
 
     let port = config.port.unwrap_or(DEFAULT_PORT);
 
@@ -8636,35 +10064,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         extract_sing_box()?.to_string_lossy().to_string()
     };
 
-    println!("Loading subscription files from: {}", sub_dir.display());
-    let loaded_subs = load_subscription_dir(&sub_dir).await;
+    log_info!("Loading subscriptions from: {}", subscriptions_root.display());
+    let (loaded_subs, subscription_status) = load_subscriptions(&config, &subscriptions_root).await;
     let node_type_by_tag = build_node_type_map(&config, &loaded_subs);
 
     if !setup_required {
         // Generate initial config
-        println!("Generating initial config...");
+        log_info!("Generating initial config...");
         match gen_config(&config, &sing_box_home, &loaded_subs).await {
             Ok(_) => {
                 // Check OpenWrt dependencies
-                println!("Checking dependencies...");
+                log_info!("Checking dependencies...");
                 if let Err(e) = check_and_install_openwrt_dependencies().await {
-                    eprintln!("Failed to check or install OpenWrt dependencies: {}", e);
+                    log_error!("Failed to check or install OpenWrt dependencies: {}", e);
                 }
 
                 // Start sing-box
                 match start_sing_internal(&sing_box_home).await {
                     Ok(_) => {
                         let _ = apply_saved_selections(&config).await;
-                        println!("sing-box started successfully")
+                        log_info!("sing-box started successfully")
                     }
-                    Err(e) => eprintln!("Failed to start sing-box: {}", e),
+                    Err(e) => log_error!("Failed to start sing-box: {}", e),
                 }
             }
             Err(e) => {
-                eprintln!(
+                log_error!(
                     "Failed to generate config: {}. Please add subscription files under {} and reload.",
                     e,
-                    sub_dir.display()
+                    subscriptions_root.display()
                 );
             }
         }
@@ -8674,8 +10102,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 continue;
             }
             match start_terminal_internal(&terminal.id, terminal).await {
-                Ok(_) => println!("gotty started successfully"),
-                Err(e) => eprintln!("Failed to start gotty: {}", e),
+                Ok(_) => log_info!("gotty started successfully"),
+                Err(e) => log_error!("Failed to start gotty: {}", e),
             }
         }
 
@@ -8684,8 +10112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 continue;
             }
             match start_vnc_internal(&vnc.id, vnc).await {
-                Ok(_) => println!("kasmvnc started successfully"),
-                Err(e) => eprintln!("Failed to start kasmvnc: {}", e),
+                Ok(_) => log_info!("kasmvnc started successfully"),
+                Err(e) => log_error!("Failed to start kasmvnc: {}", e),
             }
         }
 
@@ -8695,22 +10123,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 continue;
             }
             match start_app_internal(app, &config_snapshot).await {
-                Ok(_) => println!("应用启动成功"),
-                Err(e) => eprintln!("Failed to start app {}: {}", app.id, e),
+                Ok(_) => log_info!("应用启动成功"),
+                Err(e) => log_error!("Failed to start app {}: {}", app.id, e),
             }
         }
 
     } else {
-        println!("No config.yaml found, entering setup mode at http://localhost:{}", port);
+        log_info!("No config.yaml found, entering setup mode at http://localhost:{}", port);
     }
 
     let app_state = Arc::new(AppState {
         config: Mutex::new(config.clone()),
         sing_box_home: sing_box_home.clone(),
-        sub_dir: sub_dir.clone(),
-        sub_source,
-        sub_files: Mutex::new(loaded_subs.files.clone()),
-        sub_dir_error: Mutex::new(loaded_subs.dir_error.clone()),
+        subscriptions_root: subscriptions_root.clone(),
+        subscription_status: Mutex::new(subscription_status),
         node_type_by_tag: Mutex::new(node_type_by_tag),
         dns_monitor: Mutex::new(DnsMonitorState::default()),
         proxy_monitor: Mutex::new(ProxyMonitorState::default()),
@@ -8750,13 +10176,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let interval_secs = app_state.metrics_config.sample_interval_secs.max(1);
         tokio::spawn(async move {
             if let Err(e) = refresh_system_metrics(&state_clone).await {
-                eprintln!("Failed to refresh system metrics: {}", e);
+                log_error!("Failed to refresh system metrics: {}", e);
             }
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
             loop {
                 interval.tick().await;
                 if let Err(e) = refresh_system_metrics(&state_clone).await {
-                    eprintln!("Failed to refresh system metrics: {}", e);
+                    log_error!("Failed to refresh system metrics: {}", e);
                 }
             }
         });
@@ -8773,6 +10199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/status", get(get_system_status))
         .route("/api/system/metrics", get(get_system_metrics))
+        .route("/api/password", post(update_password))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
         .route("/api/service/restart", post(restart_service))
@@ -8804,12 +10231,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/clash/proxies", get(clash_get_proxies))
         .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
         .route("/api/clash/proxies/{node}/delay", get(clash_test_delay))
+        .route("/api/clash/proxies/delay", post(clash_test_batch_delay))
         .route("/api/selections", get(get_selections))
         .route("/api/proxy/status", get(get_proxy_status))
         .route("/api/proxy/pool", put(update_proxy_pool))
         // Subscription file management
         .route("/api/sub-files", get(get_sub_files))
         .route("/api/sub-files/reload", post(reload_sub_files))
+        .route("/api/subscriptions", get(list_subscriptions))
+        .route("/api/subscriptions", post(create_subscription))
+        .route("/api/subscriptions/{id}", put(update_subscription).delete(delete_subscription))
+        .route("/api/subscriptions/{id}/reload", post(reload_subscription))
+        .route("/api/subscriptions/reload", post(reload_subscriptions))
         // Node management
         .route("/api/nodes", get(get_nodes))
         .route("/api/nodes", post(add_node))
@@ -8849,6 +10282,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}/start", post(start_sync))
         .route("/api/syncs/{id}/stop", post(stop_sync))
         .route("/api/syncs/{id}/test", post(test_sync))
+        // Host management
+        .route("/api/hosts", get(get_hosts).post(create_host))
+        .route("/api/hosts/default-key-path", get(get_host_default_key_path))
+        .route("/api/hosts/test", post(test_host_config))
+        .route("/api/hosts/{id}", get(get_host).put(update_host).delete(delete_host))
+        .route("/api/hosts/{id}/test", post(test_host))
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）
@@ -8871,7 +10310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .fallback(spa_fallback);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    println!("✅ Miao 控制面板已启动: http://localhost:{}", port);
+    log_info!("✅ Miao 控制面板已启动: http://localhost:{}", port);
     axum::serve(listener, app).await?;
     Ok(())
 }

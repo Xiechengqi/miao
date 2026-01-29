@@ -40,8 +40,8 @@ export function TogglePower({ running, loading, onToggle, size = "md", className
         "transition-all duration-300 ease-bezier(0.4, 0, 0.2, 1)",
         "relative overflow-hidden",
         running
-          ? "bg-gradient-to-br from-red-500 to-red-600 shadow-lg shadow-red-500/50"
-          : "bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg shadow-emerald-500/50",
+          ? "bg-gradient-to-br from-red-500 to-red-600 shadow-lg shadow-red-500/50 hover:from-red-400 hover:to-red-500"
+          : "bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg shadow-emerald-500/50 hover:from-emerald-400 hover:to-emerald-500",
         sizeStyles[size],
         (loading) && "opacity-50 cursor-not-allowed",
         !loading && "hover:scale-108 cursor-pointer",

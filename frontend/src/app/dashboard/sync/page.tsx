@@ -4,18 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
-import { SyncConfig } from "@/types/api";
+import { SyncConfig, Host } from "@/types/api";
 import { Plus, Trash2, Pencil, Zap, Play, Square } from "lucide-react";
 
 const defaultSyncForm = {
   name: "",
   enabled: true,
+  host_id: "",
   local_paths_text: "",
   remote_path: "",
-  ssh_host: "",
-  ssh_port: "22",
-  username: "",
-  password: "",
   delete: false,
   verify: false,
   compress: false,
@@ -35,6 +32,11 @@ export default function SyncPage() {
 
   const [syncs, setSyncs] = useState<SyncConfig[]>([]);
   const [syncsLoaded, setSyncsLoaded] = useState(false);
+  const [hosts, setHosts] = useState<Host[]>([]);
+  const availableHosts = useMemo(
+    () => hosts.filter((host) => host.auth_type !== "private_key_path"),
+    [hosts]
+  );
 
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [editingSyncId, setEditingSyncId] = useState<string | null>(null);
@@ -48,7 +50,7 @@ export default function SyncPage() {
   }, [syncForm.local_paths_text]);
 
   const canSubmitSync = useMemo(() => {
-    if (!syncForm.ssh_host.trim() || !syncForm.username.trim()) return false;
+    if (!syncForm.host_id) return false;
     if (localPaths.length === 0) return false;
     if (syncForm.schedule_enabled && !syncForm.schedule_cron.trim()) return false;
     return true;
@@ -56,7 +58,17 @@ export default function SyncPage() {
 
   useEffect(() => {
     loadSyncs();
+    loadHosts();
   }, []);
+
+  const loadHosts = async () => {
+    try {
+      const data = await api.getHosts();
+      setHosts(data);
+    } catch (error) {
+      console.error("Failed to load hosts:", error);
+    }
+  };
 
   const loadSyncs = async () => {
     try {
@@ -74,17 +86,21 @@ export default function SyncPage() {
   };
 
   const openSyncModal = (sync?: SyncConfig) => {
+    void loadHosts();
     if (sync) {
+      const matchedHost = availableHosts.find(
+        (host) =>
+          host.host === sync.ssh.host &&
+          host.port === sync.ssh.port &&
+          host.username === sync.ssh.username
+      );
       setEditingSyncId(sync.id);
       setSyncForm({
         name: sync.name || "",
         enabled: sync.enabled,
+        host_id: matchedHost?.id || "",
         local_paths_text: (sync.local_paths || []).join("\n"),
         remote_path: sync.remote_path || "",
-        ssh_host: sync.ssh.host || "",
-        ssh_port: sync.ssh.port?.toString() || "22",
-        username: sync.ssh.username || "",
-        password: sync.auth?.password || "",
         delete: !!sync.options?.delete,
         verify: !!sync.options?.verify,
         compress: !!sync.options?.compress,
@@ -124,19 +140,24 @@ export default function SyncPage() {
         ? { enabled: true, cron, timezone }
         : { enabled: false };
 
-      const payload: Omit<SyncConfig, "id"> = {
+      const selectedHost = availableHosts.find((host) => host.id === syncForm.host_id);
+      if (!selectedHost) {
+        addToast({ type: "error", message: "所选主机不可用" });
+        return;
+      }
+
+      const payload: Record<string, unknown> = {
         name: syncForm.name.trim() || null,
         enabled: !!syncForm.enabled,
+        host_id: selectedHost.id,
         local_paths: localPaths,
         remote_path: remotePath,
-        ssh: {
-          host: syncForm.ssh_host.trim(),
-          port: Number(syncForm.ssh_port) || 22,
-          username: syncForm.username.trim(),
-        },
+        ssh_host: selectedHost.host,
+        ssh_port: selectedHost.port,
+        username: selectedHost.username,
         auth: {
           type: "password",
-          password: syncForm.password.trim() || null,
+          password: "",
         },
         options: {
           delete: !!syncForm.delete,
@@ -399,36 +420,37 @@ export default function SyncPage() {
             onChange={(e) => setSyncForm({ ...syncForm, remote_path: e.target.value })}
           />
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            <Input
-              label="SSH Host"
-              placeholder="example.com"
-              value={syncForm.ssh_host}
-              onChange={(e) => setSyncForm({ ...syncForm, ssh_host: e.target.value })}
-            />
-            <Input
-              label="端口"
-              type="number"
-              value={syncForm.ssh_port}
-              onChange={(e) => setSyncForm({ ...syncForm, ssh_port: e.target.value })}
-            />
-            <Input
-              label="用户名"
-              placeholder="root"
-              value={syncForm.username}
-              onChange={(e) => setSyncForm({ ...syncForm, username: e.target.value })}
-            />
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-2">
+              选择主机
+            </label>
+            <select
+              value={syncForm.host_id}
+              onChange={(e) => setSyncForm({ ...syncForm, host_id: e.target.value })}
+              className="w-full h-11 rounded-lg border border-slate-200 bg-white px-4 text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
+            >
+              <option value="" disabled>
+                请选择主机
+              </option>
+              {hosts.map((host) => {
+                const disabled = host.auth_type === "private_key_path";
+                const suffix = disabled ? "（不支持私钥认证）" : "";
+                return (
+                  <option key={host.id} value={host.id} disabled={disabled}>
+                    {host.name || host.host} ({host.username}@{host.host}:{host.port}){suffix}
+                  </option>
+                );
+              })}
+            </select>
+            {hosts.length === 0 ? (
+              <p className="text-xs text-slate-500 mt-2">请先添加 SSH 主机</p>
+            ) : availableHosts.length === 0 && (
+              <p className="text-xs text-slate-500 mt-2">同步仅支持密码或 SSH Agent 认证</p>
+            )}
           </div>
 
-          <Input
-            label="密码（可选）"
-            placeholder={editingSyncId ? "留空会改为使用 ~/.ssh 密钥" : "留空会改为使用 ~/.ssh 密钥"}
-            value={syncForm.password}
-            onChange={(e) => setSyncForm({ ...syncForm, password: e.target.value })}
-          />
-
           <p className="text-xs text-slate-500">
-            远端必须安装 sy（包含 sy-remote），不校验主机指纹；密码留空时会使用本机 ~/.ssh 下的密钥。
+            远端必须安装 sy（包含 sy-remote），不校验主机指纹；同步支持密码或 SSH Agent 认证。
           </p>
 
           <div className="space-y-3">

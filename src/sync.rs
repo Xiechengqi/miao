@@ -526,17 +526,25 @@ async fn prepare_ssh_runtime(cfg: &SyncConfig, local_path: &str) -> Result<SyncS
     config_lines.push(format!("  HostName {}", cfg.ssh.host));
     config_lines.push(format!("  User {}", cfg.ssh.username));
     config_lines.push(format!("  Port {}", cfg.ssh.port));
-    let password = match &cfg.ssh.auth {
-        TcpTunnelAuth::Password { password } => password.trim().to_string(),
+    let (password, use_agent) = match &cfg.ssh.auth {
+        TcpTunnelAuth::Password { password } => (password.trim().to_string(), false),
+        TcpTunnelAuth::SshAgent => ("".to_string(), true),
         TcpTunnelAuth::PrivateKeyPath { .. } => {
             return Err(format!(
-                "sync only supports password auth for {}",
+                "sync only supports password or ssh-agent auth for {}",
                 local_path
             ));
         }
     };
 
-    if !password.is_empty() {
+    if use_agent {
+        let agent_sock = std::env::var("SSH_AUTH_SOCK")
+            .map_err(|_| "SSH_AUTH_SOCK is not set".to_string())?;
+        config_lines.push("  PreferredAuthentications publickey".to_string());
+        config_lines.push("  PubkeyAuthentication yes".to_string());
+        config_lines.push("  IdentitiesOnly no".to_string());
+        config_lines.push(format!("  IdentityAgent {}", agent_sock));
+    } else if !password.is_empty() {
         config_lines.push("  PreferredAuthentications password".to_string());
         config_lines.push("  PubkeyAuthentication no".to_string());
     } else {

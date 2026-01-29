@@ -36,6 +36,7 @@ interface AppState {
   // Logs State
   logs: LogEntry[];
   logWsConnected: boolean;
+  logKeys: Set<string>;
 
   // Toast State
   toasts: ToastMessage[];
@@ -89,6 +90,7 @@ export const useStore = create<AppState>((set, get) => ({
   terminalsLoaded: false,
   logs: [],
   logWsConnected: false,
+  logKeys: new Set(),
   toasts: [],
 
   // Actions
@@ -108,8 +110,28 @@ export const useStore = create<AppState>((set, get) => ({
   setTcpTunnelsSupported: (supported) => set({ tcpTunnelsSupported: supported }),
   setTerminals: (terminals) => set({ terminals }),
   setTerminalsLoaded: (loaded) => set({ terminalsLoaded: loaded }),
-  setLogs: (logs) => set({ logs }),
-  addLog: (log) => set((state) => ({ logs: [log, ...state.logs].slice(0, 500) })),
+  setLogs: (logs) => {
+    const keys = new Set(logs.map((entry) => `${entry.time}|${entry.level}|${entry.message}`));
+    set({ logs, logKeys: keys });
+  },
+  addLog: (log) =>
+    set((state) => {
+      const key = `${log.time}|${log.level}|${log.message}`;
+      if (state.logKeys.has(key)) {
+        return state;
+      }
+      const newLogs = [log, ...state.logs];
+      const newKeys = new Set(state.logKeys);
+      newKeys.add(key);
+      if (newLogs.length > 500) {
+        const removed = newLogs.pop();
+        if (removed) {
+          const removedKey = `${removed.time}|${removed.level}|${removed.message}`;
+          newKeys.delete(removedKey);
+        }
+      }
+      return { logs: newLogs, logKeys: newKeys };
+    }),
   setLogWsConnected: (connected) => set({ logWsConnected: connected }),
   addToast: (toast) =>
     set((state) => ({

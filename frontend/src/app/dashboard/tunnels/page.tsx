@@ -5,25 +5,18 @@ import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
 import { Plus, Play, Square, Trash2, RefreshCw, Activity, Copy, Pencil } from "lucide-react";
-import { TcpTunnel } from "@/types/api";
+import { TcpTunnel, Host } from "@/types/api";
 
 const defaultForm = {
   name: "",
   enabled: true,
   mode: "single" as "single" | "full",
+  host_id: "",
   local_addr: "127.0.0.1",
   local_port: "22",
   remote_bind_addr: "127.0.0.1",
   remote_port: "",
   allow_public_bind: false,
-  ssh_host: "",
-  ssh_port: "22",
-  username: "",
-  auth_type: "password" as "password" | "private_key_path",
-  password: "",
-  private_key_path: "",
-  private_key_passphrase: "",
-  clear_private_key_passphrase: false,
   strict_host_key_checking: false,
   host_key_fingerprint: "",
   connect_timeout_ms: "",
@@ -52,15 +45,31 @@ export default function TunnelsPage() {
   const [editingTunnel, setEditingTunnel] = useState<TcpTunnel | null>(null);
   const [formData, setFormData] = useState(defaultForm);
   const [viewMode, setViewMode] = useState<"single" | "full">("single");
+  const [hosts, setHosts] = useState<Host[]>([]);
+  const availableHosts = useMemo(
+    () => hosts,
+    [hosts]
+  );
 
   useEffect(() => {
     loadTunnels();
+    loadHosts();
   }, []);
+
+  const loadHosts = async () => {
+    try {
+      const data = await api.getHosts();
+      setHosts(data);
+    } catch (error) {
+      console.error("Failed to load hosts:", error);
+    }
+  };
 
   const loadTunnels = async () => {
     try {
-      const data = await api.getTcpTunnels();
-      setTcpTunnels(data);
+      const { supported, items } = await api.getTcpTunnels();
+      setTcpTunnels(items);
+      setTcpTunnelsSupported(supported);
       setTcpTunnelsLoaded(true);
     } catch (error) {
       console.error("Failed to load tunnels:", error);
@@ -90,20 +99,44 @@ export default function TunnelsPage() {
   };
 
   const handleSubmit = async () => {
+    if (!formData.host_id) {
+      addToast({ type: "error", message: "请先选择主机" });
+      return;
+    }
     setLoading(true, "save");
     try {
+      const selectedHost = availableHosts.find((host) => host.id === formData.host_id);
+      if (!selectedHost) {
+        addToast({ type: "error", message: "所选主机不可用" });
+        return;
+      }
+      if (selectedHost.auth_type === "private_key_path" && !selectedHost.private_key_path) {
+        addToast({ type: "error", message: "所选主机缺少私钥路径" });
+        return;
+      }
+
       const payload: Record<string, unknown> = {
         name: formData.name.trim() || null,
         enabled: formData.enabled,
         mode: formData.mode,
         remote_bind_addr: formData.remote_bind_addr,
-        ssh_host: formData.ssh_host.trim(),
-        ssh_port: parseInt(formData.ssh_port) || 22,
-        username: formData.username.trim(),
-        auth_type: formData.auth_type,
         strict_host_key_checking: formData.strict_host_key_checking,
         host_key_fingerprint: formData.host_key_fingerprint.trim() || undefined,
+        host_id: selectedHost.id,
+        ssh_host: selectedHost.host,
+        ssh_port: selectedHost.port,
+        username: selectedHost.username,
       };
+
+      payload.auth = selectedHost.auth_type === "private_key_path"
+        ? {
+          type: "private_key_path",
+          path: selectedHost.private_key_path || "",
+          passphrase: selectedHost.private_key_passphrase || null,
+        }
+        : selectedHost.auth_type === "ssh_agent"
+        ? { type: "ssh_agent" }
+        : { type: "password", password: "" };
 
       if (formData.mode === "single") {
         payload.local_addr = formData.local_addr.trim();
@@ -116,20 +149,6 @@ export default function TunnelsPage() {
         payload.exclude_ports = parsePortsText(formData.exclude_ports_text);
       }
 
-      if (formData.auth_type === "password") {
-        if (formData.password.trim()) {
-          payload.password = formData.password.trim();
-        }
-      } else {
-        payload.private_key_path = formData.private_key_path.trim();
-        if (formData.clear_private_key_passphrase) {
-          payload.clear_private_key_passphrase = true;
-          payload.private_key_passphrase = "";
-        } else if (formData.private_key_passphrase.trim()) {
-          payload.private_key_passphrase = formData.private_key_passphrase.trim();
-        }
-      }
-
       const connectTimeout = parseNumber(formData.connect_timeout_ms);
       if (connectTimeout !== undefined) payload.connect_timeout_ms = connectTimeout;
       const keepalive = parseNumber(formData.keepalive_interval_ms);
@@ -140,10 +159,10 @@ export default function TunnelsPage() {
       if (backoffMax !== undefined) payload.backoff_max_ms = backoffMax;
 
       if (editingTunnel) {
-        await api.updateTcpTunnel(editingTunnel.id, payload as Partial<TcpTunnel>);
+        await api.updateTcpTunnel(editingTunnel.id, payload);
         addToast({ type: "success", message: "隧道已更新" });
       } else {
-        await api.createTcpTunnel(payload as any);
+        await api.createTcpTunnel(payload);
         addToast({ type: "success", message: "隧道已创建" });
       }
       setShowModal(false);
@@ -228,25 +247,25 @@ export default function TunnelsPage() {
   };
 
   const openModal = (tunnel?: TcpTunnel) => {
+    void loadHosts();
     if (tunnel) {
+      const matchedHost = availableHosts.find(
+        (host) =>
+          host.host === tunnel.ssh_host &&
+          host.port === tunnel.ssh_port &&
+          host.username === tunnel.username
+      );
       setEditingTunnel(tunnel);
       setFormData({
         name: tunnel.name || "",
         enabled: tunnel.enabled ?? true,
         mode: tunnel.mode,
+        host_id: matchedHost?.id || "",
         local_addr: tunnel.local_addr || "127.0.0.1",
         local_port: tunnel.local_port?.toString() || "22",
         remote_bind_addr: tunnel.remote_bind_addr || "127.0.0.1",
         remote_port: tunnel.remote_port?.toString() || "",
         allow_public_bind: !!tunnel.allow_public_bind,
-        ssh_host: tunnel.ssh_host || "",
-        ssh_port: tunnel.ssh_port?.toString() || "22",
-        username: tunnel.username || "",
-        auth_type: tunnel.auth_type || "password",
-        password: "",
-        private_key_path: tunnel.private_key_path || "",
-        private_key_passphrase: "",
-        clear_private_key_passphrase: false,
         strict_host_key_checking: !!tunnel.strict_host_key_checking,
         host_key_fingerprint: tunnel.host_key_fingerprint || "",
         connect_timeout_ms: tunnel.connect_timeout_ms?.toString() || "",
@@ -455,12 +474,6 @@ export default function TunnelsPage() {
                 <option value="full">全穿透</option>
               </select>
             </div>
-            <Input
-              label="SSH 端口"
-              type="number"
-              value={formData.ssh_port}
-              onChange={(e) => setFormData({ ...formData, ssh_port: e.target.value })}
-            />
           </div>
 
           {formData.mode === "single" ? (
@@ -544,79 +557,33 @@ export default function TunnelsPage() {
             </Card>
           )}
 
-          <div className="grid grid-cols-3 gap-4">
-            <Input
-              label="SSH 主机"
-              placeholder="example.com"
-              value={formData.ssh_host}
-              onChange={(e) => setFormData({ ...formData, ssh_host: e.target.value })}
-            />
-            <Input
-              label="SSH 端口"
-              type="number"
-              value={formData.ssh_port}
-              onChange={(e) => setFormData({ ...formData, ssh_port: e.target.value })}
-            />
-            <Input
-              label="用户名"
-              placeholder="root"
-              value={formData.username}
-              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-            />
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-2">
+              选择主机
+            </label>
+            <select
+              value={formData.host_id}
+              onChange={(e) => setFormData({ ...formData, host_id: e.target.value })}
+              className="w-full h-11 px-4 rounded-lg bg-white border border-slate-200 shadow-sm border-0 outline-none"
+            >
+              <option value="" disabled>
+                请选择主机
+              </option>
+              {hosts.map((host) => {
+                const missingKey = host.auth_type === "private_key_path" && !host.private_key_path;
+                const disabled = missingKey;
+                const suffix = missingKey ? "（缺少私钥路径）" : "";
+                return (
+                  <option key={host.id} value={host.id} disabled={disabled}>
+                    {host.name || host.host} ({host.username}@{host.host}:{host.port}){suffix}
+                  </option>
+                );
+              })}
+            </select>
+            {hosts.length === 0 ? (
+              <p className="text-xs text-slate-500 mt-2">请先在主机页面添加 SSH 主机</p>
+            ) : null}
           </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-2">
-                认证方式
-              </label>
-              <select
-                value={formData.auth_type}
-                onChange={(e) => setFormData({ ...formData, auth_type: e.target.value as "password" | "private_key_path" })}
-                className="w-full h-11 px-4 rounded-lg bg-white border border-slate-200 shadow-sm border-0 outline-none"
-              >
-                <option value="password">Password</option>
-                <option value="private_key_path">Private Key Path</option>
-              </select>
-            </div>
-            {formData.auth_type === "password" ? (
-              <Input
-                label="密码"
-                placeholder="留空使用 ~/.ssh 密钥"
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-              />
-            ) : (
-              <Input
-                label="私钥路径"
-                placeholder="/root/.ssh/id_ed25519"
-                value={formData.private_key_path}
-                onChange={(e) => setFormData({ ...formData, private_key_path: e.target.value })}
-              />
-            )}
-          </div>
-
-          {formData.auth_type === "private_key_path" && (
-            <div className="space-y-2">
-              <Input
-                label="私钥口令（可选）"
-                type="password"
-                placeholder={editingTunnel ? "留空保持不变" : "无口令留空"}
-                value={formData.private_key_passphrase}
-                onChange={(e) => setFormData({ ...formData, private_key_passphrase: e.target.value })}
-              />
-              {editingTunnel && (
-                <label className="flex items-center gap-2 text-sm text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={formData.clear_private_key_passphrase}
-                    onChange={(e) => setFormData({ ...formData, clear_private_key_passphrase: e.target.checked })}
-                  />
-                  清空口令
-                </label>
-              )}
-            </div>
-          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div className="flex items-center gap-2 text-sm text-slate-600 pt-7">
@@ -681,7 +648,7 @@ export default function TunnelsPage() {
             <Button variant="secondary" onClick={() => setShowModal(false)}>
               取消
             </Button>
-            <Button onClick={handleSubmit} loading={loading}>
+            <Button onClick={handleSubmit} loading={loading} disabled={!formData.host_id}>
               保存
             </Button>
           </div>

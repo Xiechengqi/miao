@@ -127,6 +127,14 @@ h1, h2, h3, h4, h5, h6 {
     transform: translateY(-4px);
     box-shadow: var(--shadow-card-hover);
   }
+
+  .hover-select {
+    transition: background-color 200ms ease-out;
+  }
+
+  .hover-select:hover {
+    background-color: rgba(79, 70, 229, 0.06);
+  }
 }
 
 /* Scrollbar styling */

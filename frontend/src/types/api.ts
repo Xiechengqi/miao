@@ -77,6 +77,7 @@ export interface SystemStatus {
   samplePeriodSecs: number;
   cpuPercent: number;
   memoryUsedKb: number;
+  uptimeSecs?: number | null;
   graphics: GraphicsUsage[];
   disks: SystemDiskUsage[];
   nvidiaAvailable: boolean;
@@ -97,6 +98,13 @@ export interface SystemMetricsResponse {
   series: SystemMetricsPoint[];
 }
 
+export interface VersionInfo {
+  current: string;
+  latest?: string | null;
+  has_update: boolean;
+  download_url?: string | null;
+}
+
 export interface DnsCandidate {
   name: string;
   health: "ok" | "bad" | "cooldown";
@@ -104,7 +112,7 @@ export interface DnsCandidate {
 
 export interface DnsStatus {
   active?: string;
-  candidates?: string[];
+  candidates?: Array<string | DnsCandidate>;
   health?: Record<string, "ok" | "bad" | "cooldown">;
   last_check_secs_ago?: number;
 }
@@ -154,6 +162,7 @@ export interface SubFileInfo {
   file_name: string;
   node_count: number;
   loaded: boolean;
+  subscription_id?: string;
   error?: string;
 }
 
@@ -162,6 +171,26 @@ export interface SubFilesResponse {
   sub_source: SubSource | null;
   files: SubFileInfo[];
   error?: string;
+}
+
+export type SubscriptionType = "url" | "git" | "path";
+
+export interface SubscriptionSource {
+  type: SubscriptionType;
+  url?: string;
+  repo?: string;
+  path?: string;
+  workdir?: string;
+}
+
+export interface SubscriptionItem {
+  id: string;
+  name?: string | null;
+  enabled: boolean;
+  source: SubscriptionSource;
+  updated_at?: number | null;
+  last_error?: string | null;
+  files: SubFileInfo[];
 }
 
 // Traffic Types
@@ -183,7 +212,7 @@ export interface SyncConfig {
     username: string;
   };
   auth?: {
-    type: "password";
+    type: "password" | "ssh_agent";
     password?: string | null;
   };
   options?: {
@@ -221,7 +250,7 @@ export interface TcpTunnel {
   local_addr: string;
   local_port: number;
   username: string;
-  auth_type?: "password" | "private_key_path";
+  auth_type?: "password" | "private_key_path" | "ssh_agent";
   password?: string;
   private_key_path?: string;
   private_key_passphrase?: string;
@@ -330,6 +359,23 @@ export interface ConnectivitySite {
 export interface ConnectivityResult {
   delay?: number;
   status: "pending" | "testing" | "success" | "error";
+}
+
+// Host Types
+export type HostAuthType = "password" | "private_key_path" | "ssh_agent";
+
+export interface Host {
+  id: string;
+  name?: string | null;
+  host: string;
+  port: number;
+  username: string;
+  auth_type: HostAuthType;
+  password?: string;
+  private_key_path?: string;
+  private_key_passphrase?: string;
+  created_at?: number;
+  updated_at?: number;
 }
 
 // Toast Types

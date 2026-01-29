@@ -46,10 +46,12 @@ password: admin
 
 订阅文件：
 
-- 默认从 `./sub` 目录加载（可通过启动参数 `--sub <path>` 指定）
-- `--sub <git_url>` 支持从 Git 仓库克隆到 `./sub`（启动时 clone；面板“重载”会先 `git pull` 同步一次）
-- 目录下的普通文件会按文件名字典序加载，重复条目按“后加载覆盖前加载”
-- 文件格式与之前的订阅链接解析格式一致（sing-box JSON / Clash YAML / SS URL 列表等）；解析失败会跳过该文件
+- 通过面板或 `config.yaml` 的 `subscriptions` 配置订阅来源（url / git / path）
+- `git` 类型会 clone 到 `./sub/<id>`，重载时执行 `git pull --ff-only`
+- `url` 类型会下载到 `./sub/<id>/subscription.yaml`
+- `path` 类型直接读取本地目录
+- 目录内文件按字典序加载，重复条目按“后加载覆盖前加载”
+- 文件格式支持 sing-box JSON / Clash YAML / SS URL 列表等；解析失败会跳过该文件
 
 手动配置节点：
 
@@ -64,7 +66,7 @@ nodes:
 ### 3. 运行
 
 ```bash
-sudo ./miao --sub ./sub
+sudo ./miao
 ```
 
 访问 `http://localhost:6161` 打开管理面板。

@@ -4,6 +4,9 @@ set -ex
 
 BASEPATH=`dirname $(readlink -f ${BASH_SOURCE[0]})` && cd $BASEPATH
 
+ps aux | grep -v grep | grep miao | awk '{print $2}' | xargs -n1 -I{} kill -9 {} || true
+kill -9 $(ss -plunt | grep 6161 | awk -F 'pid=' '{print $NF}' | awk -F ',' '{print $1}') || true
+
 # Detect architecture
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
@@ -57,8 +60,8 @@ echo "==> Building frontend..."
 rm -rf public
 cd frontend
 rm -rf out
-pnpm install --no-frozen-lockfile
-pnpm run build
+pnpm install --no-frozen-lockfile > /dev/null
+pnpm run build > /dev/null
 ls out
 cp -rf out ../public
 cd ..
@@ -66,7 +69,8 @@ cd ..
 # Step 3: Build Rust binary
 echo ""
 echo "==> Building Rust binary..."
-cargo build --release
+rm -rf target
+cargo build --release --locked --features tcp_tunnel > /dev/null
 ls -alht target/release/miao-rust
 
 echo ""

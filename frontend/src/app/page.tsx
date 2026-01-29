@@ -19,18 +19,7 @@ export default function HomePage() {
         return;
       }
 
-      try {
-        const { required } = await fetch("/api/setup/status").then((r) => r.json());
-
-        if (required) {
-          router.push("/setup");
-        } else {
-          router.push("/dashboard");
-        }
-      } catch {
-        // If API is not available, redirect to login
-        router.push("/login");
-      }
+      router.push("/dashboard");
     };
 
     checkAuth();

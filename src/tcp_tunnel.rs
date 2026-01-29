@@ -147,35 +147,6 @@ impl TunnelManager {
         }
     }
 
-    pub async fn start(&self, id: &str) -> Result<(), String> {
-        let guard = self.inner.tunnels.lock().await;
-        let Some(handle) = guard.get(id) else {
-            return Err("Tunnel not found".to_string());
-        };
-        let _ = handle.stop_tx.send(false);
-        Ok(())
-    }
-
-    pub async fn stop(&self, id: &str) -> Result<(), String> {
-        let guard = self.inner.tunnels.lock().await;
-        let Some(handle) = guard.get(id) else {
-            return Err("Tunnel not found".to_string());
-        };
-        let _ = handle.stop_tx.send(true);
-        Ok(())
-    }
-
-    pub async fn restart(&self, id: &str) -> Result<(), String> {
-        let cfg = {
-            let guard = self.inner.tunnels.lock().await;
-            let Some(old) = guard.get(id) else {
-                return Err("Tunnel not found".to_string());
-            };
-            old.config.clone()
-        };
-        self.restart_with_config(cfg).await
-    }
-
     pub async fn restart_with_config(&self, cfg: TcpTunnelConfig) -> Result<(), String> {
         let mut join: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -202,15 +173,6 @@ impl TunnelManager {
         let handle = guard.get(id)?;
         let out = handle.status.read().await.clone();
         Some(out)
-    }
-
-    pub async fn list(&self) -> Vec<(TcpTunnelConfig, TunnelRuntimeStatus)> {
-        let guard = self.inner.tunnels.lock().await;
-        let mut out = Vec::with_capacity(guard.len());
-        for handle in guard.values() {
-            out.push((handle.config.clone(), handle.status.read().await.clone()));
-        }
-        out
     }
 
     pub async fn test(&self, cfg: &TcpTunnelConfig) -> Result<(), (String, String)> {
@@ -308,6 +270,7 @@ async fn authenticate_session(
     connect_timeout: Duration,
 ) -> Result<russh::client::AuthResult, (String, String)> {
     use crate::TcpTunnelAuth;
+    use russh::keys::agent::client::AgentClient;
     use russh::keys::key::PrivateKeyWithHashAlg;
     use russh::keys::load_secret_key;
 
@@ -403,6 +366,70 @@ async fn authenticate_session(
             .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
             .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))
         }
+        TcpTunnelAuth::SshAgent => {
+            let mut agent = AgentClient::connect_env()
+                .await
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
+            let identities = agent
+                .request_identities()
+                .await
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
+            if identities.is_empty() {
+                return Err((
+                    "AUTH_MISSING".to_string(),
+                    "ssh-agent has no identities".to_string(),
+                ));
+            }
+
+            let mut last_err: Option<String> = None;
+            for key in identities {
+                let rsa_hash = if key.algorithm().is_rsa() {
+                    match tokio::time::timeout(
+                        connect_timeout,
+                        session.best_supported_rsa_hash(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(v)) => v.flatten(),
+                        Ok(Err(e)) => {
+                            last_err = Some(format!("{e:?}"));
+                            continue;
+                        }
+                        Err(_) => {
+                            return Err((
+                                "AUTH_TIMEOUT".to_string(),
+                                "authentication timeout".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let auth = tokio::time::timeout(
+                    connect_timeout,
+                    session.authenticate_publickey_with(
+                        cfg.username.clone(),
+                        key,
+                        rsa_hash,
+                        &mut agent,
+                    ),
+                )
+                .await
+                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
+                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
+
+                if auth.success() {
+                    return Ok(auth);
+                }
+                last_err = Some("authentication failed".to_string());
+            }
+
+            Err((
+                "AUTH_FAILED".to_string(),
+                last_err.unwrap_or_else(|| "authentication failed".to_string()),
+            ))
+        }
     }
 }
 
@@ -420,15 +447,6 @@ async fn set_error(
     });
 }
 
-async fn record_last_error(status: &Arc<RwLock<TunnelRuntimeStatus>>, code: &str, message: &str) {
-    let mut s = status.write().await;
-    s.last_error = Some(TunnelErrorInfo {
-        code: code.to_string(),
-        message: message.to_string(),
-        at_ms: now_ms(),
-    });
-}
-
 async fn set_state(status: &Arc<RwLock<TunnelRuntimeStatus>>, st: TunnelState) {
     let mut s = status.write().await;
     s.state = st.clone();
@@ -436,6 +454,19 @@ async fn set_state(status: &Arc<RwLock<TunnelRuntimeStatus>>, st: TunnelState) {
         s.last_ok_at_ms = Some(now_ms());
         s.last_error = None;
     }
+}
+
+async fn record_last_error(
+    status: &Arc<RwLock<TunnelRuntimeStatus>>,
+    code: &str,
+    message: &str,
+) {
+    let mut s = status.write().await;
+    s.last_error = Some(TunnelErrorInfo {
+        code: code.to_string(),
+        message: message.to_string(),
+        at_ms: now_ms(),
+    });
 }
 
 fn backoff(cfg: &TcpTunnelConfig, attempt: u32) -> Duration {

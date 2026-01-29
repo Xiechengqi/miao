@@ -9,7 +9,6 @@ import {
   SystemStatus,
 } from "@/types/api";
 import { SystemOverviewCards } from "@/components/dashboard/SystemOverviewCards";
-import { GpuStatusList } from "@/components/dashboard/GpuStatusList";
 import { DiskUsageList } from "@/components/dashboard/DiskUsageList";
 import { SystemInfoPanel } from "@/components/dashboard/SystemInfoPanel";
 import { PerformanceTrendChart } from "@/components/dashboard/PerformanceTrendChart";
@@ -104,52 +103,38 @@ export default function DashboardPage() {
   }, [status]);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
+    <div className="space-y-8" data-onboarding="dashboard-overview">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1">
           <h1 className="text-2xl font-bold text-slate-900">性能总览</h1>
-          <p className="text-sm text-slate-500">最后更新：{lastUpdated}</p>
+          <p className="text-sm text-slate-500">系统资源与运行状态概览</p>
         </div>
-        {loading && (
-          <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs text-indigo-600">
-            加载中...
+        <div className="flex items-center gap-2">
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
+            更新于 {lastUpdated}
           </span>
-        )}
+          {loading && (
+            <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs text-indigo-600">
+              加载中...
+            </span>
+          )}
+        </div>
       </div>
 
       <SystemOverviewCards info={info} status={status} />
 
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-slate-700">趋势区间</p>
-          <div className="flex flex-wrap gap-2">
-            {RANGE_OPTIONS.map((option) => (
-              <button
-                key={option}
-                onClick={() => setRange(option)}
-                className={`rounded-full border px-3 py-1 text-xs transition ${
-                  range === option
-                    ? "border-indigo-500 bg-indigo-50 text-indigo-600"
-                    : "border-slate-200 text-slate-500 hover:border-indigo-200 hover:text-indigo-600"
-                }`}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
+      <div className="grid gap-6 xl:grid-cols-[2fr_1fr]">
         <PerformanceTrendChart
           series={metrics?.series ?? []}
           memoryTotalBytes={info?.memory}
+          range={range}
+          rangeOptions={RANGE_OPTIONS}
+          onRangeChange={setRange}
         />
+        <SystemInfoPanel info={info} />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <GpuStatusList info={info} status={status} />
-        <DiskUsageList info={info} status={status} />
-      </div>
-
-      <SystemInfoPanel info={info} />
+      <DiskUsageList info={info} status={status} />
     </div>
   );
 }

@@ -49,7 +49,7 @@ export default function LoginPage() {
             <div>
               <Input
                 type="password"
-                placeholder="请输入密码"
+                placeholder="默认登陆密码 admin123"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 disabled={loading}

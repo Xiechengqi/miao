@@ -6,7 +6,7 @@ import { getTrafficWsUrl } from "@/lib/api";
 import { TrafficData } from "@/types/api";
 
 export function useTraffic() {
-  const { traffic, setTraffic } = useStore();
+  const { traffic, setTraffic, status } = useStore();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -39,39 +39,63 @@ export function useTraffic() {
       };
 
       ws.onclose = () => {
-        // Attempt to reconnect after delay
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-        reconnectTimeoutRef.current = setTimeout(() => {
-          reconnectAttemptsRef.current++;
-          connect();
-        }, delay);
+        wsRef.current = null;
+        // Don't auto-reconnect here, let the effect handle it based on status
       };
 
-      ws.onerror = (error) => {
-        console.error("Traffic WebSocket error:", error);
+      ws.onerror = () => {
+        // Silently handle error, will be closed and effect will decide reconnect
       };
 
       wsRef.current = ws;
-    } catch (error) {
+    } catch {
       // If no token is available, don't attempt to connect
-      console.warn("Cannot connect to traffic WebSocket:", error);
     }
   }, [setTraffic]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
+    reconnectAttemptsRef.current = 0;
   }, []);
 
+  // Connect/disconnect based on sing-box running status
   useEffect(() => {
-    connect();
+    if (status.running) {
+      // sing-box is running, connect if not connected
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        connect();
+      }
+    } else {
+      // sing-box is not running, disconnect and reset
+      disconnect();
+      setTraffic({ up: 0, down: 0 });
+      if (typeof document !== "undefined") {
+        document.title = "Miao";
+      }
+    }
+
     return () => disconnect();
-  }, [connect, disconnect]);
+  }, [status.running, connect, disconnect, setTraffic]);
+
+  // Reconnect on connection loss when sing-box is running
+  useEffect(() => {
+    if (!status.running) return;
+
+    const checkConnection = setInterval(() => {
+      if (status.running && (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)) {
+        connect();
+      }
+    }, 5000);
+
+    return () => clearInterval(checkConnection);
+  }, [status.running, connect]);
 
   return {
     traffic,

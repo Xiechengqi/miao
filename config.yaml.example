@@ -6,8 +6,8 @@
 # HTTP API port (optional, default: 6161)
 # port: 6161
 
-# Web login password (optional, default: "admin")
-# password: admin
+# Web login password (optional, default: "admin123")
+# password: admin123
 
 # Web terminals (gotty) (optional)
 # terminals:
@@ -94,8 +94,23 @@
 # and extract it to ./runtime directory
 # sing_box_home: /home/alice/pros/miao/sing-box
 
-# Subscription files are loaded from ./sub by default (or `--sub <path>`).
-# Put subscription files in that directory and reload from the Web UI.
+# Subscriptions (optional)
+# subscriptions:
+#   - id: sub-xxx
+#     name: "主订阅"
+#     enabled: true
+#     type: url
+#     url: "https://example.com/sub.yaml"
+#   - id: sub-yyy
+#     name: "GitHub 订阅"
+#     enabled: true
+#     type: git
+#     repo: "https://github.com/xxx/yyy"
+#   - id: sub-zzz
+#     name: "本地目录"
+#     enabled: true
+#     type: path
+#     path: "/app/subs"
 
 # Manual nodes in JSON format (optional)
 nodes:

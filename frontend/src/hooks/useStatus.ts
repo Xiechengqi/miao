@@ -30,27 +30,42 @@ export function useStatus() {
     setLoading(true, action);
 
     try {
-      const data = status.running ? await api.stopService() : await api.startService();
-      setStatus(data);
+      if (status.running) {
+        await api.stopService();
+      } else {
+        await api.startService();
+      }
+      await refreshStatus();
       addToast({
         type: "success",
         message: `服务${status.running ? "已停止" : "已启动"}`,
       });
     } catch (error) {
+      let errorMessage = "操作失败";
+      if (error instanceof Error) {
+        // 处理常见的 sing-box 启动错误，提供更友好的提示
+        const msg = error.message;
+        errorMessage = msg;
+
+        // 如果是内部错误，尝试提供更友好的提示
+        if (msg.includes("Internal Server Error")) {
+          errorMessage = "服务启动失败，请查看服务器日志获取详细信息";
+        }
+      }
       addToast({
         type: "error",
-        message: error instanceof Error ? error.message : "操作失败",
+        message: errorMessage,
       });
     } finally {
       setLoading(false);
     }
-  }, [status.running, setStatus, setLoading, addToast]);
+  }, [status.running, setLoading, addToast, refreshStatus]);
 
   const checkDnsNow = useCallback(async () => {
     setLoading(true, "dns-check");
     try {
-      const data = await api.checkDns();
-      setDnsStatus(data);
+      await api.checkDns();
+      await refreshDnsStatus();
       addToast({
         type: "success",
         message: "DNS 检测完成",
@@ -63,7 +78,7 @@ export function useStatus() {
     } finally {
       setLoading(false);
     }
-  }, [setDnsStatus, setLoading, addToast]);
+  }, [refreshDnsStatus, setLoading, addToast]);
 
   const switchDnsActive = useCallback(async (name: string) => {
     setLoading(true, "dns-switch");

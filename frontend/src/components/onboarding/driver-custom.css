@@ -1,0 +1,351 @@
+/* Driver.js Custom Styles for Miao Control Panel */
+
+/* Popover (tooltip) styles */
+.driver-popover {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(249, 250, 251, 0.98) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  border-radius: 16px;
+  box-shadow: 0 25px 50px -12px rgba(79, 70, 229, 0.25),
+              0 8px 20px -8px rgba(0, 0, 0, 0.1);
+  max-width: 400px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.driver-popover * {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* Popover arrow */
+.driver-popover-arrow {
+  border: none;
+}
+
+.driver-popover-arrow-side-left {
+  border-left-color: white;
+}
+
+.driver-popover-arrow-side-right {
+  border-right-color: white;
+}
+
+.driver-popover-arrow-side-top {
+  border-top-color: white;
+}
+
+.driver-popover-arrow-side-bottom {
+  border-bottom-color: white;
+}
+
+/* Title styles */
+.driver-popover-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #1e293b;
+  padding: 1.5rem 1.5rem 0.5rem;
+  margin: 0;
+  background: transparent;
+}
+
+/* Description styles */
+.driver-popover-description {
+  font-size: 0.95rem;
+  color: #64748b;
+  line-height: 1.6;
+  padding: 0 1.5rem 1rem;
+  margin: 0;
+}
+
+/* Footer (progress and buttons) */
+.driver-popover-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%);
+  border-top: 1px solid rgba(99, 102, 241, 0.1);
+  gap: 0.75rem;
+}
+
+/* Progress text */
+.driver-popover-progress-text {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #6366f1;
+  background: rgba(99, 102, 241, 0.1);
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+}
+
+/* Navigation buttons container */
+.driver-popover-navigation-btns {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Button base styles */
+.driver-popover-btn {
+  font-size: 0.875rem;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+/* Previous button */
+.driver-popover-prev-btn {
+  background: white;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+
+.driver-popover-prev-btn:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
+/* Next/Done button - gradient style */
+.driver-popover-next-btn {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  color: white;
+  box-shadow: 0 4px 14px 0 rgba(79, 70, 229, 0.3);
+}
+
+.driver-popover-next-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px 0 rgba(79, 70, 229, 0.4);
+}
+
+.driver-popover-next-btn:active {
+  transform: translateY(0);
+}
+
+/* Close button */
+.driver-popover-close-btn {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(100, 116, 139, 0.1);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  color: #64748b;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.driver-popover-close-btn:hover {
+  background: rgba(100, 116, 139, 0.2);
+  color: #475569;
+}
+
+/* 遮罩层样式 - 降低透明度使背景更清晰 */
+.driver-overlay {
+  background: transparent !important;
+}
+
+.driver-overlay svg {
+  opacity: 0.15 !important;
+}
+
+/* 高亮区域周围的边框效果 */
+.driver-active-element {
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.4) !important;
+}
+
+/* Highlighted element styles */
+.driver-highlighted-element {
+  border-radius: 12px;
+}
+
+/* Disabled state for buttons */
+.driver-popover-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Custom modal-style popover for welcome/completion screens */
+.driver-popover.driver-popover-modal {
+  max-width: 480px;
+  text-align: center;
+}
+
+.driver-popover.driver-popover-modal .driver-popover-title {
+  padding-top: 2rem;
+  font-size: 1.5rem;
+}
+
+.driver-popover.driver-popover-modal .driver-popover-description {
+  padding-bottom: 1.5rem;
+}
+
+/* Animation for popover appearance */
+@keyframes driver-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.driver-popover {
+  animation: driver-fade-in 0.3s ease-out;
+}
+
+/* Password input within popover */
+.driver-popover .onboarding-password-form {
+  padding: 0 1.5rem 1rem;
+}
+
+.driver-popover .onboarding-password-input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  transition: all 0.2s ease;
+  margin-bottom: 0.5rem;
+}
+
+.driver-popover .onboarding-password-input:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.driver-popover .onboarding-password-error {
+  color: #ef4444;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.driver-popover .onboarding-password-hint {
+  color: #94a3b8;
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+/* Loading state for button */
+.driver-popover-next-btn.loading {
+  position: relative;
+  color: transparent;
+}
+
+.driver-popover-next-btn.loading::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  top: 50%;
+  left: 50%;
+  margin-left: -8px;
+  margin-top: -8px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Icon container for welcome screen */
+.driver-popover .onboarding-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  box-shadow: 0 4px 14px 0 rgba(79, 70, 229, 0.3);
+  margin-bottom: 1rem;
+}
+
+.driver-popover .onboarding-icon svg {
+  width: 32px;
+  height: 32px;
+  color: white;
+}
+
+/* Completion animation */
+.driver-popover .onboarding-success-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  box-shadow: 0 4px 14px 0 rgba(16, 185, 129, 0.3);
+  margin-bottom: 1rem;
+  animation: success-bounce 0.5s ease-out;
+}
+
+@keyframes success-bounce {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.driver-popover .onboarding-success-icon svg {
+  width: 40px;
+  height: 40px;
+  color: white;
+}
+
+/* Responsive adjustments */
+@media (max-width: 640px) {
+  .driver-popover {
+    max-width: calc(100vw - 2rem);
+    margin: 1rem;
+  }
+
+  .driver-popover-title {
+    font-size: 1.1rem;
+    padding: 1.25rem 1.25rem 0.5rem;
+  }
+
+  .driver-popover-description {
+    font-size: 0.9rem;
+    padding: 0 1.25rem 0.75rem;
+  }
+
+  .driver-popover-footer {
+    padding: 0.75rem 1.25rem;
+    flex-wrap: wrap;
+  }
+
+  .driver-popover-progress-text {
+    font-size: 0.8rem;
+  }
+
+  .driver-popover-btn {
+    font-size: 0.8rem;
+    padding: 0.4rem 0.75rem;
+  }
+}
