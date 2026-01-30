@@ -324,7 +324,7 @@ class ApiClient {
           local_paths: Array<{ path: string }>;
           remote_path?: string | null;
           ssh: { host: string; port: number; username: string };
-          auth?: { type: "password"; password?: string | null } | { type: "private_key_path"; path: string } | { type: "ssh_agent" };
+          auth?: { type: "password"; password?: string | null } | { type: "private_key_path"; path: string };
           options?: SyncConfig["options"];
           schedule?: SyncConfig["schedule"];
           status?: SyncConfig["status"];
@@ -336,8 +336,6 @@ class ApiClient {
       const auth = item.auth
         ? item.auth.type === "password"
           ? { type: "password" as const, password: item.auth.password ?? null }
-          : item.auth.type === "ssh_agent"
-          ? { type: "ssh_agent" as const }
           : undefined
         : undefined;
 
@@ -413,8 +411,7 @@ class ApiClient {
           username: string;
           auth:
             | { type: "password"; password?: string }
-            | { type: "private_key_path"; path: string }
-            | { type: "ssh_agent" };
+            | { type: "private_key_path"; path: string };
           strict_host_key_checking: boolean;
           host_key_fingerprint: string;
           allow_public_bind: boolean;

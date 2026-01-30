@@ -270,7 +270,6 @@ async fn authenticate_session(
     connect_timeout: Duration,
 ) -> Result<russh::client::AuthResult, (String, String)> {
     use crate::TcpTunnelAuth;
-    use russh::keys::agent::client::AgentClient;
     use russh::keys::key::PrivateKeyWithHashAlg;
     use russh::keys::load_secret_key;
 
@@ -365,70 +364,6 @@ async fn authenticate_session(
             .await
             .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
             .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))
-        }
-        TcpTunnelAuth::SshAgent => {
-            let mut agent = AgentClient::connect_env()
-                .await
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
-            let identities = agent
-                .request_identities()
-                .await
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
-            if identities.is_empty() {
-                return Err((
-                    "AUTH_MISSING".to_string(),
-                    "ssh-agent has no identities".to_string(),
-                ));
-            }
-
-            let mut last_err: Option<String> = None;
-            for key in identities {
-                let rsa_hash = if key.algorithm().is_rsa() {
-                    match tokio::time::timeout(
-                        connect_timeout,
-                        session.best_supported_rsa_hash(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(v)) => v.flatten(),
-                        Ok(Err(e)) => {
-                            last_err = Some(format!("{e:?}"));
-                            continue;
-                        }
-                        Err(_) => {
-                            return Err((
-                                "AUTH_TIMEOUT".to_string(),
-                                "authentication timeout".to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let auth = tokio::time::timeout(
-                    connect_timeout,
-                    session.authenticate_publickey_with(
-                        cfg.username.clone(),
-                        key,
-                        rsa_hash,
-                        &mut agent,
-                    ),
-                )
-                .await
-                .map_err(|_| ("AUTH_TIMEOUT".to_string(), "authentication timeout".to_string()))?
-                .map_err(|e| ("AUTH_FAILED".to_string(), format!("{e:?}")))?;
-
-                if auth.success() {
-                    return Ok(auth);
-                }
-                last_err = Some("authentication failed".to_string());
-            }
-
-            Err((
-                "AUTH_FAILED".to_string(),
-                last_err.unwrap_or_else(|| "authentication failed".to_string()),
-            ))
         }
     }
 }

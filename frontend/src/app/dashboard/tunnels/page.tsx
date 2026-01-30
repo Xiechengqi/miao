@@ -134,8 +134,6 @@ export default function TunnelsPage() {
           path: selectedHost.private_key_path || "",
           passphrase: selectedHost.private_key_passphrase || null,
         }
-        : selectedHost.auth_type === "ssh_agent"
-        ? { type: "ssh_agent" }
         : { type: "password", password: "" };
 
       if (formData.mode === "single") {

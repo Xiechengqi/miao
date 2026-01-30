@@ -123,53 +123,6 @@ impl SshTransport {
                 }
                 Ok(())
             }
-            TcpTunnelAuth::SshAgent => {
-                use russh::keys::agent::client::AgentClient;
-
-                let mut agent = AgentClient::connect_env()
-                    .await
-                    .map_err(|e| SyncError::SshAuthError(format!("agent connect: {e:?}")))?;
-
-                let identities = agent
-                    .request_identities()
-                    .await
-                    .map_err(|e| SyncError::SshAuthError(format!("agent identities: {e:?}")))?;
-
-                if identities.is_empty() {
-                    return Err(SyncError::SshAuthError("ssh-agent has no identities".to_string()));
-                }
-
-                for key in identities {
-                    let rsa_hash = if key.algorithm().is_rsa() {
-                        match tokio::time::timeout(timeout, session.best_supported_rsa_hash()).await
-                        {
-                            Ok(Ok(v)) => v.flatten(),
-                            _ => continue,
-                        }
-                    } else {
-                        None
-                    };
-
-                    let auth = tokio::time::timeout(
-                        timeout,
-                        session.authenticate_publickey_with(
-                            cfg.username.clone(),
-                            key,
-                            rsa_hash,
-                            &mut agent,
-                        ),
-                    )
-                    .await;
-
-                    if let Ok(Ok(auth)) = auth {
-                        if auth.success() {
-                            return Ok(());
-                        }
-                    }
-                }
-
-                Err(SyncError::SshAuthError("agent auth failed".to_string()))
-            }
         }
     }
 

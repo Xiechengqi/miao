@@ -32,10 +32,8 @@ export default function SyncPage() {
   const [syncs, setSyncs] = useState<SyncConfig[]>([]);
   const [syncsLoaded, setSyncsLoaded] = useState(false);
   const [hosts, setHosts] = useState<Host[]>([]);
-  const availableHosts = useMemo(
-    () => hosts.filter((host) => host.auth_type !== "private_key_path"),
-    [hosts]
-  );
+  // 所有主机都可以用于备份，认证方式由后端处理
+  const availableHosts = useMemo(() => hosts, [hosts]);
 
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [editingSyncId, setEditingSyncId] = useState<string | null>(null);
@@ -144,6 +142,22 @@ export default function SyncPage() {
         return;
       }
 
+      // 根据主机认证类型构建 auth 对象
+      let auth: Record<string, unknown>;
+      if (selectedHost.auth_type === "private_key_path") {
+        auth = {
+          type: "private_key_path",
+          path: selectedHost.private_key_path || "",
+          passphrase: selectedHost.private_key_passphrase || null,
+        };
+      } else {
+        // password 类型
+        auth = {
+          type: "password",
+          password: "",
+        };
+      }
+
       const payload: Record<string, unknown> = {
         name: syncForm.name.trim() || null,
         enabled: !!syncForm.enabled,
@@ -153,10 +167,7 @@ export default function SyncPage() {
         ssh_host: selectedHost.host,
         ssh_port: selectedHost.port,
         username: selectedHost.username,
-        auth: {
-          type: "password",
-          password: "",
-        },
+        auth,
         options: {
           delete: !!syncForm.delete,
           exclude: syncForm.exclude_text
@@ -427,24 +438,25 @@ export default function SyncPage() {
                 请选择主机
               </option>
               {hosts.map((host) => {
-                const disabled = host.auth_type === "private_key_path";
-                const suffix = disabled ? "（不支持私钥认证）" : "";
+                const authLabels: Record<string, string> = {
+                  password: "密码",
+                  private_key_path: "私钥",
+                };
+                const suffix = `（${authLabels[host.auth_type] || host.auth_type}）`;
                 return (
-                  <option key={host.id} value={host.id} disabled={disabled}>
+                  <option key={host.id} value={host.id}>
                     {host.name || host.host} ({host.username}@{host.host}:{host.port}){suffix}
                   </option>
                 );
               })}
             </select>
-            {hosts.length === 0 ? (
+            {hosts.length === 0 && (
               <p className="text-xs text-slate-500 mt-2">请先添加 SSH 主机</p>
-            ) : availableHosts.length === 0 && (
-              <p className="text-xs text-slate-500 mt-2">同步仅支持密码或 SSH Agent 认证</p>
             )}
           </div>
 
           <p className="text-xs text-slate-500">
-            远端需要 tar 和 zstd（首次同步时自动安装）；同步支持密码或 SSH Agent 认证。
+            远端需要 tar 和 zstd（首次同步时自动安装）；支持密码、私钥文件或 SSH Agent 认证。
           </p>
 
           <div className="space-y-3">

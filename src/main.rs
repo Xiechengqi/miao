@@ -181,7 +181,6 @@ enum TcpTunnelAuth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         passphrase: Option<String>,
     },
-    SshAgent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -588,7 +587,6 @@ enum HostAuth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         passphrase: Option<String>,
     },
-    SshAgent,
 }
 
 fn default_private_key_path() -> Option<String> {
@@ -774,7 +772,6 @@ struct SelectionsResponse {
 enum TcpTunnelAuthPublic {
     Password { password: String },
     PrivateKeyPath { path: String },
-    SshAgent,
 }
 
 #[derive(Serialize)]
@@ -997,7 +994,6 @@ impl Default for SyncRuntimeStatus {
 enum SyncAuthPublic {
     Password { password: String },
     PrivateKeyPath { path: String },
-    SshAgent,
 }
 
 #[derive(Serialize)]
@@ -1064,7 +1060,6 @@ struct SyncUpsertRequest {
 enum HostAuthTypePublic {
     Password,
     PrivateKeyPath,
-    SshAgent,
 }
 
 #[derive(Serialize)]
@@ -5537,7 +5532,6 @@ fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
         TcpTunnelAuth::PrivateKeyPath { path, .. } => TcpTunnelAuthPublic::PrivateKeyPath {
             path: path.clone(),
         },
-        TcpTunnelAuth::SshAgent => TcpTunnelAuthPublic::SshAgent,
     }
 }
 
@@ -5549,7 +5543,6 @@ fn redact_sync_auth(auth: &TcpTunnelAuth) -> SyncAuthPublic {
         TcpTunnelAuth::PrivateKeyPath { path, .. } => SyncAuthPublic::PrivateKeyPath {
             path: path.clone(),
         },
-        TcpTunnelAuth::SshAgent => SyncAuthPublic::SshAgent,
     }
 }
 
@@ -6917,7 +6910,6 @@ fn build_host_item(cfg: &HostConfig) -> HostItem {
     let (auth_type, private_key_path) = match &cfg.auth {
         HostAuth::Password { .. } => (HostAuthTypePublic::Password, None),
         HostAuth::PrivateKeyPath { path, .. } => (HostAuthTypePublic::PrivateKeyPath, Some(path.clone())),
-        HostAuth::SshAgent => (HostAuthTypePublic::SshAgent, None),
     };
     HostItem {
         id: cfg.id.clone(),
@@ -6976,7 +6968,6 @@ async fn test_host_config(
                 .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))))?;
             HostAuth::PrivateKeyPath { path: resolved, passphrase: req.private_key_passphrase }
         }
-        "ssh_agent" => HostAuth::SshAgent,
         _ => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid auth type")))),
     };
 
@@ -7018,7 +7009,6 @@ async fn create_host(
                 .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))))?;
             HostAuth::PrivateKeyPath { path: resolved, passphrase: req.private_key_passphrase }
         }
-        "ssh_agent" => HostAuth::SshAgent,
         _ => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid auth type")))),
     };
 
@@ -7290,16 +7280,6 @@ async fn create_sync(
         schedule,
     };
 
-    match &cfg.ssh.auth {
-        TcpTunnelAuth::PrivateKeyPath { .. } => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("sync only supports password or ssh-agent auth")),
-            ));
-        }
-        TcpTunnelAuth::Password { .. } | TcpTunnelAuth::SshAgent => {}
-    }
-
     let syncs_snapshot = {
         let mut config = state.config.lock().await;
         config.syncs.push(cfg.clone());
@@ -7398,10 +7378,10 @@ async fn update_sync(
             TcpTunnelAuth::PrivateKeyPath { .. } => {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error("sync only supports password or ssh-agent auth")),
+                    Json(ApiResponse::error("sync only supports password auth")),
                 ));
             }
-            TcpTunnelAuth::Password { .. } | TcpTunnelAuth::SshAgent => {}
+            TcpTunnelAuth::Password { .. } => {}
         }
         let cfg = SyncConfig {
             id: id.clone(),
@@ -7681,7 +7661,6 @@ fn resolve_host_auth(host: &HostConfig) -> Result<TcpTunnelAuth, String> {
                 passphrase: passphrase.clone(),
             })
         }
-        HostAuth::SshAgent => Ok(TcpTunnelAuth::SshAgent),
     }
 }
 
@@ -9242,9 +9221,6 @@ fn generate_ssh_outbounds_from_hosts(hosts: &[HostConfig]) -> (Vec<String>, Vec<
                 if let Some(pp) = passphrase {
                     outbound["private_key_passphrase"] = serde_json::Value::String(pp.clone());
                 }
-            }
-            HostAuth::SshAgent => {
-                // SSH agent doesn't need additional config
             }
         }
 

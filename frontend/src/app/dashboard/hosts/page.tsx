@@ -136,7 +136,7 @@ export default function HostsPage() {
         host: host.host || "",
         port: host.port?.toString() || "22",
         username: host.username || "root",
-        auth_type: host.auth_type || "ssh_agent",
+        auth_type: host.auth_type || "password",
         password: "",
         private_key_path: host.private_key_path || "",
         private_key_passphrase: "",
@@ -261,8 +261,6 @@ export default function HostsPage() {
         return "密码";
       case "private_key_path":
         return "私钥";
-      case "ssh_agent":
-        return "SSH Agent";
       default:
         return authType;
     }
@@ -392,7 +390,6 @@ export default function HostsPage() {
             >
               <option value="password">密码</option>
               <option value="private_key_path">私钥路径</option>
-              <option value="ssh_agent">SSH Agent</option>
             </select>
           </div>
 
@@ -422,12 +419,6 @@ export default function HostsPage() {
                 onChange={(e) => setFormData({ ...formData, private_key_passphrase: e.target.value })}
               />
             </>
-          )}
-
-          {formData.auth_type === "ssh_agent" && (
-            <p className="text-sm text-slate-500">
-              将使用系统 SSH Agent 进行认证，请确保 SSH Agent 已启动并添加了相应密钥。
-            </p>
           )}
 
           <div className="flex flex-wrap justify-end gap-3 pt-2">

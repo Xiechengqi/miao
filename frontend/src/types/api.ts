@@ -169,7 +169,7 @@ export interface SyncConfig {
     username: string;
   };
   auth?: {
-    type: "password" | "ssh_agent";
+    type: "password";
     password?: string | null;
   };
   options?: {
@@ -206,7 +206,7 @@ export interface TcpTunnel {
   local_addr: string;
   local_port: number;
   username: string;
-  auth_type?: "password" | "private_key_path" | "ssh_agent";
+  auth_type?: "password" | "private_key_path";
   password?: string;
   private_key_path?: string;
   private_key_passphrase?: string;
@@ -318,7 +318,7 @@ export interface ConnectivityResult {
 }
 
 // Host Types
-export type HostAuthType = "password" | "private_key_path" | "ssh_agent";
+export type HostAuthType = "password" | "private_key_path";
 
 export interface Host {
   id: string;
