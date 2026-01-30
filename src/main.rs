@@ -7108,7 +7108,6 @@ async fn update_host(
                 };
                 HostAuth::PrivateKeyPath { path: resolved, passphrase }
             }
-            "ssh_agent" => HostAuth::SshAgent,
             _ => return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Invalid auth type")))),
         };
 
