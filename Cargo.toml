@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 # Optional SSH reverse TCP tunneling via russh (git dependency).
-tcp_tunnel = ["dep:russh", "dep:sha2"]
+tcp_tunnel = ["dep:sha2"]
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -26,10 +26,21 @@ jsonwebtoken = "9.3"
 chrono = "0.4"
 chrono-tz = "0.10"
 cron = "0.12"
-russh = { git = "https://github.com/warp-tech/russh", optional = true }
+russh = { git = "https://github.com/warp-tech/russh" }
 sha2 = { version = "0.10", optional = true }
 uuid = { version = "1.0", features = ["v4"] }
 machine-info = "1.0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
 rust-embed = { version = "8.5", features = ["compression"] }
 mime_guess = "2.0"
+
+# High-performance backup dependencies
+ignore = "0.4"
+tar = "0.4"
+zstd = { version = "0.13", features = ["zstdmt"] }
+tokio-util = { version = "0.7", features = ["io"] }
+rayon = "1.10"
+num_cpus = "1.16"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
+russh-sftp = "2.0"

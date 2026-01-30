@@ -456,6 +456,7 @@ async fn set_state(status: &Arc<RwLock<TunnelRuntimeStatus>>, st: TunnelState) {
     }
 }
 
+#[allow(dead_code)]
 async fn record_last_error(
     status: &Arc<RwLock<TunnelRuntimeStatus>>,
     code: &str,

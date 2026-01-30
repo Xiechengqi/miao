@@ -60,13 +60,6 @@ const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-amd64");
 #[cfg(target_arch = "aarch64")]
 const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-arm64");
 
-// Embed sy binary based on target architecture
-#[cfg(target_arch = "x86_64")]
-const SY_BINARY: &[u8] = include_bytes!("../embedded/sy-amd64");
-
-#[cfg(target_arch = "aarch64")]
-const SY_BINARY: &[u8] = include_bytes!("../embedded/sy-arm64");
-
 // Embed static assets (Next.js build output) at compile time
 #[derive(RustEmbed)]
 #[folder = "public/"]
@@ -316,22 +309,25 @@ struct SyncSshConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 struct SyncOptions {
+    #[serde(default)]
     delete: bool,
-    verify: bool,
-    compress: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    bwlimit: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     exclude: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     include: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    parallel: Option<u32>,
+    #[serde(default = "default_compression_level")]
+    compression_level: u8,
     #[serde(default)]
-    watch: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    extra_args: Vec<String>,
+    compression_threads: u8,
+    #[serde(default)]
+    incremental: bool,
+    #[serde(default)]
+    preserve_permissions: bool,
+    #[serde(default)]
+    follow_symlinks: bool,
 }
+
+fn default_compression_level() -> u8 { 3 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -7477,7 +7473,7 @@ async fn start_sync(
         };
         sync.clone()
     };
-    if let Err(e) = state.sync_manager.start(cfg.clone(), false).await {
+    if let Err(e) = state.sync_manager.start(cfg.clone()).await {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
     }
     let syncs_snapshot = {
@@ -7531,7 +7527,7 @@ async fn test_sync(
         };
         sync.clone()
     };
-    if let Err(e) = state.sync_manager.test_sy(&cfg).await {
+    if let Err(e) = state.sync_manager.test_sync(&cfg).await {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
     }
     Ok(Json(ApiResponse::success(
@@ -7589,16 +7585,6 @@ fn normalize_sync_remote_path(remote_path: Option<String>) -> Option<String> {
 }
 
 fn normalize_sync_options(mut options: SyncOptions) -> SyncOptions {
-    options.bwlimit = options
-        .bwlimit
-        .and_then(|b| {
-            let trimmed = b.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
     options.exclude = options
         .exclude
         .into_iter()
@@ -7611,17 +7597,6 @@ fn normalize_sync_options(mut options: SyncOptions) -> SyncOptions {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    options.extra_args = options
-        .extra_args
-        .into_iter()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-    if let Some(parallel) = options.parallel {
-        if parallel == 0 {
-            options.parallel = None;
-        }
-    }
     options
 }
 
@@ -8532,23 +8507,6 @@ fn extract_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> 
     }
 
     Ok(gotty_path)
-}
-
-/// Extract embedded sy binary to current working directory
-fn extract_sy() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let current_dir = std::env::current_dir()?;
-    let sy_path = current_dir.join("sy");
-    let force_marker = current_dir.join(".force_extract_sy");
-
-    if force_marker.exists() || !sy_path.exists() {
-        log_info!("Extracting embedded sy binary to {:?}", sy_path);
-        fs::write(&sy_path, SY_BINARY)?;
-        fs::set_permissions(&sy_path, fs::Permissions::from_mode(0o755))?;
-        log_info!("sy binary extracted successfully");
-        let _ = fs::remove_file(&force_marker);
-    }
-
-    Ok(sy_path)
 }
 
 async fn check_and_install_openwrt_dependencies(

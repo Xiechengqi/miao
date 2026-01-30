@@ -14,14 +14,13 @@ const defaultSyncForm = {
   local_paths_text: "",
   remote_path: "",
   delete: false,
-  verify: false,
-  compress: false,
-  watch: false,
-  bwlimit: "",
-  parallel: "",
   exclude_text: "",
   include_text: "",
-  extra_args_text: "",
+  compression_level: "3",
+  compression_threads: "0",
+  incremental: false,
+  preserve_permissions: false,
+  follow_symlinks: false,
   schedule_enabled: false,
   schedule_cron: "",
   schedule_timezone: "Asia/Shanghai",
@@ -102,14 +101,13 @@ export default function SyncPage() {
         local_paths_text: (sync.local_paths || []).join("\n"),
         remote_path: sync.remote_path || "",
         delete: !!sync.options?.delete,
-        verify: !!sync.options?.verify,
-        compress: !!sync.options?.compress,
-        watch: !!sync.options?.watch,
-        bwlimit: sync.options?.bwlimit || "",
-        parallel: sync.options?.parallel?.toString() || "",
         exclude_text: (sync.options?.exclude || []).join("\n"),
         include_text: (sync.options?.include || []).join("\n"),
-        extra_args_text: (sync.options?.extra_args || []).join(" "),
+        compression_level: (sync.options?.compression_level ?? 3).toString(),
+        compression_threads: (sync.options?.compression_threads ?? 0).toString(),
+        incremental: !!sync.options?.incremental,
+        preserve_permissions: !!sync.options?.preserve_permissions,
+        follow_symlinks: !!sync.options?.follow_symlinks,
         schedule_enabled: !!sync.schedule?.enabled,
         schedule_cron: sync.schedule?.cron || "",
         schedule_timezone: sync.schedule?.timezone || "Asia/Shanghai",
@@ -161,9 +159,6 @@ export default function SyncPage() {
         },
         options: {
           delete: !!syncForm.delete,
-          verify: !!syncForm.verify,
-          compress: !!syncForm.compress,
-          bwlimit: syncForm.bwlimit.trim() || null,
           exclude: syncForm.exclude_text
             .split(/\r?\n/)
             .map((line) => line.trim())
@@ -172,12 +167,11 @@ export default function SyncPage() {
             .split(/\r?\n/)
             .map((line) => line.trim())
             .filter(Boolean),
-          parallel: syncForm.parallel ? Number(syncForm.parallel) : null,
-          watch: !!syncForm.watch,
-          extra_args: syncForm.extra_args_text
-            .trim()
-            .split(/\s+/)
-            .filter(Boolean),
+          compression_level: Number(syncForm.compression_level) || 3,
+          compression_threads: Number(syncForm.compression_threads) || 0,
+          incremental: !!syncForm.incremental,
+          preserve_permissions: !!syncForm.preserve_permissions,
+          follow_symlinks: !!syncForm.follow_symlinks,
         },
         schedule,
       };
@@ -222,7 +216,7 @@ export default function SyncPage() {
     setLoading(true, "sync-test");
     try {
       await api.testSync(sync.id);
-      addToast({ type: "success", message: "备份 dry-run 已启动" });
+      addToast({ type: "success", message: "连接测试成功" });
       loadSyncs();
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "测试失败" });
@@ -256,7 +250,7 @@ export default function SyncPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-2xl font-bold text-slate-900">备份同步</h2>
-            <p className="text-slate-500 text-sm mt-1">使用 sy 同步文件到远程</p>
+            <p className="text-slate-500 text-sm mt-1">高性能流式备份同步</p>
           </div>
           <Button onClick={() => openSyncModal()}>
             <Plus className="w-4 h-4" />
@@ -450,7 +444,7 @@ export default function SyncPage() {
           </div>
 
           <p className="text-xs text-slate-500">
-            远端必须安装 sy（包含 sy-remote），不校验主机指纹；同步支持密码或 SSH Agent 认证。
+            远端需要 tar 和 zstd（首次同步时自动安装）；同步支持密码或 SSH Agent 认证。
           </p>
 
           <div className="space-y-3">
@@ -467,42 +461,44 @@ export default function SyncPage() {
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
-                  checked={syncForm.verify}
-                  onChange={(e) => setSyncForm({ ...syncForm, verify: e.target.checked })}
+                  checked={syncForm.incremental}
+                  onChange={(e) => setSyncForm({ ...syncForm, incremental: e.target.checked })}
                 />
-                写后校验
+                增量备份
               </label>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
-                  checked={syncForm.compress}
-                  onChange={(e) => setSyncForm({ ...syncForm, compress: e.target.checked })}
+                  checked={syncForm.preserve_permissions}
+                  onChange={(e) => setSyncForm({ ...syncForm, preserve_permissions: e.target.checked })}
                 />
-                压缩传输
+                保留权限
               </label>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
-                  checked={syncForm.watch}
-                  onChange={(e) => setSyncForm({ ...syncForm, watch: e.target.checked })}
+                  checked={syncForm.follow_symlinks}
+                  onChange={(e) => setSyncForm({ ...syncForm, follow_symlinks: e.target.checked })}
                 />
-                监听模式
+                跟随符号链接
               </label>
             </div>
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Input
-              label="带宽限制"
-              placeholder="例如: 1MB"
-              value={syncForm.bwlimit}
-              onChange={(e) => setSyncForm({ ...syncForm, bwlimit: e.target.value })}
+              label="压缩级别 (1-22)"
+              type="number"
+              placeholder="3"
+              value={syncForm.compression_level}
+              onChange={(e) => setSyncForm({ ...syncForm, compression_level: e.target.value })}
             />
             <Input
-              label="并行数"
+              label="压缩线程数 (0=自动)"
               type="number"
-              value={syncForm.parallel}
-              onChange={(e) => setSyncForm({ ...syncForm, parallel: e.target.value })}
+              placeholder="0"
+              value={syncForm.compression_threads}
+              onChange={(e) => setSyncForm({ ...syncForm, compression_threads: e.target.value })}
             />
           </div>
 
@@ -526,13 +522,6 @@ export default function SyncPage() {
               />
             </div>
           </div>
-
-          <Input
-            label="额外参数"
-            placeholder="--dry-run 不需要配置"
-            value={syncForm.extra_args_text}
-            onChange={(e) => setSyncForm({ ...syncForm, extra_args_text: e.target.value })}
-          />
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <div className="flex items-end">

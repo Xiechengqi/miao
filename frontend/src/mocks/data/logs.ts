@@ -32,11 +32,6 @@ export const mockLogs: LogEntry[] = [
     message: "Health check passed for node SG-01",
   },
   {
-    time: new Date(Date.now() - 30000).toISOString(),
-    level: "info",
-    message: "Subscription sync completed: 6 nodes updated",
-  },
-  {
     time: new Date(Date.now() - 25000).toISOString(),
     level: "error",
     message: "Connection timeout to node US-02",

@@ -150,49 +150,6 @@ export interface ManualNode {
   cipher?: string;
 }
 
-// Subscription Files
-export interface SubSource {
-  type: "git" | "path";
-  url?: string;
-  value?: string;
-}
-
-export interface SubFileInfo {
-  file_path: string;
-  file_name: string;
-  node_count: number;
-  loaded: boolean;
-  subscription_id?: string;
-  error?: string;
-}
-
-export interface SubFilesResponse {
-  sub_dir: string;
-  sub_source: SubSource | null;
-  files: SubFileInfo[];
-  error?: string;
-}
-
-export type SubscriptionType = "url" | "git" | "path";
-
-export interface SubscriptionSource {
-  type: SubscriptionType;
-  url?: string;
-  repo?: string;
-  path?: string;
-  workdir?: string;
-}
-
-export interface SubscriptionItem {
-  id: string;
-  name?: string | null;
-  enabled: boolean;
-  source: SubscriptionSource;
-  updated_at?: number | null;
-  last_error?: string | null;
-  files: SubFileInfo[];
-}
-
 // Traffic Types
 export interface TrafficData {
   up: number;
@@ -217,14 +174,13 @@ export interface SyncConfig {
   };
   options?: {
     delete?: boolean;
-    verify?: boolean;
-    compress?: boolean;
-    bwlimit?: string | null;
     exclude?: string[];
     include?: string[];
-    parallel?: number | null;
-    watch?: boolean;
-    extra_args?: string[];
+    compression_level?: number;
+    compression_threads?: number;
+    incremental?: boolean;
+    preserve_permissions?: boolean;
+    follow_symlinks?: boolean;
   };
   schedule?: {
     enabled: boolean;

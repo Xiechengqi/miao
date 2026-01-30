@@ -10,8 +10,6 @@ import {
   mockProxies,
   mockManualNodes,
   mockSyncs,
-  mockSubFiles,
-  mockSubscriptions,
   mockTcpTunnels,
   mockTerminals,
   mockVncSessions,
@@ -38,8 +36,6 @@ let mockState = {
   vncSessions: [...mockVncSessions],
   apps: [...mockApps],
   manualNodes: [...mockManualNodes],
-  subFiles: { ...mockSubFiles },
-  subscriptions: [...mockSubscriptions],
 };
 
 function jsonResponse(data: MockResponse, status: number = 200): NextResponse {
@@ -168,57 +164,6 @@ const handlers: Record<string, Record<HttpMethod, (req: NextRequest, pathParts: 
       mockState.manualNodes = mockState.manualNodes.filter((node) => node.tag !== tag);
       return successResponse({});
     },
-  },
-
-  // Subscription files
-  "sub-files": {
-    GET: () => successResponse(mockState.subFiles),
-    POST: () => errorResponse("Method not allowed", 405),
-    PUT: () => errorResponse("Method not allowed", 405),
-    DELETE: () => errorResponse("Method not allowed", 405),
-  },
-  "sub-files/reload": {
-    GET: () => errorResponse("Method not allowed", 405),
-    POST: () => successResponse({}),
-    PUT: () => errorResponse("Method not allowed", 405),
-    DELETE: () => errorResponse("Method not allowed", 405),
-  },
-  "subscriptions": {
-    GET: () => successResponse({ items: mockState.subscriptions }),
-    POST: async (req) => {
-      const body = await req.json();
-      const id = `sub-${Math.random().toString(36).slice(2, 8)}`;
-      const item = {
-        id,
-        name: body?.name || null,
-        enabled: body?.enabled ?? true,
-        source: {
-          type: body?.type,
-          url: body?.url,
-          repo: body?.repo,
-          path: body?.path,
-        },
-        updated_at: Math.floor(Date.now() / 1000),
-        files: [],
-      };
-      mockState.subscriptions.push(item);
-      return successResponse({ item });
-    },
-    PUT: () => errorResponse("Method not allowed", 405),
-    DELETE: () => errorResponse("Method not allowed", 405),
-  },
-  "subscriptions/reload": {
-    GET: () => errorResponse("Method not allowed", 405),
-    POST: () => {
-      const now = Math.floor(Date.now() / 1000);
-      mockState.subscriptions = mockState.subscriptions.map((sub) => ({
-        ...sub,
-        updated_at: now,
-      }));
-      return successResponse({});
-    },
-    PUT: () => errorResponse("Method not allowed", 405),
-    DELETE: () => errorResponse("Method not allowed", 405),
   },
 
   // Node test
@@ -446,44 +391,6 @@ function handleDynamicRoute(
       setTimeout(() => {
         mockState.syncs[syncIndex].status = { state: "stopped" };
       }, 800);
-      return successResponse({});
-    }
-  }
-
-  // Handle subscriptions/:id routes
-  if (pathParts[0] === "subscriptions" && pathParts.length >= 2) {
-    const id = pathParts[1];
-    const action = pathParts[2];
-
-    if (method === "PUT" && !action) {
-      const subIndex = mockState.subscriptions.findIndex((s) => s.id === id);
-      if (subIndex === -1) return errorResponse("Subscription not found", 404);
-      return req.json().then((body) => {
-        mockState.subscriptions[subIndex] = {
-          ...mockState.subscriptions[subIndex],
-          name: body?.name ?? mockState.subscriptions[subIndex].name,
-          enabled: body?.enabled ?? mockState.subscriptions[subIndex].enabled,
-          source: {
-            type: body?.type,
-            url: body?.url,
-            repo: body?.repo,
-            path: body?.path,
-          },
-          updated_at: Math.floor(Date.now() / 1000),
-        };
-        return successResponse({ item: mockState.subscriptions[subIndex] });
-      });
-    }
-    if (method === "DELETE" && !action) {
-      const subIndex = mockState.subscriptions.findIndex((s) => s.id === id);
-      if (subIndex === -1) return errorResponse("Subscription not found", 404);
-      mockState.subscriptions.splice(subIndex, 1);
-      return successResponse({});
-    }
-    if (method === "POST" && action === "reload") {
-      const subIndex = mockState.subscriptions.findIndex((s) => s.id === id);
-      if (subIndex === -1) return errorResponse("Subscription not found", 404);
-      mockState.subscriptions[subIndex].updated_at = Math.floor(Date.now() / 1000);
       return successResponse({});
     }
   }

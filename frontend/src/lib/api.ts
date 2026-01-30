@@ -8,8 +8,6 @@ import {
   Node,
   ManualNode,
   ProxyGroup,
-  SubFilesResponse,
-  SubscriptionItem,
   SyncConfig,
   TcpTunnel,
   Terminal,
@@ -215,75 +213,6 @@ class ApiClient {
     await this.fetch("/api/dns/switch", {
       method: "POST",
       body: JSON.stringify({ name }),
-    });
-  }
-
-  // Subscription Files
-  async getSubFiles(): Promise<SubFilesResponse> {
-    const res = await this.fetch<{ data: SubFilesResponse }>("/api/sub-files");
-    return res.data;
-  }
-
-  async reloadSubFiles(): Promise<void> {
-    await this.fetch("/api/sub-files/reload", {
-      method: "POST",
-    });
-  }
-
-  // Subscriptions
-  async getSubscriptions(): Promise<SubscriptionItem[]> {
-    const res = await this.fetch<{ data: { items: SubscriptionItem[] } }>("/api/subscriptions");
-    return res.data.items;
-  }
-
-  async createSubscription(config: {
-    name?: string | null;
-    enabled?: boolean;
-    type: "url" | "git" | "path";
-    url?: string;
-    repo?: string;
-    path?: string;
-  }): Promise<SubscriptionItem> {
-    const res = await this.fetch<{ data: { item: SubscriptionItem } }>("/api/subscriptions", {
-      method: "POST",
-      body: JSON.stringify(config),
-    });
-    return res.data.item;
-  }
-
-  async updateSubscription(
-    id: string,
-    config: {
-      name?: string | null;
-      enabled?: boolean;
-      type: "url" | "git" | "path";
-      url?: string;
-      repo?: string;
-      path?: string;
-    }
-  ): Promise<SubscriptionItem> {
-    const res = await this.fetch<{ data: { item: SubscriptionItem } }>(`/api/subscriptions/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(config),
-    });
-    return res.data.item;
-  }
-
-  async deleteSubscription(id: string): Promise<void> {
-    await this.fetch(`/api/subscriptions/${id}`, {
-      method: "DELETE",
-    });
-  }
-
-  async reloadSubscription(id: string): Promise<void> {
-    await this.fetch(`/api/subscriptions/${id}/reload`, {
-      method: "POST",
-    });
-  }
-
-  async reloadSubscriptions(): Promise<void> {
-    await this.fetch("/api/subscriptions/reload", {
-      method: "POST",
     });
   }
 
