@@ -720,7 +720,7 @@ export default function ProxiesPage() {
                       <div className="text-xs text-slate-500">
                         {host.username}@{host.host}:{host.port}
                         <Badge variant="info" className="ml-2">
-                          {host.auth_type === "password" ? "密码" : host.auth_type === "private_key_path" ? "私钥" : "SSH Agent"}
+                          {host.auth_type === "password" ? "密码" : "私钥"}
                         </Badge>
                       </div>
                     </div>

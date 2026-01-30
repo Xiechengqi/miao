@@ -456,7 +456,7 @@ export default function SyncPage() {
           </div>
 
           <p className="text-xs text-slate-500">
-            远端需要 tar 和 zstd（首次同步时自动安装）；支持密码、私钥文件或 SSH Agent 认证。
+            远端需要 tar 和 zstd（首次同步时自动安装）；支持密码或私钥文件认证。
           </p>
 
           <div className="space-y-3">
