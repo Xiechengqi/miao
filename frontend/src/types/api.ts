@@ -103,6 +103,8 @@ export interface VersionInfo {
   latest?: string | null;
   has_update: boolean;
   download_url?: string | null;
+  commit?: string | null;
+  commit_date?: string | null;
 }
 
 export interface DnsCandidate {

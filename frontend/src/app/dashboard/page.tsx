@@ -103,7 +103,7 @@ export default function DashboardPage() {
   }, [status]);
 
   return (
-    <div className="space-y-8" data-onboarding="dashboard-overview">
+    <div className="space-y-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-2xl font-bold text-slate-900">性能总览</h1>

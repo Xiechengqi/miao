@@ -4,6 +4,30 @@ set -ex
 
 BASEPATH=`dirname $(readlink -f ${BASH_SOURCE[0]})` && cd $BASEPATH
 
+# Generate build-info.json with version and commit info
+echo "==> Generating build-info.json..."
+
+# Get version from Cargo.toml
+VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+if [ -z "$VERSION" ]; then
+    VERSION="unknown"
+fi
+
+# Get commit info
+COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+COMMIT_DATE=$(git log -1 --format="%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
+BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+
+# Create build-info.json
+cat > build-info-temp.json <<EOF
+{
+  "version": "$VERSION",
+  "commit": "$COMMIT",
+  "commitDate": "$COMMIT_DATE",
+  "buildTime": "$BUILD_TIME"
+}
+EOF
+
 ps aux | grep -v grep | grep miao | awk '{print $2}' | xargs -n1 -I{} kill -9 {} || true
 kill -9 $(ss -plunt | grep 6161 | awk -F 'pid=' '{print $NF}' | awk -F ',' '{print $1}') || true
 
@@ -58,6 +82,11 @@ ls -lh embedded/
 echo ""
 echo "==> Building frontend..."
 rm -rf public
+
+# Copy build-info.json to frontend/public
+mkdir -p frontend/public
+cp build-info-temp.json frontend/public/build-info.json
+
 cd frontend
 rm -rf out
 pnpm install --no-frozen-lockfile > /dev/null
@@ -65,6 +94,7 @@ pnpm run build > /dev/null
 ls out
 cp -rf out ../public
 cd ..
+rm build-info-temp.json
 
 # Step 3: Build Rust binary
 echo ""

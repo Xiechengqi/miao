@@ -4,6 +4,34 @@ set -ex
 
 BASEPATH=`dirname $(readlink -f ${BASH_SOURCE[0]})` && cd $BASEPATH
 
+# Generate build-info.json with version and commit info
+echo ""
+echo "==> Generating build-info.json..."
+
+# Get version from Cargo.toml
+VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+if [ -z "$VERSION" ]; then
+    VERSION="unknown"
+fi
+
+# Get commit info
+COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+COMMIT_DATE=$(git log -1 --format="%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
+BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+
+# Create build-info.json in a temporary location
+BUILD_INFO=$(cat <<EOF
+{
+  "version": "$VERSION",
+  "commit": "$COMMIT",
+  "commitDate": "$COMMIT_DATE",
+  "buildTime": "$BUILD_TIME"
+}
+EOF
+)
+
+echo "$BUILD_INFO" > build-info-temp.json
+
 # Parse target architecture from command line
 TARGET=${1:-amd64}
 
@@ -20,6 +48,11 @@ if [ ! -d "public" ]; then
     echo ""
     echo "==> Building frontend..."
     rm -rf public
+
+    # Copy build-info.json to frontend/public
+    mkdir -p frontend/public
+    cp build-info-temp.json frontend/public/build-info.json
+
     cd frontend
     rm -rf out
     pnpm install --no-frozen-lockfile
@@ -27,6 +60,7 @@ if [ ! -d "public" ]; then
     ls out
     cp -rf out ../public
     cd ..
+    rm build-info-temp.json
 else
     echo ""
     echo "==> Frontend already built, skipping..."

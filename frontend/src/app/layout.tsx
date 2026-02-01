@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import "@/components/onboarding/driver-custom.css";
 import { MockProvider } from "@/components/MockProvider";
-import { OnboardingProvider, OnboardingTour } from "@/components/onboarding";
 
 export const metadata: Metadata = {
   title: "Miao 控制面板",
@@ -24,10 +22,7 @@ export default function RootLayout({
         style={{ fontFamily: "-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif" }}
       >
         <MockProvider>
-          <OnboardingProvider>
-            {children}
-            <OnboardingTour />
-          </OnboardingProvider>
+          {children}
         </MockProvider>
       </body>
     </html>

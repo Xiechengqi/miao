@@ -13,7 +13,6 @@
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.18",
     "clsx": "^2.1.1",
-    "driver.js": "^1.4.0",
     "framer-motion": "^12.27.3",
     "lucide-react": "^0.562.0",
     "next": "16.1.4",

@@ -17,6 +17,34 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Generate build-info.json
+        id: build-info
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          COMMIT=$(git rev-parse HEAD)
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+          COMMIT_DATE=$(git log -1 --format="%Y-%m-%d %H:%M:%S")
+          echo "commitDate=${COMMIT_DATE}" >> $GITHUB_OUTPUT
+          BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+          echo "buildTime=${BUILD_TIME}" >> $GITHUB_OUTPUT
+          echo "Generated build-info.json: version=${VERSION}, commit=${COMMIT}"
+
+      - name: Create build-info.json for frontend
+        run: |
+          mkdir -p frontend/public
+          cat > frontend/public/build-info.json <<EOF
+          {
+            "version": "${{ steps.build-info.outputs.version }}",
+            "commit": "${{ steps.build-info.outputs.commit }}",
+            "commitDate": "${{ steps.build-info.outputs.commitDate }}",
+            "buildTime": "${{ steps.build-info.outputs.buildTime }}"
+          }
+          EOF
+          cat frontend/public/build-info.json
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.88.0

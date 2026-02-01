@@ -22,10 +22,9 @@ import {
   CloudDownload,
   KeyRound,
   Server,
-  HelpCircle,
+  Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useOnboarding } from "@/components/onboarding";
 
 const navItems = [
   { href: "/dashboard/hosts", label: "主机", icon: Server },
@@ -46,7 +45,6 @@ export default function DashboardLayout({
   const router = useRouter();
   const pathname = usePathname();
   const { setAuthenticated, toasts, removeToast, addToast } = useStore();
-  const { resetOnboarding } = useOnboarding();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
@@ -221,7 +219,7 @@ export default function DashboardLayout({
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 p-4 space-y-1 overflow-y-auto" data-onboarding="nav-section">
+          <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
             {navItems.map((item) => {
               const isActive = pathname === item.href ||
                 (item.href !== "/dashboard" && pathname.startsWith(item.href));
@@ -231,7 +229,6 @@ export default function DashboardLayout({
                 <Link
                   key={item.href}
                   href={item.href}
-                  data-onboarding={isProxies ? "nav-proxies" : undefined}
                   className={cn(
                     "flex items-center gap-3 px-4 py-3 rounded-lg",
                     "transition-all duration-200",
@@ -270,13 +267,13 @@ export default function DashboardLayout({
               <KeyRound className="w-5 h-5" />
               <span>修改密码</span>
             </button>
-            <button
-              onClick={resetOnboarding}
+            <Link
+              href="/dashboard/about"
               className="flex items-center gap-3 w-full px-4 py-3 rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 hover:shadow-sm transition-all cursor-pointer"
             >
-              <HelpCircle className="w-5 h-5" />
-              <span>使用引导</span>
-            </button>
+              <Info className="w-5 h-5" />
+              <span>版本信息</span>
+            </Link>
             <button
               onClick={handleLogout}
               className="flex items-center gap-3 w-full px-4 py-3 rounded-lg text-red-600 hover:bg-red-50 hover:shadow-sm transition-all cursor-pointer"
