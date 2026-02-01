@@ -1773,7 +1773,20 @@ async fn serve_static(Path(path): Path<String>) -> Response {
         ).into_response();
     }
 
-    // 2. Try with .html extension (for Next.js static export)
+    // 2. Handle Next.js RSC .txt requests (e.g., /dashboard/logs.txt -> /dashboard/logs/__next._full.txt)
+    if path.ends_with(".txt") {
+        let base_path = path.trim_end_matches(".txt");
+        let rsc_path = format!("{}/__next._full.txt", base_path);
+        if let Some(content) = StaticAssets::get(&rsc_path) {
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                content.data.into_owned(),
+            ).into_response();
+        }
+    }
+
+    // 3. Try with .html extension (for Next.js static export)
     let html_path = format!("{}.html", path);
     if let Some(content) = StaticAssets::get(&html_path) {
         return (
@@ -1783,7 +1796,7 @@ async fn serve_static(Path(path): Path<String>) -> Response {
         ).into_response();
     }
 
-    // 3. Try with /index.html (for directory index)
+    // 4. Try with /index.html (for directory index)
     let index_path = format!("{}/index.html", path);
     if let Some(content) = StaticAssets::get(&index_path) {
         return (
@@ -1793,7 +1806,7 @@ async fn serve_static(Path(path): Path<String>) -> Response {
         ).into_response();
     }
 
-    // 4. Fall back to SPA routing (serve root index.html)
+    // 5. Fall back to SPA routing (serve root index.html)
     spa_fallback().await
 }
 
