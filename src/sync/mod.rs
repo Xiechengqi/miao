@@ -15,7 +15,80 @@ use pipeline::BackupPipeline;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
+
+// Sync log entry structure
+#[derive(Clone, Debug, Serialize)]
+pub struct SyncLogEntry {
+    pub timestamp: i64,
+    pub level: String,
+    pub message: String,
+    pub path: Option<String>,
+}
+
+impl SyncLogEntry {
+    pub fn info(path: Option<&str>, message: String) -> Self {
+        Self {
+            timestamp: Utc::now().timestamp_millis(),
+            level: "info".to_string(),
+            message,
+            path: path.map(|s| s.to_string()),
+        }
+    }
+
+    pub fn error(path: Option<&str>, message: String) -> Self {
+        Self {
+            timestamp: Utc::now().timestamp_millis(),
+            level: "error".to_string(),
+            message,
+            path: path.map(|s| s.to_string()),
+        }
+    }
+}
+
+// Global sync log storage per sync ID
+struct SyncLogStorage {
+    logs: Mutex<VecDeque<SyncLogEntry>>,
+    broadcast_tx: broadcast::Sender<SyncLogEntry>,
+}
+
+impl SyncLogStorage {
+    fn new() -> Self {
+        let (broadcast_tx, _) = broadcast::channel(100);
+        Self {
+            logs: Mutex::new(VecDeque::with_capacity(1000)),
+            broadcast_tx,
+        }
+    }
+
+    async fn add_log(&self, entry: SyncLogEntry) {
+        let mut logs = self.logs.lock().await;
+        logs.push_back(entry.clone());
+        if logs.len() > 1000 {
+            logs.pop_front();
+        }
+        let _ = self.broadcast_tx.send(entry);
+    }
+
+    async fn get_logs(&self, limit: Option<usize>) -> Vec<SyncLogEntry> {
+        let logs = self.logs.lock().await;
+        let logs_vec: Vec<SyncLogEntry> = logs.iter().cloned().collect();
+        if let Some(n) = limit {
+            logs_vec.iter().rev().take(n).cloned().collect()
+        } else {
+            logs_vec
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<SyncLogEntry> {
+        self.broadcast_tx.subscribe()
+    }
+
+    async fn clear(&self) {
+        let mut logs = self.logs.lock().await;
+        logs.clear();
+    }
+}
 
 #[derive(Clone)]
 pub struct SyncManager {
@@ -25,6 +98,7 @@ pub struct SyncManager {
 struct SyncManagerInner {
     runtimes: Mutex<HashMap<String, SyncRuntime>>,
     schedules: Mutex<HashMap<String, SyncScheduleHandle>>,
+    logs: Mutex<HashMap<String, SyncLogStorage>>,
 }
 
 struct SyncRuntime {
@@ -57,6 +131,7 @@ impl SyncManager {
             inner: Arc::new(SyncManagerInner {
                 runtimes: Mutex::new(HashMap::new()),
                 schedules: Mutex::new(HashMap::new()),
+                logs: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -68,6 +143,14 @@ impl SyncManager {
             let mut runtimes = self.inner.runtimes.lock().await;
             for id in desired_ids.iter() {
                 runtimes.entry(id.clone()).or_insert_with(SyncRuntime::new);
+            }
+        }
+
+        // Initialize log storage for new sync configs
+        {
+            let mut logs = self.inner.logs.lock().await;
+            for id in desired_ids.iter() {
+                logs.entry(id.clone()).or_insert_with(SyncLogStorage::new);
             }
         }
 
@@ -117,8 +200,15 @@ impl SyncManager {
 
         let status_clone = status.clone();
         let cfg_id = cfg.id.clone();
+        let manager = self.clone();
+        let log_tx: Option<Arc<dyn Fn(SyncLogEntry) + Send + Sync>> = Some(Arc::new(move |entry: SyncLogEntry| {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager.add_log(&cfg_id, entry).await;
+            });
+        }));
         let join = tokio::spawn(async move {
-            run_sync_task(cfg, status_clone, stop_rx).await;
+            run_sync_task(cfg, status_clone, stop_rx, cfg_id, log_tx).await;
         });
 
         {
@@ -151,6 +241,34 @@ impl SyncManager {
         };
         let result = runtime.status.read().await.clone();
         result
+    }
+
+    pub async fn get_logs(&self, id: &str, limit: Option<usize>) -> Vec<SyncLogEntry> {
+        let logs = self.inner.logs.lock().await;
+        if let Some(storage) = logs.get(id) {
+            storage.get_logs(limit).await
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn subscribe_logs(&self, id: &str) -> Option<broadcast::Receiver<SyncLogEntry>> {
+        let logs = self.inner.logs.lock().unwrap();
+        logs.get(id).map(|storage| storage.subscribe())
+    }
+
+    pub async fn clear_logs(&self, id: &str) {
+        let logs = self.inner.logs.lock().await;
+        if let Some(storage) = logs.get(id) {
+            storage.clear().await;
+        }
+    }
+
+    pub async fn add_log(&self, id: &str, entry: SyncLogEntry) {
+        let logs = self.inner.logs.lock().await;
+        if let Some(storage) = logs.get(id) {
+            storage.add_log(entry).await;
+        }
     }
 
     pub async fn test_sync(&self, cfg: &SyncConfig) -> Result<(), String> {
@@ -245,6 +363,8 @@ async fn run_sync_task(
     cfg: SyncConfig,
     status: Arc<RwLock<SyncRuntimeStatus>>,
     stop_rx: watch::Receiver<bool>,
+    sync_id: String,
+    log_tx: Option<Arc<dyn Fn(SyncLogEntry) + Send + Sync>>,
 ) {
     {
         let mut s = status.write().await;
@@ -253,19 +373,30 @@ async fn run_sync_task(
         s.last_error = None;
     }
 
+    let log = |entry: SyncLogEntry| {
+        if let Some(ref tx) = log_tx {
+            tx(entry.clone());
+        }
+    };
+
     let local_paths = cfg.local_paths.clone();
     let mut had_error = false;
 
     for local in local_paths {
         if *stop_rx.borrow() {
+            log(SyncLogEntry::info(Some(&local.path), "备份已取消".to_string()));
             break;
         }
 
         let pipeline = BackupPipeline::new(cfg.clone());
-        match pipeline.run(&local.path, status.clone(), stop_rx.clone()).await {
+        match pipeline.run(&local.path, status.clone(), stop_rx.clone(), log_tx.clone()).await {
             Ok(()) => {}
-            Err(SyncError::Cancelled) => break,
+            Err(SyncError::Cancelled) => {
+                log(SyncLogEntry::info(Some(&local.path), "备份已取消".to_string()));
+                break;
+            }
             Err(e) => {
+                log(SyncLogEntry::error(Some(&local.path), format!("备份失败: {}", e)));
                 let mut s = status.write().await;
                 s.last_error = Some(SyncErrorInfo {
                     message: e.to_string(),

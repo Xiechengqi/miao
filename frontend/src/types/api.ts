@@ -197,6 +197,13 @@ export interface SyncConfig {
   };
 }
 
+export interface SyncLogEntry {
+  timestamp: number;
+  level: string;
+  message: string;
+  path?: string | null;
+}
+
 // TCP Tunnel Types
 export interface TcpTunnel {
   id: string;

@@ -393,6 +393,26 @@ class ApiClient {
     });
   }
 
+  async runSync(id: string): Promise<void> {
+    await this.fetch(`/api/syncs/${id}/run`, {
+      method: "POST",
+    });
+  }
+
+  async toggleScheduleSync(id: string): Promise<{ enabled: boolean }> {
+    const res = await this.fetch<{ data: { enabled: boolean } }>(`/api/syncs/${id}/schedule`, {
+      method: "POST",
+    });
+    return res.data;
+  }
+
+  async getSyncLogs(id: string, limit?: number): Promise<SyncLogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: SyncLogEntry[] }>(`/api/syncs/${id}/logs?${params.toString()}`);
+    return res.data;
+  }
+
   // TCP Tunnels
   async getTcpTunnels(): Promise<{ supported: boolean; items: TcpTunnel[] }> {
     const res = await this.fetch<{

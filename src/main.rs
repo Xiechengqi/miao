@@ -7528,6 +7528,161 @@ async fn test_sync(
     )))
 }
 
+// Run sync once (without modifying enabled state)
+async fn run_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config = state.config.lock().await;
+        let Some(sync) = config.syncs.iter().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        };
+        sync.clone()
+    };
+
+    // Check if already running
+    let status = state.sync_manager.get_status(&id).await;
+    if status.state == SyncState::Running {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Sync is already running"))));
+    }
+
+    if let Err(e) = state.sync_manager.start(cfg.clone()).await {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
+    }
+    // Note: We do NOT modify the sync.enabled state for single runs
+    Ok(Json(ApiResponse::success_no_data("Sync started")))
+}
+
+// Toggle schedule enabled/disabled
+async fn toggle_schedule_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<SyncScheduleToggleResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let new_enabled = {
+        let mut config = state.config.lock().await;
+        let Some(sync) = config.syncs.iter_mut().find(|s| s.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        };
+        if sync.schedule.is_none() || sync.schedule.as_ref().unwrap().cron.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("No schedule configured"))));
+        }
+        sync.enabled = !sync.enabled;
+        sync.enabled
+    };
+
+    // Save config
+    let syncs_snapshot = {
+        let config = state.config.lock().await;
+        if let Err(e) = save_config(&config).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
+            ));
+        }
+        config.syncs.clone()
+    };
+    state.sync_manager.apply_config(&syncs_snapshot).await;
+
+    Ok(Json(ApiResponse::success(
+        if new_enabled { "Schedule enabled" } else { "Schedule disabled" },
+        SyncScheduleToggleResponse { enabled: new_enabled },
+    )))
+}
+
+// Get sync logs
+async fn get_sync_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<SyncLogsQuery>,
+) -> Result<Json<ApiResponse<Vec<sync::SyncLogEntry>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    // Verify sync exists
+    {
+        let config = state.config.lock().await;
+        if !config.syncs.iter().any(|s| s.id == id) {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
+        }
+    }
+
+    let logs = state.sync_manager.get_logs(&id, q.limit).await;
+    Ok(Json(ApiResponse::success("Logs retrieved", logs)))
+}
+
+// WebSocket handler for sync logs
+async fn sync_ws_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    // Verify sync exists
+    {
+        let config = state.config.lock().await;
+        if !config.syncs.iter().any(|s| s.id == id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    let rx = match state.sync_manager.subscribe_logs(&id) {
+        Some(rx) => rx,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    Ok(ws.on_upgrade(move |socket| handle_sync_logs_websocket(socket, rx)))
+}
+
+async fn handle_sync_logs_websocket(mut socket: WebSocket, mut rx: broadcast::Receiver<sync::SyncLogEntry>) {
+    // Send existing logs first
+    // Note: We can't easily get all existing logs from the broadcast channel,
+    // so we just stream new logs. Client can request REST API for history.
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(entry) => {
+                        let json = serde_json::to_string(&entry).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warning = serde_json::json!({
+                            "timestamp": chrono::Utc::now().timestamp_millis(),
+                            "level": "warning",
+                            "message": format!("Dropped {} log messages", n)
+                        });
+                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+// Query struct for logs API
+#[derive(Deserialize)]
+struct SyncLogsQuery {
+    limit: Option<usize>,
+}
+
+// Response for schedule toggle
+#[derive(Serialize)]
+struct SyncScheduleToggleResponse {
+    enabled: bool,
+}
+
 // ============================================================================
 // Save config to config.yaml
 async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -10227,6 +10382,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}", put(update_sync).delete(delete_sync))
         .route("/api/syncs/{id}/start", post(start_sync))
         .route("/api/syncs/{id}/stop", post(stop_sync))
+        .route("/api/syncs/{id}/run", post(run_sync))
+        .route("/api/syncs/{id}/schedule", post(toggle_schedule_sync))
+        .route("/api/syncs/{id}/logs", get(get_sync_logs))
+        .route("/api/syncs/{id}/ws/logs", get(sync_ws_logs))
         .route("/api/syncs/{id}/test", post(test_sync))
         // Host management
         .route("/api/hosts", get(get_hosts).post(create_host))

@@ -4,6 +4,7 @@ use crate::sync::error::SyncError;
 use crate::sync::manifest::BackupManifest;
 use crate::sync::scanner::{FileEntry, Scanner};
 use crate::sync::transport::SshTransport;
+use crate::sync::SyncLogEntry;
 use crate::{SyncConfig, SyncOptions, SyncRuntimeStatus};
 use std::io::Cursor;
 use std::path::Path;
@@ -24,12 +25,23 @@ impl BackupPipeline {
         local_path: &str,
         status: Arc<RwLock<SyncRuntimeStatus>>,
         stop_rx: watch::Receiver<bool>,
+        log_tx: Option<Arc<dyn Fn(SyncLogEntry) + Send + Sync>>,
     ) -> Result<(), SyncError> {
+        let log = |entry: SyncLogEntry| {
+            if let Some(ref tx) = log_tx {
+                tx(entry);
+            }
+        };
+
         let options = &self.config.options;
         let remote_path = self.config.remote_path.as_deref().unwrap_or("/");
 
+        log(SyncLogEntry::info(Some(local_path), format!("开始备份: {} -> {}@{}:{}", local_path, self.config.ssh.username, self.config.ssh.host, self.config.ssh.port)));
+
         let mut transport = SshTransport::connect(&self.config.ssh).await?;
+        log(SyncLogEntry::info(Some(local_path), "SSH 连接成功".to_string()));
         self.ensure_remote_tools(&mut transport).await?;
+        log(SyncLogEntry::info(Some(local_path), "远程工具检查通过".to_string()));
 
         let manifest = if options.incremental {
             self.load_remote_manifest(&mut transport, remote_path).await.ok()
@@ -47,9 +59,12 @@ impl BackupPipeline {
         let entries = scanner.scan(root, manifest.as_ref())?;
 
         if entries.is_empty() {
+            log(SyncLogEntry::info(Some(local_path), "没有需要备份的文件".to_string()));
             transport.disconnect().await;
             return Ok(());
         }
+
+        log(SyncLogEntry::info(Some(local_path), format!("扫描到 {} 个文件需要备份", entries.len())));
 
         {
             let mut s = status.write().await;
@@ -59,20 +74,27 @@ impl BackupPipeline {
         let compressed_data = self.create_compressed_archive(root, &entries, options, &stop_rx)?;
 
         if *stop_rx.borrow() {
+            log(SyncLogEntry::info(Some(local_path), "备份已取消".to_string()));
             transport.disconnect().await;
             return Err(SyncError::Cancelled);
         }
 
+        log(SyncLogEntry::info(Some(local_path), format!("压缩完成，数据大小: {} bytes", compressed_data.len())));
+
         self.transfer_and_extract(&mut transport, remote_path, compressed_data, options).await?;
+        log(SyncLogEntry::info(Some(local_path), "文件传输完成".to_string()));
 
         let new_manifest = BackupManifest::from_entries(local_path, remote_path, &entries);
         self.save_remote_manifest(&mut transport, remote_path, &new_manifest).await?;
+        log(SyncLogEntry::info(Some(local_path), "清单已保存".to_string()));
 
         if options.delete {
             self.delete_remote_orphans(&mut transport, remote_path, &new_manifest).await?;
+            log(SyncLogEntry::info(Some(local_path), "远程多余文件已清理".to_string()));
         }
 
         transport.disconnect().await;
+        log(SyncLogEntry::info(Some(local_path), "备份完成".to_string()));
         Ok(())
     }
 

@@ -1,11 +1,153 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
-import { SyncConfig, Host } from "@/types/api";
-import { Plus, Trash2, Pencil, Zap, Play, Square } from "lucide-react";
+import { SyncConfig, Host, SyncLogEntry } from "@/types/api";
+import { Plus, Trash2, Pencil, Zap, Play, FileText, Clock, RefreshCw } from "lucide-react";
+
+function LogModal({
+  isOpen,
+  onClose,
+  syncId,
+  syncName,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  syncId: string;
+  syncName: string;
+}) {
+  const [logs, setLogs] = useState<SyncLogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const isUnmountedRef = useRef(false);
+
+  const formatTime = (timestamp: number) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString("zh-CN", { hour12: false });
+  };
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getSyncLogs(syncId, 100);
+      setLogs(data);
+    } catch (error) {
+      console.error("Failed to load logs:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [syncId]);
+
+  const connectWs = useCallback(() => {
+    const token = localStorage.getItem("miao_token");
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${protocol}://${window.location.host}/api/syncs/${syncId}/ws/logs?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(true);
+      }
+    };
+    ws.onmessage = (event) => {
+      if (isUnmountedRef.current) return;
+      try {
+        const entry = JSON.parse(event.data) as SyncLogEntry;
+        setLogs((prev) => [...prev.slice(-99), entry]);
+      } catch (e) {
+        console.error("Failed to parse log:", e);
+      }
+    };
+    ws.onclose = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    ws.onerror = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    wsRef.current = ws;
+  }, [syncId]);
+
+  const disconnectWs = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setWsConnected(false);
+  }, []);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    if (isOpen) {
+      loadLogs();
+      connectWs();
+    } else {
+      disconnectWs();
+    }
+    return () => {
+      isUnmountedRef.current = true;
+      disconnectWs();
+    };
+  }, [isOpen, loadLogs, connectWs, disconnectWs]);
+
+  // Auto-scroll to bottom when new logs arrive
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`日志 - ${syncName}`} size="lg">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
+            <span className="text-sm text-slate-500">
+              {wsConnected ? "实时连接中" : "连接已断开"}
+            </span>
+          </div>
+          <Button variant="secondary" size="sm" onClick={loadLogs} loading={loading}>
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </Button>
+        </div>
+
+        <div className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm">
+          {logs.length === 0 ? (
+            <div className="text-slate-500 text-center py-8">暂无日志</div>
+          ) : (
+            <div className="space-y-1">
+              {logs.map((log, index) => (
+                <div key={index} className="flex gap-2">
+                  <span className="text-slate-400 shrink-0">{formatTime(log.timestamp)}</span>
+                  <span
+                    className={`shrink-0 ${
+                      log.level === "error"
+                        ? "text-red-400"
+                        : log.level === "warning"
+                          ? "text-yellow-400"
+                          : "text-green-400"
+                    }`}
+                  >
+                    [{log.level.toUpperCase()}]
+                  </span>
+                  <span className="text-slate-200">{log.message}</span>
+                </div>
+              ))}
+              <div ref={logsEndRef} />
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 const defaultSyncForm = {
   name: "",
@@ -38,6 +180,8 @@ export default function SyncPage() {
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [editingSyncId, setEditingSyncId] = useState<string | null>(null);
   const [syncForm, setSyncForm] = useState(defaultSyncForm);
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [selectedSyncForLog, setSelectedSyncForLog] = useState<{ id: string; name: string } | null>(null);
 
   const localPaths = useMemo(() => {
     return syncForm.local_paths_text
@@ -250,6 +394,66 @@ export default function SyncPage() {
     }
   };
 
+  const handleRunSync = async (sync: SyncConfig) => {
+    if (!confirm(`确定要立即运行备份 "${sync.name || sync.id}" 吗？`)) return;
+    setLoading(true, "sync-run");
+    try {
+      await api.runSync(sync.id);
+      addToast({ type: "success", message: "备份已启动" });
+
+      // Use ref to track the poll interval
+      const pollIntervalRef = { current: null as NodeJS.Timeout | null };
+
+      const poll = async () => {
+        await loadSyncs();
+        // Check if still running
+        const updatedSync = syncs.find((s) => s.id === sync.id);
+        if (updatedSync?.status?.state !== "running") {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+        }
+      };
+
+      // Start polling
+      pollIntervalRef.current = setInterval(poll, 2000);
+
+      // Stop polling after 30 seconds
+      setTimeout(() => {
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+      }, 30000);
+    } catch (error) {
+      addToast({ type: "error", message: error instanceof Error ? error.message : "运行失败" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleSchedule = async (sync: SyncConfig) => {
+    setLoading(true, "sync-toggle-schedule");
+    try {
+      const result = await api.toggleScheduleSync(sync.id);
+      addToast({
+        type: "success",
+        message: result.enabled ? "定时已启用" : "定时已禁用",
+      });
+      loadSyncs();
+    } catch (error) {
+      addToast({ type: "error", message: error instanceof Error ? error.message : "操作失败" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openLogModal = (sync: SyncConfig) => {
+    setSelectedSyncForLog({ id: sync.id, name: sync.name || sync.id });
+    setShowLogModal(true);
+  };
+
   const formatSyncPaths = (paths: string[]) => {
     if (!paths.length) return "-";
     return paths.join(", ");
@@ -335,32 +539,31 @@ export default function SyncPage() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => handleToggleSync(sync)}
+                      onClick={() => handleRunSync(sync)}
                       loading={loading}
+                      disabled={sync.status?.state === "running"}
                     >
-                      {sync.schedule?.enabled ? (
-                        sync.enabled ? (
-                          <>
-                            <Square className="w-4 h-4" />
-                            停止
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-4 h-4" />
-                            启动
-                          </>
-                        )
-                      ) : sync.status?.state === "running" ? (
-                        <>
-                          <Square className="w-4 h-4" />
-                          停止
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-4 h-4" />
-                          启动
-                        </>
-                      )}
+                      <Play className="w-4 h-4" />
+                      运行
+                    </Button>
+                    {sync.schedule?.cron && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleToggleSchedule(sync)}
+                        loading={loading}
+                      >
+                        <Clock className="w-4 h-4" />
+                        {sync.enabled ? "定时停止" : "定时启动"}
+                      </Button>
+                    )}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => openLogModal(sync)}
+                    >
+                      <FileText className="w-4 h-4" />
+                      日志
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => openSyncModal(sync)}>
                       <Pencil className="w-4 h-4" />
@@ -571,6 +774,17 @@ export default function SyncPage() {
         </div>
       </Modal>
 
+      {selectedSyncForLog && (
+        <LogModal
+          isOpen={showLogModal}
+          onClose={() => {
+            setShowLogModal(false);
+            setSelectedSyncForLog(null);
+          }}
+          syncId={selectedSyncForLog.id}
+          syncName={selectedSyncForLog.name}
+        />
+      )}
     </div>
   );
 }
