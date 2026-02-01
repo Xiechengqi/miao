@@ -9,6 +9,7 @@ import {
   ManualNode,
   ProxyGroup,
   SyncConfig,
+  SyncLogEntry,
   TcpTunnel,
   Terminal,
   VncSession,
