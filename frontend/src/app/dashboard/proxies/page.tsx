@@ -223,14 +223,20 @@ export default function ProxiesPage() {
     setAddingHostId(host.id);
     try {
       const tag = host.name ? `${host.name} (${host.host})` : host.host;
-      await api.createNode({
+      const nodeData: Partial<ManualNode> & { tag: string; node_type: "ssh"; server: string; server_port: number; user: string } = {
         tag,
         node_type: "ssh",
         server: host.host,
         server_port: host.port || 22,
         user: host.username,
-        password: host.password || "",
-      });
+      };
+      // Use private key if available, otherwise use password
+      if (host.auth_type === "private_key_path" && host.private_key_path) {
+        nodeData.private_key_path = host.private_key_path;
+      } else {
+        nodeData.password = host.password || "";
+      }
+      await api.createNode(nodeData as ManualNode);
       addToast({
         type: "success",
         message: status.running

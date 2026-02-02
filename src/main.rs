@@ -1558,7 +1558,12 @@ struct NodeRequest {
     server_port: u16,
     #[serde(default)]
     user: Option<String>,
-    password: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    private_key_path: Option<String>,
+    #[serde(default)]
+    private_key_passphrase: Option<String>,
     #[serde(default)]
     sni: Option<String>,
     #[serde(default)]
@@ -4917,7 +4922,23 @@ async fn add_node(
                         node.insert("user".to_string(), serde_json::Value::String(user));
                     }
                 }
-                node.insert("password".to_string(), serde_json::Value::String(req.password));
+                // Support both password and private key authentication
+                if let Some(ref key_path) = req.private_key_path {
+                    if !key_path.is_empty() {
+                        if let Ok(resolved) = resolve_private_key_path(key_path) {
+                            node.insert("private_key_path".to_string(), serde_json::Value::String(resolved));
+                        }
+                        if let Some(ref passphrase) = req.private_key_passphrase {
+                            if !passphrase.is_empty() {
+                                node.insert("private_key_passphrase".to_string(), serde_json::Value::String(passphrase.clone()));
+                            }
+                        }
+                    }
+                } else if let Some(ref pwd) = req.password {
+                    if !pwd.is_empty() {
+                        node.insert("password".to_string(), serde_json::Value::String(pwd.clone()));
+                    }
+                }
                 serde_json::to_string(&serde_json::Value::Object(node))
             }
             "anytls" => {
@@ -4926,7 +4947,7 @@ async fn add_node(
                     tag: req.tag,
                     server: req.server,
                     server_port: req.server_port,
-                    password: req.password,
+                    password: req.password.unwrap_or_default(),
                     tls: Tls {
                         enabled: true,
                         server_name: req.sni,
@@ -4942,7 +4963,7 @@ async fn add_node(
                     server: req.server,
                     server_port: req.server_port,
                     method: req.cipher.unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string()),
-                    password: req.password,
+                    password: req.password.unwrap_or_default(),
                 };
                 serde_json::to_string(&node)
             }
@@ -4953,7 +4974,7 @@ async fn add_node(
                     tag: req.tag,
                     server: req.server,
                     server_port: req.server_port,
-                    password: req.password,
+                    password: req.password.unwrap_or_default(),
                     up_mbps: 40,
                     down_mbps: 350,
                     tls: Tls {
@@ -7622,7 +7643,7 @@ async fn sync_ws_logs(
         }
     }
 
-    let rx = match state.sync_manager.subscribe_logs(&id) {
+    let rx = match state.sync_manager.subscribe_logs(&id).await {
         Some(rx) => rx,
         None => return Err(StatusCode::NOT_FOUND),
     };
@@ -9364,7 +9385,11 @@ fn generate_ssh_outbounds_from_hosts(hosts: &[HostConfig]) -> (Vec<String>, Vec<
     let mut outbounds = Vec::new();
 
     for host in hosts {
-        let tag = host.name.clone().unwrap_or_else(|| format!("ssh-{}", host.host));
+        // Use format "name (host)" to avoid conflicts with built-in tags like "proxy"
+        let tag = match &host.name {
+            Some(name) => format!("{} ({})", name, host.host),
+            None => format!("ssh-{}", host.host),
+        };
         names.push(tag.clone());
 
         let mut outbound = serde_json::json!({

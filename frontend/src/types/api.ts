@@ -148,6 +148,7 @@ export interface ManualNode {
   server_port: number;
   user?: string;
   password?: string;
+  private_key_path?: string;
   sni?: string;
   cipher?: string;
 }
