@@ -9,6 +9,7 @@ interface BuildInfo {
   version: string;
   commit: string;
   commitDate: string;
+  commitMessage: string;
   buildTime: string;
 }
 
@@ -25,6 +26,7 @@ async function getBuildInfo(): Promise<BuildInfo> {
     version: "",
     commit: "",
     commitDate: "",
+    commitMessage: "",
     buildTime: "",
   };
 }
@@ -89,6 +91,9 @@ export default function AboutPage() {
                 <p className="font-mono font-semibold text-slate-800">
                   {displayCommit}
                 </p>
+                {buildInfo?.commitMessage && (
+                  <p className="text-sm text-slate-500 mt-1">{buildInfo.commitMessage}</p>
+                )}
               </div>
             </div>
             {displayCommit && displayCommit !== "Unknown" && (

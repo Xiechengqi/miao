@@ -16,6 +16,7 @@ fi
 # Get commit info
 COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
+COMMIT_MESSAGE=$(git log -1 --format='%s' 2>/dev/null || echo "unknown")
 BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
 
 # Create build-info.json
@@ -24,6 +25,7 @@ cat > build-info-temp.json <<EOF
   "version": "$VERSION",
   "commit": "$COMMIT",
   "commitDate": "$COMMIT_DATE",
+  "commitMessage": "$COMMIT_MESSAGE",
   "buildTime": "$BUILD_TIME"
 }
 EOF
