@@ -14,9 +14,9 @@ if [ -z "$VERSION" ]; then
 fi
 
 # Get commit info
-COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-COMMIT_DATE=$(git log -1 --format="%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
-BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
+BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
 
 # Create build-info.json
 cat > build-info-temp.json <<EOF

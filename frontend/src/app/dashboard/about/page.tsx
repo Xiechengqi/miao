@@ -1,8 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
-import { VersionInfo } from "@/types/api";
 import { ClayBlobs } from "@/components/ui";
 import { Box, GitCommit, Clock, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -32,18 +30,13 @@ async function getBuildInfo(): Promise<BuildInfo> {
 }
 
 export default function AboutPage() {
-  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [version, build] = await Promise.all([
-          api.getVersion().catch(() => null),
-          getBuildInfo(),
-        ]);
-        setVersionInfo(version);
+        const build = await getBuildInfo();
         setBuildInfo(build);
       } finally {
         setLoading(false);
@@ -64,8 +57,7 @@ export default function AboutPage() {
     );
   }
 
-  const displayVersion = versionInfo?.current || buildInfo?.version || "Unknown";
-  const displayCommit = buildInfo?.commit || versionInfo?.commit || "Unknown";
+  const displayCommit = buildInfo?.commit || "Unknown";
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -86,34 +78,6 @@ export default function AboutPage() {
 
         {/* Info List */}
         <div className="divide-y divide-slate-100">
-          {/* Version */}
-          <div className="px-8 py-5 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-indigo-50 flex items-center justify-center">
-                <Box className="w-5 h-5 text-indigo-600" />
-              </div>
-              <div>
-                <p className="text-sm text-slate-500">版本号</p>
-                <p className="font-semibold text-slate-800">{displayVersion}</p>
-              </div>
-            </div>
-            {versionInfo?.has_update && (
-              <a
-                href={versionInfo.download_url || "https://github.com/miao-project/miao/releases"}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={cn(
-                  "px-4 py-2 rounded-lg text-sm font-semibold text-indigo-600",
-                  "bg-indigo-50 hover:bg-indigo-100 transition-colors cursor-pointer",
-                  "flex items-center gap-2"
-                )}
-              >
-                有新版本
-                <ExternalLink className="w-4 h-4" />
-              </a>
-            )}
-          </div>
-
           {/* Commit */}
           <div className="px-8 py-5 flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -123,13 +87,13 @@ export default function AboutPage() {
               <div>
                 <p className="text-sm text-slate-500">Commit</p>
                 <p className="font-mono font-semibold text-slate-800">
-                  {displayCommit.length >= 8 ? displayCommit : displayCommit}
+                  {displayCommit}
                 </p>
               </div>
             </div>
             {displayCommit && displayCommit !== "Unknown" && (
               <a
-                href={`https://github.com/miao-project/miao/commit/${displayCommit}`}
+                href={`https://github.com/Xiechengqi/miao/commit/${displayCommit}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className={cn(
@@ -151,7 +115,7 @@ export default function AboutPage() {
                 <Clock className="w-5 h-5 text-amber-600" />
               </div>
               <div>
-                <p className="text-sm text-slate-500">构建时间</p>
+                <p className="text-sm text-slate-500">构建时间 (UTC+8)</p>
                 <p className="font-semibold text-slate-800">{buildInfo.buildTime}</p>
               </div>
             </div>
@@ -164,7 +128,7 @@ export default function AboutPage() {
                 <GitCommit className="w-5 h-5 text-rose-600" />
               </div>
               <div>
-                <p className="text-sm text-slate-500">提交时间</p>
+                <p className="text-sm text-slate-500">提交时间 (UTC+8)</p>
                 <p className="font-semibold text-slate-800">{buildInfo.commitDate}</p>
               </div>
             </div>
@@ -177,7 +141,7 @@ export default function AboutPage() {
         <p>Miao 控制面板 - 代理服务管理面板</p>
         <p className="mt-1">
           <a
-            href="https://github.com/miao-project/miao"
+            href="https://github.com/Xiechengqi/miao"
             target="_blank"
             rel="noopener noreferrer"
             className="text-indigo-600 hover:text-indigo-700"
