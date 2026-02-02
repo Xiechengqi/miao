@@ -25,11 +25,11 @@ jobs:
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          COMMIT=$(git rev-parse HEAD)
+          COMMIT=$(git rev-parse --short=7 HEAD)
           echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
-          COMMIT_DATE=$(git log -1 --format="%Y-%m-%d %H:%M:%S")
+          COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M:%S')
           echo "commitDate=${COMMIT_DATE}" >> $GITHUB_OUTPUT
-          BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+          BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
           echo "buildTime=${BUILD_TIME}" >> $GITHUB_OUTPUT
           echo "Generated build-info.json: version=${VERSION}, commit=${COMMIT}"
 
