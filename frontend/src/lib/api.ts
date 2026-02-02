@@ -18,6 +18,7 @@ import {
   TrafficData,
   VersionInfo,
   Host,
+  HostTestResult,
 } from "@/types/api";
 
 // 重试配置
@@ -740,10 +741,11 @@ class ApiClient {
     });
   }
 
-  async testHost(id: string): Promise<void> {
-    await this.fetch(`/api/hosts/${id}/test`, {
+  async testHost(id: string): Promise<HostTestResult> {
+    const res = await this.fetch<{ data: HostTestResult }>(`/api/hosts/${id}/test`, {
       method: "POST",
     });
+    return res.data;
   }
 }
 

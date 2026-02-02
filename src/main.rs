@@ -637,6 +637,29 @@ async fn test_host_connection(cfg: &HostConfig) -> Result<(), String> {
     }
 }
 
+/// Ping host 3 times and return average latency in ms
+async fn ping_host(host: &str) -> Option<f64> {
+    let mut latencies = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        let output = tokio::process::Command::new("ping")
+            .arg("-c").arg("1")
+            .arg("-W").arg("5")
+            .arg(host)
+            .output()
+            .await
+            .ok()?;
+        if output.status.success() {
+            latencies.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    if latencies.is_empty() {
+        None
+    } else {
+        Some(latencies.iter().sum::<f64>() / latencies.len() as f64)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct HostConfig {
     id: String,
@@ -1079,6 +1102,13 @@ struct HostItem {
 #[derive(Serialize)]
 struct HostListResponse {
     items: Vec<HostItem>,
+}
+
+#[derive(Serialize)]
+struct HostTestResponse {
+    ssh_ok: bool,
+    ssh_error: Option<String>,
+    ping_avg_ms: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -7212,7 +7242,7 @@ async fn delete_host(
 async fn test_host(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<HostTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     let host_cfg = {
         let config = state.config.lock().await;
         config.hosts.iter().find(|h| h.id == id).cloned()
@@ -7221,10 +7251,20 @@ async fn test_host(
         return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Host not found"))));
     };
 
-    match test_host_connection(&cfg).await {
-        Ok(()) => Ok(Json(ApiResponse::success_no_data("Connection successful"))),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg)))),
-    }
+    // Run SSH test and ping test in parallel
+    let host_ip = cfg.host.clone();
+    let (ssh_result, ping_result) = tokio::join!(
+        test_host_connection(&cfg),
+        ping_host(&host_ip)
+    );
+
+    let response = HostTestResponse {
+        ssh_ok: ssh_result.is_ok(),
+        ssh_error: ssh_result.err(),
+        ping_avg_ms: ping_result,
+    };
+
+    Ok(Json(ApiResponse::success("Test completed", response)))
 }
 
 async fn get_syncs(

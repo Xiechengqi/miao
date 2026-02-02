@@ -344,6 +344,12 @@ export interface Host {
   updated_at?: number;
 }
 
+export interface HostTestResult {
+  ssh_ok: boolean;
+  ssh_error?: string | null;
+  ping_avg_ms?: number | null;
+}
+
 // Toast Types
 export interface ToastMessage {
   id: string;

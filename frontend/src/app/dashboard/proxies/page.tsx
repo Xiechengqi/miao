@@ -69,6 +69,7 @@ export default function ProxiesPage() {
   const [hostsLoading, setHostsLoading] = useState(false);
   const [addingHostId, setAddingHostId] = useState<string | null>(null);
   const [testingHostId, setTestingHostId] = useState<string | null>(null);
+  const [hostTestResults, setHostTestResults] = useState<Record<string, { ssh_ok: boolean; ping_avg_ms?: number | null }>>({});
   const [existingNodeTags, setExistingNodeTags] = useState<Set<string>>(() => new Set());
   const [manualNodes, setManualNodes] = useState<ManualNode[]>([]);
 
@@ -261,10 +262,18 @@ export default function ProxiesPage() {
   const handleTestHost = async (host: Host) => {
     setTestingHostId(host.id);
     try {
-      await api.testHost(host.id);
-      addToast({ type: "success", message: "连接测试成功" });
+      const result = await api.testHost(host.id);
+      setHostTestResults(prev => ({
+        ...prev,
+        [host.id]: { ssh_ok: result.ssh_ok, ping_avg_ms: result.ping_avg_ms }
+      }));
+      if (result.ssh_ok) {
+        addToast({ type: "success", message: "SSH 连接成功" });
+      } else {
+        addToast({ type: "error", message: result.ssh_error || "SSH 连接失败" });
+      }
     } catch (error) {
-      addToast({ type: "error", message: error instanceof Error ? error.message : "连接测试失败" });
+      addToast({ type: "error", message: error instanceof Error ? error.message : "测试失败" });
     } finally {
       setTestingHostId(null);
     }
@@ -741,6 +750,13 @@ export default function ProxiesPage() {
                       <Zap className="w-4 h-4" />
                       测试
                     </Button>
+                    {hostTestResults[host.id] && (
+                      <Badge variant={hostTestResults[host.id].ssh_ok ? "success" : "error"}>
+                        {hostTestResults[host.id].ping_avg_ms != null
+                          ? `${Math.round(hostTestResults[host.id].ping_avg_ms!)}ms`
+                          : "超时"}
+                      </Badge>
+                    )}
                     {isExisting ? (
                       <>
                         <Badge variant="success" className="gap-1">
