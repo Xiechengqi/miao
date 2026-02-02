@@ -214,7 +214,7 @@ class ApiClient {
   async switchDns(name: string): Promise<void> {
     await this.fetch("/api/dns/switch", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ tag: name }),
     });
   }
 
