@@ -9380,7 +9380,10 @@ async fn stop_app_internal(id: &str) -> Result<(), String> {
 }
 
 // Generate SSH outbounds from hosts configuration
-fn generate_ssh_outbounds_from_hosts(hosts: &[HostConfig]) -> (Vec<String>, Vec<serde_json::Value>) {
+fn generate_ssh_outbounds_from_hosts(
+    hosts: &[HostConfig],
+    existing_tags: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<serde_json::Value>) {
     let mut names = Vec::new();
     let mut outbounds = Vec::new();
 
@@ -9390,6 +9393,12 @@ fn generate_ssh_outbounds_from_hosts(hosts: &[HostConfig]) -> (Vec<String>, Vec<
             Some(name) => format!("{} ({})", name, host.host),
             None => format!("ssh-{}", host.host),
         };
+
+        // Skip if this tag already exists in nodes
+        if existing_tags.contains(&tag) {
+            continue;
+        }
+
         names.push(tag.clone());
 
         let mut outbound = serde_json::json!({
@@ -9437,8 +9446,12 @@ async fn gen_config(
         .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
         .collect();
 
-    // Generate SSH outbounds from hosts
-    let (host_names, host_outbounds) = generate_ssh_outbounds_from_hosts(&config.hosts);
+    // Collect existing tags to avoid duplicates
+    let mut existing_tags: std::collections::HashSet<String> = my_names.iter().cloned().collect();
+    existing_tags.extend(subs.node_names.iter().cloned());
+
+    // Generate SSH outbounds from hosts, excluding those already in nodes
+    let (host_names, host_outbounds) = generate_ssh_outbounds_from_hosts(&config.hosts, &existing_tags);
 
     let mut final_outbounds: Vec<serde_json::Value> = vec![];
     let mut final_node_names: Vec<String> = vec![];
@@ -9446,7 +9459,7 @@ async fn gen_config(
     final_node_names.extend(subs.node_names.iter().cloned());
     final_outbounds.extend(subs.outbounds.iter().cloned());
 
-    // Add host SSH outbounds
+    // Add host SSH outbounds (already filtered for duplicates)
     final_node_names.extend(host_names);
     final_outbounds.extend(host_outbounds);
 
