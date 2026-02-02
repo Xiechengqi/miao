@@ -15,9 +15,10 @@ if [ -z "$VERSION" ]; then
 fi
 
 # Get commit info
-COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-COMMIT_DATE=$(git log -1 --format="%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
-BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
+COMMIT_MESSAGE=$(git log -1 --format='%s' 2>/dev/null || echo "unknown")
+BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
 
 # Create build-info.json in a temporary location
 BUILD_INFO=$(cat <<EOF
@@ -25,6 +26,7 @@ BUILD_INFO=$(cat <<EOF
   "version": "$VERSION",
   "commit": "$COMMIT",
   "commitDate": "$COMMIT_DATE",
+  "commitMessage": "$COMMIT_MESSAGE",
   "buildTime": "$BUILD_TIME"
 }
 EOF
@@ -43,28 +45,23 @@ fi
 
 echo "Building for target architecture: $TARGET"
 
-# Step 1: Build frontend (only once, architecture-independent)
-if [ ! -d "public" ]; then
-    echo ""
-    echo "==> Building frontend..."
-    rm -rf public
+# Step 1: Build frontend
+echo ""
+echo "==> Building frontend..."
+rm -rf public
 
-    # Copy build-info.json to frontend/public
-    mkdir -p frontend/public
-    cp build-info-temp.json frontend/public/build-info.json
+# Copy build-info.json to frontend/public
+mkdir -p frontend/public
+cp build-info-temp.json frontend/public/build-info.json
 
-    cd frontend
-    rm -rf out
-    pnpm install --no-frozen-lockfile
-    pnpm run build
-    ls out
-    cp -rf out ../public
-    cd ..
-    rm build-info-temp.json
-else
-    echo ""
-    echo "==> Frontend already built, skipping..."
-fi
+cd frontend
+rm -rf out
+pnpm install --no-frozen-lockfile
+pnpm run build
+ls out
+cp -rf out ../public
+cd ..
+rm build-info-temp.json
 
 # Step 2: Download embedded binaries
 echo ""
