@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { Card, CardHeader, CardContent, Button, Badge, TogglePower, Skeleton, SkeletonCard, SkeletonNodeGrid, SkeletonConnectivity, SkeletonStatusCards, ConfirmModal } from "@/components/ui";
+import { useEffect, useMemo, useState } from "react";
+import { Card, CardHeader, CardContent, Button, Badge, TogglePower, Skeleton, SkeletonCard, ConfirmModal } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { useProxies, useStatus, useTraffic } from "@/hooks";
 import { api } from "@/lib/api";
-import { getDelayClass, getDelayText, formatUptime, formatSpeed } from "@/lib/utils";
-import { RefreshCw, Zap, Search, Activity, Clock, Cpu, Wifi, Globe, Pin, Pause, Server, Plus, Check } from "lucide-react";
-import { NodeCard, FavoriteNodeCard } from "@/components/dashboard/NodeCard";
+import { formatUptime, formatSpeed } from "@/lib/utils";
+import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check } from "lucide-react";
 import { Host, ManualNode, DnsCandidate } from "@/types/api";
 
 const CONNECTIVITY_SITES = [
@@ -19,8 +18,6 @@ const CONNECTIVITY_SITES = [
   { name: "OpenAI", url: "https://openai.com" },
 ];
 
-const DEFAULT_TEST_URL = "http://www.gstatic.com/generate_204";
-const DELAY_CACHE_DURATION = 30 * 1000; // 延迟缓存30秒
 const CONNECTIVITY_STORAGE_KEY = "miao_connectivity_results";
 
 type ConnectivityResult = {
@@ -40,27 +37,16 @@ export default function ProxiesPage() {
     proxyGroups,
     setProxyGroups,
     setNodes: setProxyNodes,
-    nodes: storeNodes,
-    delays,
     setStatus,
     setDnsStatus,
   } = useStore();
-  const { fetchProxies, testDelay, setDelays } = useProxies();
+  const { fetchProxies } = useProxies();
   const { status, dnsStatus, loadingAction, checkDnsNow, switchDnsActive, toggleService } = useStatus();
   const { traffic } = useTraffic();
-  const [searchTerm, setSearchTerm] = useState("");
-  const [sortByDelay, setSortByDelay] = useState(false);
   const [dnsSelected, setDnsSelected] = useState("");
   const [connectivityResults, setConnectivityResults] = useState<Record<string, ConnectivityResult>>({});
   const [testingConnectivity, setTestingConnectivity] = useState(false);
   const [currentTestingSite, setCurrentTestingSite] = useState<string | null>(null);
-  const [testingAllNodes, setTestingAllNodes] = useState(false);
-  const [speedTestProgress, setSpeedTestProgress] = useState({ current: 0, total: 0 });
-  const [speedTestCancelled, setSpeedTestCancelled] = useState(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const [favoriteNodes, setFavoriteNodes] = useState<string[]>([]);
-  const [selectedGroup, setSelectedGroup] = useState<string>("all");
-  const [testUrl, setTestUrl] = useState(DEFAULT_TEST_URL);
   const [pendingRemoveNode, setPendingRemoveNode] = useState<string | null>(null);
   const [removingNode, setRemovingNode] = useState(false);
 
@@ -72,6 +58,7 @@ export default function ProxiesPage() {
   const [hostTestResults, setHostTestResults] = useState<Record<string, { ssh_ok: boolean; ping_avg_ms?: number | null }>>({});
   const [existingNodeTags, setExistingNodeTags] = useState<Set<string>>(() => new Set());
   const [manualNodes, setManualNodes] = useState<ManualNode[]>([]);
+  const [switchingNode, setSwitchingNode] = useState(false);
 
   // DNS 切换确认对话框
   const [showDnsConfirm, setShowDnsConfirm] = useState(false);
@@ -87,14 +74,10 @@ export default function ProxiesPage() {
     });
   }, [dnsStatus]);
 
-  // 延迟缓存 - 使用 useRef 避免频繁重建回调
-  const [delayTimestamps, setDelayTimestamps] = useState<Record<string, number>>({});
-  const delayTimestampsRef = useRef<Record<string, number>>({});
-
-  // 同步 state 到 ref
-  useEffect(() => {
-    delayTimestampsRef.current = delayTimestamps;
-  }, [delayTimestamps]);
+  // 当前选中的代理节点
+  const currentNode = useMemo(() => {
+    return proxyGroups?.proxy?.now || null;
+  }, [proxyGroups]);
 
   // 初始化加载
   useEffect(() => {
@@ -111,18 +94,6 @@ export default function ProxiesPage() {
         return fallback;
       }
     };
-
-    // 加载收藏节点
-    const savedFavorites = safeGetItem("miao_favorite_nodes", [] as string[]);
-    if (isMounted && savedFavorites.length > 0) {
-      setFavoriteNodes(savedFavorites);
-    }
-
-    // 加载测速URL
-    const savedUrl = safeGetItem("miao_test_url", DEFAULT_TEST_URL);
-    if (isMounted && savedUrl !== DEFAULT_TEST_URL) {
-      setTestUrl(savedUrl);
-    }
 
     // 加载连通性测试结果
     const savedConnectivity = safeGetItem<ConnectivityCache>(CONNECTIVITY_STORAGE_KEY, { results: {} });
@@ -279,6 +250,24 @@ export default function ProxiesPage() {
     }
   };
 
+  // 切换当前使用的节点
+  const handleSwitchNode = async (nodeTag: string) => {
+    if (!status.running) {
+      addToast({ type: "warning", message: "请先启动 sing-box" });
+      return;
+    }
+    setSwitchingNode(true);
+    try {
+      await api.switchProxy("proxy", nodeTag);
+      await fetchProxies(true);
+      addToast({ type: "success", message: `已切换到 ${nodeTag}` });
+    } catch (error) {
+      addToast({ type: "error", message: error instanceof Error ? error.message : "切换节点失败" });
+    } finally {
+      setSwitchingNode(false);
+    }
+  };
+
   // 删除 SSH 节点
   const handleRemoveSshNode = async (tag: string) => {
     try {
@@ -317,176 +306,6 @@ export default function ProxiesPage() {
     }
   }, [dnsStatus, dnsSelected, normalizedDnsCandidates]);
 
-  // 当 sing-box 停止时，不清空连通性测试结果（允许离线测试）
-  // 只取消正在进行的批量测速任务（节点延迟测试依赖 sing-box）
-  useEffect(() => {
-    if (!status.running) {
-      // 取消正在进行的节点延迟测速任务（依赖 sing-box API）
-      if (testingAllNodes && abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-        setTestingAllNodes(false);
-        setSpeedTestProgress({ current: 0, total: 0 });
-      }
-      // 注意：不重置 testingConnectivity 和 currentTestingSite
-      // 因为连通性测试（测试外部网站）不依赖 sing-box
-    }
-  }, [status.running, testingAllNodes]);
-
-  // 收集所有节点
-  const allNodes = useMemo(() => {
-    const nodeSet = new Set<string>();
-    const groupNames = new Set(Object.keys(proxyGroups));
-
-    // 从 proxyGroups 收集
-    Object.values(proxyGroups).forEach((group) => {
-      if (Array.isArray(group.all)) {
-        group.all.forEach((node) => {
-          // 过滤掉以下划线开头的名称（如 _dns）和与组名同名的条目
-          if (node && !node.startsWith("_") && !groupNames.has(node)) {
-            nodeSet.add(node);
-          }
-        });
-      }
-    });
-
-    // 从手动节点列表收集（包括 SSH 节点）
-    manualNodes.forEach((node) => {
-      if (node.tag) nodeSet.add(node.tag);
-    });
-
-    return Array.from(nodeSet);
-  }, [proxyGroups, manualNodes]);
-
-  const manualNodeTags = useMemo(() => {
-    return manualNodes.map((node) => node.tag).filter(Boolean) as string[];
-  }, [manualNodes]);
-
-  // 获取所有代理组名称
-  const proxyGroupNames = useMemo(() => {
-    return Object.keys(proxyGroups);
-  }, [proxyGroups]);
-
-  // 按组筛选
-  const nodesByGroup = useMemo(() => {
-    if (selectedGroup === "all") {
-      return allNodes;
-    }
-    const group = proxyGroups[selectedGroup];
-    if (Array.isArray(group?.all)) {
-      return group.all;
-    }
-    return allNodes;
-  }, [allNodes, proxyGroups, selectedGroup]);
-
-  const filteredNodes = useMemo(() => {
-    let nodes = nodesByGroup;
-    if (!searchTerm.trim()) return nodes;
-    const keyword = searchTerm.trim().toLowerCase();
-    return nodes.filter((node) => node.toLowerCase().includes(keyword));
-  }, [nodesByGroup, searchTerm]);
-
-  const sortedNodes = useMemo(() => {
-    if (!sortByDelay) return filteredNodes;
-    return [...filteredNodes].sort((a, b) => {
-      const delayA = delays[a];
-      const delayB = delays[b];
-      const scoreA = delayA && delayA > 0 ? delayA : Number.POSITIVE_INFINITY;
-      const scoreB = delayB && delayB > 0 ? delayB : Number.POSITIVE_INFINITY;
-      return scoreA - scoreB;
-    });
-  }, [filteredNodes, sortByDelay, delays]);
-
-  // 检查延迟是否在缓存期内 - 使用 ref 避免依赖更新
-  const isDelayCached = useCallback((nodeName: string) => {
-    const timestamp = delayTimestampsRef.current[nodeName];
-    if (!timestamp) return false;
-    return Date.now() - timestamp < DELAY_CACHE_DURATION;
-  }, []); // 空依赖，引用稳定
-
-  // 测试单个节点延迟（带缓存）
-  const handleTestDelay = async (nodeName: string) => {
-    if (isDelayCached(nodeName)) {
-      addToast({ type: "info", message: `${nodeName}: 缓存中 (${delays[nodeName]}ms)` });
-      return;
-    }
-    const delay = await testDelay(nodeName, testUrl);
-    if (delay !== undefined) {
-      setDelayTimestamps(prev => ({ ...prev, [nodeName]: Date.now() }));
-      addToast({ type: "success", message: `${nodeName}: ${delay}ms` });
-    }
-  };
-
-  // 切换收藏状态
-  const toggleFavorite = (nodeName: string) => {
-    const newFavorites = favoriteNodes.includes(nodeName)
-      ? favoriteNodes.filter(n => n !== nodeName)
-      : [...favoriteNodes, nodeName];
-    setFavoriteNodes(newFavorites);
-    try {
-      localStorage.setItem("miao_favorite_nodes", JSON.stringify(newFavorites));
-    } catch (error) {
-      console.warn("Failed to save favorite nodes:", error);
-      addToast({ type: "warning", message: "收藏状态保存失败" });
-    }
-  };
-
-  // 暂停/取消测速
-  const cancelSpeedTest = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    setSpeedTestCancelled(true);
-    setTestingAllNodes(false);
-    addToast({ type: "info", message: "已取消测速" });
-  };
-
-  // 使用后端批量测速 API
-  const handleTestAllDelays = async () => {
-    if (testingAllNodes) {
-      cancelSpeedTest();
-      return;
-    }
-
-    setSpeedTestCancelled(false);
-    setTestingAllNodes(true);
-    setSpeedTestProgress({ current: 0, total: sortedNodes.length });
-    abortControllerRef.current = new AbortController();
-
-    try {
-      // 使用后端批量测速 API
-      const batchDelays = await api.testBatchDelay(sortedNodes, testUrl);
-
-      const newDelays: Record<string, number> = { ...delays, ...batchDelays };
-      const newTimestamps: Record<string, number> = {};
-
-      // 更新所有时间戳
-      const now = Date.now();
-      for (const nodeName of sortedNodes) {
-        newTimestamps[nodeName] = now;
-      }
-
-      setDelays(newDelays);
-      setDelayTimestamps(prev => ({ ...prev, ...newTimestamps }));
-      setSpeedTestProgress({ current: sortedNodes.length, total: sortedNodes.length });
-
-      const successCount = Object.values(batchDelays).filter(d => d > 0).length;
-      addToast({ type: "success", message: `测速完成 (${successCount}/${sortedNodes.length} 成功)` });
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        addToast({ type: "info", message: "已取消测速" });
-      } else {
-        console.error("Batch delay test failed:", error);
-        addToast({ type: "error", message: "批量测速失败" });
-      }
-    } finally {
-      setTestingAllNodes(false);
-      setSpeedTestProgress({ current: 0, total: 0 });
-      abortControllerRef.current = null;
-    }
-  };
-
   // 并行测试所有连通性
   const testAllConnectivity = async () => {
     if (testingConnectivity) return;
@@ -515,16 +334,6 @@ export default function ProxiesPage() {
   // 重置连通性测试
   const resetConnectivity = () => {
     setConnectivityResults({});
-  };
-
-  // 自定义测速URL变更
-  const handleTestUrlChange = (url: string) => {
-    setTestUrl(url);
-    try {
-      localStorage.setItem("miao_test_url", url);
-    } catch (error) {
-      console.warn("Failed to save test URL:", error);
-    }
   };
 
   const getConnectivityBadge = (result?: ConnectivityResult) => {
@@ -567,31 +376,16 @@ export default function ProxiesPage() {
     }
   };
 
-  // 键盘快捷键
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
-        e.preventDefault();
-        document.getElementById('node-search')?.focus();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
   // 渲染骨架屏（初始加载时）
   if (loading && loadingAction === "init" && Object.keys(status).length === 0) {
     return (
       <div className="space-y-6">
         <div>
           <h1 className="text-3xl font-black">代理管理</h1>
-          <p className="text-slate-500 mt-1">节点列表与延迟测试</p>
+          <p className="text-slate-500 mt-1">SSH 节点与连通性测试</p>
         </div>
         <SkeletonCard />
-        <div className="space-y-4">
-          <Skeleton className="h-8 w-48" />
-          <SkeletonNodeGrid count={12} />
-        </div>
+        <SkeletonCard />
       </div>
     );
   }
@@ -601,7 +395,7 @@ export default function ProxiesPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-black">代理管理</h1>
-          <p className="text-slate-500 mt-1">节点列表与延迟测试</p>
+          <p className="text-slate-500 mt-1">SSH 节点与连通性测试</p>
         </div>
       </div>
 
@@ -651,6 +445,19 @@ export default function ProxiesPage() {
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loadingAction === "dns-check" ? "animate-spin" : ""}`} />
             </button>
+
+            {status.running && (
+              <>
+                <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-emerald-50 text-xs">
+                  <Zap className="w-3.5 h-3.5 text-emerald-600" />
+                  <span className="font-mono text-emerald-700">↑ {formatSpeed(traffic.up)}</span>
+                </div>
+                <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-sky-50 text-xs">
+                  <RefreshCw className="w-3.5 h-3.5 text-sky-600" />
+                  <span className="font-mono text-sky-700">↓ {formatSpeed(traffic.down)}</span>
+                </div>
+              </>
+            )}
           </div>
 
           {normalizedDnsCandidates.length > 0 && (
@@ -759,10 +566,22 @@ export default function ProxiesPage() {
                     )}
                     {isExisting ? (
                       <>
-                        <Badge variant="success" className="gap-1">
-                          <Check className="w-3 h-3" />
-                          已添加
-                        </Badge>
+                        {currentNode === displayName ? (
+                          <Badge variant="success" className="gap-1">
+                            <Check className="w-3 h-3" />
+                            使用中
+                          </Badge>
+                        ) : (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleSwitchNode(displayName)}
+                            loading={switchingNode}
+                            disabled={!status.running}
+                          >
+                            使用
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="sm"
@@ -831,159 +650,6 @@ export default function ProxiesPage() {
               );
             })}
           </div>
-      </Card>
-
-      <Card className="p-6" hoverEffect={false}>
-        <CardHeader className="mb-3">
-          <span className="text-lg font-bold text-slate-900">节点列表</span>
-        </CardHeader>
-
-        {!status.running ? (
-          <div className="space-y-3">
-            <div className="text-center py-8 text-slate-500 bg-slate-50 rounded-lg">
-              <p>sing-box 未运行，请先启动服务以加载节点</p>
-            </div>
-            {manualNodeTags.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2">
-                {manualNodeTags.map((tag) => (
-                  <Badge key={tag} variant="info">
-                    {tag}
-                  </Badge>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : allNodes.length === 0 ? (
-          <div className="text-center py-8 text-slate-500">
-            {loading && loadingAction === "init" ? <SkeletonNodeGrid count={8} /> : "正在加载节点..."}
-          </div>
-        ) : (
-          <>
-            <div className="flex flex-wrap items-center gap-2 mb-4">
-              {/* 分组筛选器 */}
-              <select
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700"
-                value={selectedGroup}
-                onChange={(e) => setSelectedGroup(e.target.value)}
-              >
-                <option value="all">全部分组 ({allNodes.length})</option>
-                {proxyGroupNames.map((group) => {
-                  const count = proxyGroups[group]?.all?.length || 0;
-                  return (
-                    <option key={group} value={group}>
-                      {group} ({count})
-                    </option>
-                  );
-                })}
-              </select>
-
-              {/* 搜索框 */}
-              <div className="relative flex-1 min-w-[200px] max-w-md">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                <input
-                  id="node-search"
-                  type="text"
-                  placeholder="搜索节点... (Ctrl+F)"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full h-9 pl-10 pr-8 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all"
-                />
-                {searchTerm && (
-                  <button
-                    onClick={() => setSearchTerm("")}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-500 hover:text-slate-700"
-                  >
-                    清除
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 mb-4">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setSortByDelay(!sortByDelay)}
-                title={sortByDelay ? "取消排序" : "按延迟排序"}
-              >
-                <RefreshCw className={`w-4 h-4 ${sortByDelay ? "text-indigo-600 animate-spin" : ""}`} />
-                {sortByDelay ? "已排序" : "按延迟排序"}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleTestAllDelays}
-                loading={testingAllNodes}
-              >
-                {testingAllNodes ? (
-                  <>
-                    <Pause className="w-4 h-4" />
-                    取消
-                  </>
-                ) : (
-                  <>
-                    <Zap className="w-4 h-4" />
-                    测速
-                  </>
-                )}
-              </Button>
-              {testingAllNodes && speedTestProgress.total > 0 && (
-                <span className="text-sm text-slate-500">
-                  {speedTestProgress.current}/{speedTestProgress.total}
-                </span>
-              )}
-              <span className="text-sm text-slate-500 ml-auto">
-                共 {sortedNodes.length} 个节点
-                {favoriteNodes.length > 0 && ` (收藏: ${favoriteNodes.length})`}
-              </span>
-            </div>
-
-            {/* 收藏节点优先显示 */}
-            {favoriteNodes.length > 0 && (
-              <div className="mb-3">
-                <div className="text-xs font-medium text-slate-500 mb-2">收藏节点</div>
-                <div className="flex flex-wrap gap-2">
-                  {favoriteNodes.filter(n => allNodes.includes(n)).map((nodeName) => (
-                    <FavoriteNodeCard
-                      key={nodeName}
-                      nodeName={nodeName}
-                      delay={delays[nodeName]}
-                      onTestDelay={handleTestDelay}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="flex flex-wrap gap-2">
-              {sortedNodes.map((nodeName) => (
-                <NodeCard
-                  key={nodeName}
-                  nodeName={nodeName}
-                  delay={delays[nodeName]}
-                  isFavorite={favoriteNodes.includes(nodeName)}
-                  isCached={isDelayCached(nodeName)}
-                  onTestDelay={handleTestDelay}
-                  onToggleFavorite={toggleFavorite}
-                />
-              ))}
-            </div>
-            {searchTerm && sortedNodes.length === 0 && (
-              <div className="mt-3 text-sm text-slate-500">没有匹配的节点</div>
-            )}
-
-            <div className="flex items-center gap-4 text-sm text-slate-600 mt-6 pt-4 border-t border-slate-100">
-              <div className="flex items-center gap-1.5">
-                <Zap className="w-4 h-4 text-emerald-600" />
-                <span className="font-mono">{formatSpeed(traffic.up)}</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <RefreshCw className="w-4 h-4 text-sky-600" />
-                <span className="font-mono">{formatSpeed(traffic.down)}</span>
-              </div>
-            </div>
-          </>
-        )}
       </Card>
 
       <ConfirmModal
