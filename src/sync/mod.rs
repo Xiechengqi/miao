@@ -12,7 +12,8 @@ use chrono_tz::Tz;
 use cron::Schedule;
 use error::SyncError;
 use pipeline::BackupPipeline;
-use std::collections::HashMap;
+use serde::Serialize;
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
@@ -200,15 +201,18 @@ impl SyncManager {
 
         let status_clone = status.clone();
         let cfg_id = cfg.id.clone();
+        let cfg_id_for_log = cfg_id.clone();
+        let cfg_id_for_task = cfg_id.clone();
         let manager = self.clone();
         let log_tx: Option<Arc<dyn Fn(SyncLogEntry) + Send + Sync>> = Some(Arc::new(move |entry: SyncLogEntry| {
             let manager = manager.clone();
+            let cfg_id = cfg_id_for_log.clone();
             tokio::spawn(async move {
                 manager.add_log(&cfg_id, entry).await;
             });
         }));
         let join = tokio::spawn(async move {
-            run_sync_task(cfg, status_clone, stop_rx, cfg_id, log_tx).await;
+            run_sync_task(cfg, status_clone, stop_rx, cfg_id_for_task, log_tx).await;
         });
 
         {
@@ -252,8 +256,8 @@ impl SyncManager {
         }
     }
 
-    pub fn subscribe_logs(&self, id: &str) -> Option<broadcast::Receiver<SyncLogEntry>> {
-        let logs = self.inner.logs.lock().unwrap();
+    pub async fn subscribe_logs(&self, id: &str) -> Option<broadcast::Receiver<SyncLogEntry>> {
+        let logs = self.inner.logs.lock().await;
         logs.get(id).map(|storage| storage.subscribe())
     }
 
