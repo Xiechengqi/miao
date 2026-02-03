@@ -4428,7 +4428,6 @@ async fn upgrade_ws(
 
 async fn handle_upgrade_websocket(mut socket: WebSocket) {
     use tokio::sync::mpsc;
-    use futures_util::stream::StreamExt;
 
     let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
 
@@ -4442,7 +4441,7 @@ async fn handle_upgrade_websocket(mut socket: WebSocket) {
         tokio::select! {
             Some(entry) = log_rx.recv() => {
                 let json = serde_json::to_string(&entry).unwrap_or_default();
-                if socket.send(axum::extract::ws::Message::Text(json)).await.is_err() {
+                if socket.send(axum::extract::ws::Message::Text(json.into())).await.is_err() {
                     break;
                 }
             }
@@ -4455,13 +4454,15 @@ async fn handle_upgrade_websocket(mut socket: WebSocket) {
     // Drain remaining logs
     while let Ok(entry) = log_rx.try_recv() {
         let json = serde_json::to_string(&entry).unwrap_or_default();
-        let _ = socket.send(axum::extract::ws::Message::Text(json)).await;
+        let _ = socket.send(axum::extract::ws::Message::Text(json.into())).await;
     }
 
     let _ = socket.close().await;
 }
 
 async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    use futures_util::StreamExt;
+
     let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
         let entry = UpgradeLogEntry {
             step,
