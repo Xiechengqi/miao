@@ -28,11 +28,16 @@ chrono-tz = "0.10"
 cron = "0.12"
 russh = { git = "https://github.com/warp-tech/russh" }
 sha2 = { version = "0.10", optional = true }
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
 machine-info = "1.0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
 rust-embed = { version = "8.5", features = ["compression"] }
 mime_guess = "2.0"
+
+# OpenAPI / Swagger UI
+utoipa = { version = "4.2", features = ["yaml", "uuid"] }
+validator = { version = "0.18", features = ["derive"] }
+thiserror = "2.0"
 
 # High-performance backup dependencies
 ignore = "0.4"
