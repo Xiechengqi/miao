@@ -7,6 +7,17 @@ import { api } from "@/lib/api";
 import { Plus, Play, Square, Trash2, RefreshCw, Activity, Copy, Pencil } from "lucide-react";
 import { TcpTunnel, Host } from "@/types/api";
 
+const TUNNEL_TEST_STORAGE_KEY = "miao_tunnel_test_results";
+
+type TunnelTestResult = {
+  ok: boolean;
+  latency_ms?: number;
+};
+
+type TunnelTestCache = {
+  results: Record<string, TunnelTestResult>;
+};
+
 const defaultForm = {
   name: "",
   enabled: true,
@@ -46,10 +57,41 @@ export default function TunnelsPage() {
   const [formData, setFormData] = useState(defaultForm);
   const [viewMode, setViewMode] = useState<"single" | "full">("single");
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [testingTunnelId, setTestingTunnelId] = useState<string | null>(null);
+  const [tunnelTestResults, setTunnelTestResults] = useState<Record<string, TunnelTestResult>>({});
   const availableHosts = useMemo(
     () => hosts,
     [hosts]
   );
+
+  // 初始化加载测试结果
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(TUNNEL_TEST_STORAGE_KEY);
+      if (saved) {
+        const cache: TunnelTestCache = JSON.parse(saved);
+        if (cache.results && Object.keys(cache.results).length > 0) {
+          setTunnelTestResults(cache.results);
+        }
+      }
+    } catch {
+      console.warn("Failed to load tunnel test results from localStorage");
+    }
+  }, []);
+
+  // 同步测试结果到 localStorage
+  useEffect(() => {
+    try {
+      if (Object.keys(tunnelTestResults).length === 0) {
+        localStorage.removeItem(TUNNEL_TEST_STORAGE_KEY);
+        return;
+      }
+      const payload: TunnelTestCache = { results: tunnelTestResults };
+      localStorage.setItem(TUNNEL_TEST_STORAGE_KEY, JSON.stringify(payload));
+    } catch (error) {
+      console.warn("Failed to save tunnel test results:", error);
+    }
+  }, [tunnelTestResults]);
 
   useEffect(() => {
     loadTunnels();
@@ -205,14 +247,23 @@ export default function TunnelsPage() {
   };
 
   const handleTest = async (tunnel: TcpTunnel) => {
-    setLoading(true, "test");
+    setTestingTunnelId(tunnel.id);
     try {
-      await api.testTcpTunnel(tunnel.id);
-      addToast({ type: "success", message: "测试已触发" });
+      const result = await api.testTcpTunnel(tunnel.id);
+      setTunnelTestResults(prev => ({
+        ...prev,
+        [tunnel.id]: { ok: result.ok, latency_ms: result.latency_ms }
+      }));
+      const latencyText = result.latency_ms != null ? ` (${result.latency_ms}ms)` : "";
+      addToast({ type: "success", message: `测试成功${latencyText}` });
     } catch (error) {
+      setTunnelTestResults(prev => ({
+        ...prev,
+        [tunnel.id]: { ok: false }
+      }));
       addToast({ type: "error", message: error instanceof Error ? error.message : "测试失败" });
     } finally {
-      setLoading(false);
+      setTestingTunnelId(null);
     }
   };
 
@@ -405,10 +456,22 @@ export default function TunnelsPage() {
                       </>
                     )}
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => handleTest(tunnel)}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleTest(tunnel)}
+                    loading={testingTunnelId === tunnel.id}
+                  >
                     <Activity className="w-4 h-4" />
                     测试
                   </Button>
+                  {tunnelTestResults[tunnel.id] && (
+                    <Badge variant={tunnelTestResults[tunnel.id].ok ? "success" : "error"}>
+                      {tunnelTestResults[tunnel.id].latency_ms != null
+                        ? `${tunnelTestResults[tunnel.id].latency_ms}ms`
+                        : tunnelTestResults[tunnel.id].ok ? "成功" : "失败"}
+                    </Badge>
+                  )}
                   <Button variant="ghost" size="sm" onClick={() => openModal(tunnel)}>
                     <Pencil className="w-4 h-4" />
                     编辑

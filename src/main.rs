@@ -42,6 +42,7 @@ use axum::response::IntoResponse;
 mod tcp_tunnel;
 mod full_tunnel;
 mod sync;
+mod app;
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -85,15 +86,19 @@ fn default_ssh_port() -> u16 {
     22
 }
 
-fn default_connect_timeout_ms() -> u64 {
-    5_000
-}
-
-fn default_tunnel_set_connect_timeout_ms() -> u64 {
+fn default_connection_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_connect_timeout_ms() -> u64 {
+    default_connection_timeout_ms()
+}
+
 fn default_keepalive_interval_ms() -> u64 {
+    30_000
+}
+
+fn default_tunnel_set_connect_timeout_ms() -> u64 {
     10_000
 }
 
@@ -577,7 +582,7 @@ struct SubscriptionConfig {
 // Host configuration for SSH connections
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum HostAuth {
+pub(crate) enum HostAuth {
     Password {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
@@ -589,7 +594,7 @@ enum HostAuth {
     },
 }
 
-fn default_private_key_path() -> Option<String> {
+pub fn default_private_key_path() -> Option<String> {
     let candidates = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
     for name in candidates {
         let path = format!("/root/.ssh/{}", name);
@@ -661,19 +666,67 @@ async fn ping_host(host: &str) -> Option<f64> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-struct HostConfig {
-    id: String,
+pub struct HostConfig {
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    host: String,
+    pub name: Option<String>,
+    pub host: String,
     #[serde(default = "default_ssh_port")]
-    port: u16,
-    username: String,
-    auth: HostAuth,
+    pub port: u16,
+    pub username: String,
+    pub auth: HostAuth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    created_at: Option<i64>,
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    updated_at: Option<i64>,
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
+    #[serde(default = "default_keepalive_interval_ms")]
+    pub keepalive_interval_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_connected_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_test_result: Option<HostTestResult>,
+}
+
+impl HostConfig {
+    pub(crate) fn auth_type(&self) -> String {
+        match self.auth {
+            HostAuth::Password { .. } => "password".to_string(),
+            HostAuth::PrivateKeyPath { .. } => "private_key_path".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HostGroupConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HostTestResult {
+    pub ssh_ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_avg_ms: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -739,6 +792,9 @@ struct Config {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hosts: Vec<HostConfig>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_groups: Vec<HostGroupConfig>,
 
     #[serde(default)]
     metrics: MetricsConfig,
@@ -915,6 +971,7 @@ struct TcpTunnelUpsertRequest {
 #[derive(Serialize)]
 struct TcpTunnelTestResponse {
     ok: bool,
+    latency_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1174,7 +1231,7 @@ impl SystemMonitor {
     }
 }
 
-struct AppState {
+pub struct AppState {
     config: Mutex<Config>,
     sing_box_home: String,
     subscriptions_root: PathBuf,
@@ -6229,11 +6286,15 @@ async fn test_tcp_tunnel(
         return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Tunnel not found"))));
     };
 
+    let start = std::time::Instant::now();
     match state.tcp_tunnel.test(&cfg).await {
-        Ok(()) => Ok(Json(ApiResponse::success(
-            "Tunnel test ok",
-            TcpTunnelTestResponse { ok: true },
-        ))),
+        Ok(()) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            Ok(Json(ApiResponse::success(
+                "Tunnel test ok",
+                TcpTunnelTestResponse { ok: true, latency_ms: Some(latency_ms) },
+            )))
+        }
         Err((code, message)) => Err((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(format!("{code}: {message}"))),
@@ -6777,11 +6838,15 @@ async fn test_tcp_tunnel_set(
         managed_by: None,
     };
 
+    let start = std::time::Instant::now();
     match state.tcp_tunnel.test_ssh_only(&cfg).await {
-        Ok(()) => Ok(Json(ApiResponse::success(
-            "Set test ok",
-            TcpTunnelTestResponse { ok: true },
-        ))),
+        Ok(()) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            Ok(Json(ApiResponse::success(
+                "Set test ok",
+                TcpTunnelTestResponse { ok: true, latency_ms: Some(latency_ms) },
+            )))
+        }
         Err((code, message)) => Err((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(format!("{code}: {message}"))),
@@ -7042,8 +7107,16 @@ async fn test_host_config(
         port: req.port.unwrap_or(default_ssh_port()),
         username,
         auth,
+        group_id: None,
+        tags: vec![],
+        description: None,
+        enabled: true,
+        connection_timeout_ms: default_connection_timeout_ms(),
+        keepalive_interval_ms: default_keepalive_interval_ms(),
         created_at: None,
         updated_at: None,
+        last_connected_at: None,
+        last_test_result: None,
     };
 
     match test_host_connection(&cfg).await {
@@ -7084,8 +7157,16 @@ async fn create_host(
         port: req.port.unwrap_or(default_ssh_port()),
         username,
         auth,
+        group_id: None,
+        tags: vec![],
+        description: None,
+        enabled: true,
+        connection_timeout_ms: default_connection_timeout_ms(),
+        keepalive_interval_ms: default_keepalive_interval_ms(),
         created_at: Some(now),
         updated_at: Some(now),
+        last_connected_at: None,
+        last_test_result: None,
     };
 
     if let Err(msg) = test_host_connection(&cfg).await {
@@ -7183,8 +7264,16 @@ async fn update_host(
             port: req.port.unwrap_or(default_ssh_port()),
             username,
             auth,
+            group_id: existing.group_id.clone(),
+            tags: existing.tags.clone(),
+            description: existing.description.clone(),
+            enabled: existing.enabled,
+            connection_timeout_ms: existing.connection_timeout_ms,
+            keepalive_interval_ms: existing.keepalive_interval_ms,
             created_at: existing.created_at,
             updated_at: Some(now),
+            last_connected_at: existing.last_connected_at,
+            last_test_result: existing.last_test_result.clone(),
         };
 
         config.hosts[pos] = cfg.clone();
@@ -10208,6 +10297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tcp_tunnel_sets: vec![],
                 subscriptions: vec![],
                 hosts: vec![],
+                host_groups: vec![],
                 metrics: MetricsConfig::default(),
             },
             true,
@@ -10465,12 +10555,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}/logs", get(get_sync_logs))
         .route("/api/syncs/{id}/ws/logs", get(sync_ws_logs))
         .route("/api/syncs/{id}/test", post(test_sync))
-        // Host management
-        .route("/api/hosts", get(get_hosts).post(create_host))
-        .route("/api/hosts/default-key-path", get(get_host_default_key_path))
-        .route("/api/hosts/test", post(test_host_config))
-        .route("/api/hosts/{id}", get(get_host).put(update_host).delete(delete_host))
-        .route("/api/hosts/{id}/test", post(test_host))
+        // Host management (新 API v1)
+        .merge(app::hosts::routes())
+        // Host Groups
+        .merge(app::host_groups::routes())
+        // Host Execute
+        .merge(app::host_execute::routes())
         .route_layer(middleware::from_fn(auth_middleware));  // 应用认证中间件
 
     // 公开路由（不需要认证）

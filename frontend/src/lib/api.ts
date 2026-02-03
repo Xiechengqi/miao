@@ -519,8 +519,8 @@ class ApiClient {
     });
   }
 
-  async testTcpTunnel(id: string): Promise<void> {
-    await this.fetch(`/api/tcp-tunnels/${id}/test`, {
+  async testTcpTunnel(id: string): Promise<{ ok: boolean; latency_ms?: number }> {
+    return this.fetch(`/api/tcp-tunnels/${id}/test`, {
       method: "POST",
     });
   }

@@ -19,6 +19,7 @@ const CONNECTIVITY_SITES = [
 ];
 
 const CONNECTIVITY_STORAGE_KEY = "miao_connectivity_results";
+const HOST_TEST_STORAGE_KEY = "miao_proxy_host_test_results";
 
 type ConnectivityResult = {
   success: boolean;
@@ -27,6 +28,15 @@ type ConnectivityResult = {
 
 type ConnectivityCache = {
   results: Record<string, ConnectivityResult>;
+};
+
+type HostTestResult = {
+  ssh_ok: boolean;
+  ping_avg_ms?: number | null;
+};
+
+type HostTestCache = {
+  results: Record<string, HostTestResult>;
 };
 
 export default function ProxiesPage() {
@@ -55,7 +65,7 @@ export default function ProxiesPage() {
   const [hostsLoading, setHostsLoading] = useState(false);
   const [addingHostId, setAddingHostId] = useState<string | null>(null);
   const [testingHostId, setTestingHostId] = useState<string | null>(null);
-  const [hostTestResults, setHostTestResults] = useState<Record<string, { ssh_ok: boolean; ping_avg_ms?: number | null }>>({});
+  const [hostTestResults, setHostTestResults] = useState<Record<string, HostTestResult>>({});
   const [existingNodeTags, setExistingNodeTags] = useState<Set<string>>(() => new Set());
   const [manualNodes, setManualNodes] = useState<ManualNode[]>([]);
   const [switchingNode, setSwitchingNode] = useState(false);
@@ -105,6 +115,12 @@ export default function ProxiesPage() {
       if (Object.keys(filteredResults).length > 0) {
         setConnectivityResults(filteredResults);
       }
+    }
+
+    // 加载 SSH 节点测试结果
+    const savedHostTests = safeGetItem<HostTestCache>(HOST_TEST_STORAGE_KEY, { results: {} });
+    if (isMounted && Object.keys(savedHostTests.results).length > 0) {
+      setHostTestResults(savedHostTests.results);
     }
 
     const loadData = async () => {
@@ -162,6 +178,20 @@ export default function ProxiesPage() {
       console.warn("Failed to save connectivity results:", error);
     }
   }, [connectivityResults]);
+
+  // 同步 SSH 节点测试结果到 localStorage
+  useEffect(() => {
+    try {
+      if (Object.keys(hostTestResults).length === 0) {
+        localStorage.removeItem(HOST_TEST_STORAGE_KEY);
+        return;
+      }
+      const payload: HostTestCache = { results: hostTestResults };
+      localStorage.setItem(HOST_TEST_STORAGE_KEY, JSON.stringify(payload));
+    } catch (error) {
+      console.warn("Failed to save host test results:", error);
+    }
+  }, [hostTestResults]);
 
   // 加载 hosts 和已存在的节点标签
   useEffect(() => {
