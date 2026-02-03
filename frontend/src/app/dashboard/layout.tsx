@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { Button, ClayBlobs, Input, Modal, ToastContainer } from "@/components/ui";
@@ -8,6 +8,14 @@ import { useStore } from "@/stores/useStore";
 import { useLogs, useTraffic } from "@/hooks";
 import { api } from "@/lib/api";
 import { VersionInfo } from "@/types/api";
+
+type UpgradeLogEntry = {
+  step: number;
+  total_steps: number;
+  message: string;
+  level: "info" | "error" | "success" | "progress";
+  progress?: number;
+};
 import {
   Share2,
   Terminal,
@@ -49,6 +57,11 @@ export default function DashboardLayout({
   const [mounted, setMounted] = useState(false);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [upgrading, setUpgrading] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgradeLogs, setUpgradeLogs] = useState<UpgradeLogEntry[]>([]);
+  const [upgradeProgress, setUpgradeProgress] = useState(0);
+  const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
+  const upgradeLogsRef = useRef<HTMLDivElement>(null);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -112,19 +125,64 @@ export default function DashboardLayout({
     if (!confirm("确定要强制更新到最新版本吗？\n更新过程中服务将短暂中断。")) {
       return;
     }
+
+    // Reset state and show modal
     setUpgrading(true);
-    addToast({ type: "info", message: "正在下载更新..." });
-    try {
-      await api.upgrade();
-      addToast({ type: "success", message: "更新成功，等待服务重启..." });
-      await waitForRestart();
-    } catch (error) {
-      setUpgrading(false);
-      addToast({
-        type: "error",
-        message: error instanceof Error ? error.message : "更新请求失败",
+    setShowUpgradeModal(true);
+    setUpgradeLogs([]);
+    setUpgradeProgress(0);
+    setUpgradeStatus("running");
+
+    const token = localStorage.getItem("miao_token");
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/upgrade/ws?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const entry: UpgradeLogEntry = JSON.parse(event.data);
+        setUpgradeLogs((prev) => [...prev, entry]);
+        setUpgradeProgress(Math.round((entry.step / entry.total_steps) * 100));
+
+        if (entry.level === "error") {
+          setUpgradeStatus("error");
+        }
+
+        // Auto scroll to bottom
+        setTimeout(() => {
+          if (upgradeLogsRef.current) {
+            upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
+          }
+        }, 50);
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    ws.onclose = () => {
+      // If no error occurred, assume success and wait for restart
+      setUpgradeLogs((prev) => {
+        const hasError = prev.some((log) => log.level === "error");
+        if (!hasError && prev.length > 0) {
+          setUpgradeStatus("success");
+          // Wait for service restart
+          waitForRestart();
+        } else if (hasError) {
+          setUpgrading(false);
+        }
+        return prev;
       });
-    }
+    };
+
+    ws.onerror = () => {
+      setUpgradeStatus("error");
+      setUpgradeLogs((prev) => [
+        ...prev,
+        { step: 0, total_steps: 10, message: "WebSocket 连接失败", level: "error" },
+      ]);
+      setUpgrading(false);
+    };
   };
 
   const handleOpenPasswordModal = () => {
@@ -340,6 +398,89 @@ export default function DashboardLayout({
             <Button loading={savingPassword} onClick={handleUpdatePassword}>
               保存
             </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Upgrade Progress Modal */}
+      <Modal
+        isOpen={showUpgradeModal}
+        onClose={() => {
+          if (upgradeStatus !== "running") {
+            setShowUpgradeModal(false);
+          }
+        }}
+        title="系统更新"
+        size="lg"
+      >
+        <div className="space-y-4">
+          {/* Progress bar */}
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-slate-600">
+              <span>更新进度</span>
+              <span>{upgradeProgress}%</span>
+            </div>
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  "h-full transition-all duration-300 rounded-full",
+                  upgradeStatus === "error" ? "bg-red-500" :
+                  upgradeStatus === "success" ? "bg-emerald-500" : "bg-indigo-500"
+                )}
+                style={{ width: `${upgradeProgress}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Log area */}
+          <div
+            ref={upgradeLogsRef}
+            className="h-64 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+          >
+            {upgradeLogs.map((log, index) => (
+              <div
+                key={index}
+                className={cn(
+                  "py-0.5",
+                  log.level === "error" && "text-red-400",
+                  log.level === "success" && "text-emerald-400",
+                  log.level === "info" && "text-slate-300",
+                  log.level === "progress" && "text-sky-400"
+                )}
+              >
+                <span className="text-slate-500">[{log.step}/{log.total_steps}]</span>{" "}
+                {log.message}
+                {log.level === "progress" && log.progress != null && (
+                  <span className="text-slate-500"> ({log.progress}%)</span>
+                )}
+              </div>
+            ))}
+            {upgradeStatus === "running" && upgradeLogs.length > 0 && (
+              <div className="text-slate-500 animate-pulse">▌</div>
+            )}
+          </div>
+
+          {/* Status message */}
+          <div className="flex items-center justify-between">
+            <span className={cn(
+              "text-sm font-medium",
+              upgradeStatus === "error" && "text-red-600",
+              upgradeStatus === "success" && "text-emerald-600",
+              upgradeStatus === "running" && "text-slate-600"
+            )}>
+              {upgradeStatus === "running" && "更新中，请勿关闭页面..."}
+              {upgradeStatus === "success" && "更新成功，等待服务重启..."}
+              {upgradeStatus === "error" && "更新失败"}
+            </span>
+            {upgradeStatus !== "running" && (
+              <Button
+                variant={upgradeStatus === "error" ? "secondary" : "primary"}
+                size="sm"
+                onClick={() => setShowUpgradeModal(false)}
+              >
+                关闭
+              </Button>
+            )}
           </div>
         </div>
       </Modal>

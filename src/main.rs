@@ -4405,6 +4405,306 @@ async fn get_version() -> Json<ApiResponse<VersionInfo>> {
     }
 }
 
+/// Upgrade log entry for WebSocket streaming
+#[derive(Clone, Serialize)]
+struct UpgradeLogEntry {
+    step: u8,
+    total_steps: u8,
+    message: String,
+    level: String,  // info, error, success, progress
+    progress: Option<u8>,  // Download progress 0-100
+}
+
+/// WebSocket endpoint for upgrade with real-time logs
+async fn upgrade_ws(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(handle_upgrade_websocket))
+}
+
+async fn handle_upgrade_websocket(mut socket: WebSocket) {
+    use tokio::sync::mpsc;
+    use futures_util::stream::StreamExt;
+
+    let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
+
+    // Spawn the upgrade task
+    let upgrade_handle = tokio::spawn(async move {
+        perform_upgrade_with_logs(log_tx).await
+    });
+
+    // Stream logs to WebSocket
+    loop {
+        tokio::select! {
+            Some(entry) = log_rx.recv() => {
+                let json = serde_json::to_string(&entry).unwrap_or_default();
+                if socket.send(axum::extract::ws::Message::Text(json)).await.is_err() {
+                    break;
+                }
+            }
+            _ = upgrade_handle => {
+                break;
+            }
+        }
+    }
+
+    // Drain remaining logs
+    while let Ok(entry) = log_rx.try_recv() {
+        let json = serde_json::to_string(&entry).unwrap_or_default();
+        let _ = socket.send(axum::extract::ws::Message::Text(json)).await;
+    }
+
+    let _ = socket.close().await;
+}
+
+async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
+        let entry = UpgradeLogEntry {
+            step,
+            total_steps: 10,
+            message: message.to_string(),
+            level: level.to_string(),
+            progress,
+        };
+        let tx = log_tx.clone();
+        async move {
+            let _ = tx.send(entry).await;
+        }
+    };
+
+    // Step 1: Fetch latest release info
+    send_log(1, "获取最新版本信息...", "info", None).await;
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build() {
+        Ok(c) => c,
+        Err(e) => {
+            send_log(1, &format!("创建 HTTP 客户端失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let release: GitHubRelease = match client
+        .get("https://api.github.com/repos/xiechengqi/miao/releases/latest")
+        .header("User-Agent", "miao")
+        .send()
+        .await {
+        Ok(r) => match r.json().await {
+            Ok(rel) => rel,
+            Err(e) => {
+                send_log(1, &format!("解析版本信息失败: {}", e), "error", None).await;
+                return;
+            }
+        },
+        Err(e) => {
+            send_log(1, &format!("获取版本信息失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    send_log(1, &format!("最新版本: {}", release.tag_name), "success", None).await;
+
+    // Step 2: Find download URL
+    send_log(2, "查找下载链接...", "info", None).await;
+
+    let asset_name = if cfg!(target_arch = "x86_64") {
+        "miao-rust-linux-amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "miao-rust-linux-arm64"
+    } else {
+        send_log(2, "不支持的系统架构", "error", None).await;
+        return;
+    };
+
+    let download_url = match release.assets.iter().find(|a| a.name == asset_name) {
+        Some(a) => a.browser_download_url.clone(),
+        None => {
+            send_log(2, "未找到当前架构的二进制文件", "error", None).await;
+            return;
+        }
+    };
+
+    send_log(2, &format!("找到下载链接: {}", asset_name), "success", None).await;
+
+    // Step 3: Download binary with progress
+    send_log(3, "开始下载...", "info", Some(0)).await;
+    log_info!("Downloading update from: {}", download_url);
+
+    let download_client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build() {
+        Ok(c) => c,
+        Err(e) => {
+            send_log(3, &format!("创建下载客户端失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let response = match download_client.get(&download_url)
+        .header("User-Agent", "miao")
+        .send()
+        .await {
+        Ok(r) => {
+            if !r.status().is_success() {
+                send_log(3, &format!("下载失败，状态码: {}", r.status()), "error", None).await;
+                return;
+            }
+            r
+        },
+        Err(e) => {
+            send_log(3, &format!("下载请求失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let total_size = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut binary_data = Vec::with_capacity(total_size as usize);
+    let mut stream = response.bytes_stream();
+    let mut last_progress: u8 = 0;
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                downloaded += chunk.len() as u64;
+                binary_data.extend_from_slice(&chunk);
+
+                let progress = if total_size > 0 {
+                    ((downloaded * 100) / total_size) as u8
+                } else {
+                    0
+                };
+
+                // Only send progress updates every 5%
+                if progress >= last_progress + 5 || progress == 100 {
+                    let size_mb = downloaded as f64 / 1024.0 / 1024.0;
+                    let total_mb = total_size as f64 / 1024.0 / 1024.0;
+                    send_log(3, &format!("下载中... {:.1} MB / {:.1} MB", size_mb, total_mb), "progress", Some(progress)).await;
+                    last_progress = progress;
+                }
+            }
+            Err(e) => {
+                send_log(3, &format!("下载数据失败: {}", e), "error", None).await;
+                return;
+            }
+        }
+    }
+
+    send_log(3, &format!("下载完成，大小: {:.1} MB", binary_data.len() as f64 / 1024.0 / 1024.0), "success", Some(100)).await;
+
+    // Step 4: Write to temp file
+    send_log(4, "写入临时文件...", "info", None).await;
+    let temp_path = "/tmp/miao-new";
+    if let Err(e) = fs::write(temp_path, &binary_data) {
+        send_log(4, &format!("写入临时文件失败: {}", e), "error", None).await;
+        return;
+    }
+
+    // Step 5: Set permissions
+    send_log(5, "设置可执行权限...", "info", None).await;
+    if let Err(e) = fs::set_permissions(temp_path, fs::Permissions::from_mode(0o755)) {
+        send_log(5, &format!("设置权限失败: {}", e), "error", None).await;
+        return;
+    }
+    send_log(5, "权限设置完成", "success", None).await;
+
+    // Step 6: Verify binary
+    send_log(6, "验证新版本...", "info", None).await;
+    let verify = tokio::process::Command::new(temp_path)
+        .arg("--help")
+        .output()
+        .await;
+
+    if verify.is_err() {
+        let _ = fs::remove_file(temp_path);
+        send_log(6, "新版本验证失败", "error", None).await;
+        return;
+    }
+    send_log(6, "验证通过", "success", None).await;
+
+    // Step 7: Get current exe path
+    send_log(7, "准备替换...", "info", None).await;
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            send_log(7, &format!("获取当前程序路径失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+    send_log(7, "准备就绪", "success", None).await;
+
+    // Step 8: Stop sing-box
+    send_log(8, "停止 sing-box...", "info", None).await;
+    log_info!("Stopping sing-box before upgrade...");
+    stop_sing_internal_and_wait().await;
+    send_log(8, "sing-box 已停止", "success", None).await;
+
+    // Step 9: Backup and replace
+    send_log(9, "备份当前版本...", "info", None).await;
+    let backup_path = format!("{}.bak", current_exe.display());
+    if let Err(e) = fs::copy(&current_exe, &backup_path) {
+        send_log(9, &format!("备份失败: {}", e), "error", None).await;
+        return;
+    }
+
+    send_log(9, "替换二进制文件...", "info", None).await;
+    if let Err(e) = fs::remove_file(&current_exe) {
+        send_log(9, &format!("删除旧文件失败: {}", e), "error", None).await;
+        return;
+    }
+    if let Err(e) = fs::copy(temp_path, &current_exe) {
+        let _ = fs::copy(&backup_path, &current_exe);
+        send_log(9, &format!("复制新文件失败: {}", e), "error", None).await;
+        return;
+    }
+    if let Err(e) = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&current_exe);
+        let _ = fs::copy(&backup_path, &current_exe);
+        send_log(9, &format!("设置权限失败: {}", e), "error", None).await;
+        return;
+    }
+    let _ = fs::remove_file(temp_path);
+
+    // Mark embedded binaries for forced re-extraction
+    if let Ok(current_dir) = std::env::current_dir() {
+        let _ = fs::write(current_dir.join(".force_extract_sing_box"), b"1");
+        let _ = fs::write(current_dir.join(".force_extract_gotty"), b"1");
+    }
+    send_log(9, "替换完成", "success", None).await;
+
+    // Step 10: Restart
+    send_log(10, "重启服务...", "info", None).await;
+    log_info!("Upgrade successful! Restarting...");
+
+    // Give client time to receive the final log
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Restart
+    if try_restart_systemd("miao").await.is_ok() {
+        return;
+    }
+
+    use std::os::unix::process::CommandExt;
+    let args: Vec<String> = std::env::args().collect();
+    let err = std::process::Command::new(&current_exe).args(&args[1..]).exec();
+
+    log_error!("Failed to exec new binary: {}", err);
+    log_error!("Attempting to restore from backup...");
+
+    if fs::remove_file(&current_exe).is_ok() {
+        if fs::copy(&backup_path, &current_exe).is_ok() {
+            let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
+            log_error!("Restored from backup, restarting with old version...");
+            let _ = std::process::Command::new(&current_exe).args(&args[1..]).exec();
+        }
+    }
+}
+
 /// POST /api/upgrade - Download and apply upgrade
 async fn upgrade() -> Json<ApiResponse<String>> {
     // 1. Fetch latest release info
@@ -10510,6 +10810,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
+        .route("/api/upgrade/ws", get(upgrade_ws))
         // Clash API proxy (protected HTTP)
         .route("/api/clash/proxies", get(clash_get_proxies))
         .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
