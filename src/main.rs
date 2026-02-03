@@ -4444,12 +4444,26 @@ async fn upgrade() -> Json<ApiResponse<String>> {
         None => return Json(ApiResponse::error("No binary found for current architecture")),
     };
 
-    // 3. Download new binary to temp location
+    // 3. Download new binary to temp location (use longer timeout for large files)
     log_info!("Downloading update from: {}", download_url);
-    let binary_data = match client.get(&download_url).send().await {
-        Ok(r) => match r.bytes().await {
-            Ok(b) => b,
-            Err(e) => return Json(ApiResponse::error(format!("Failed to download binary: {}", e))),
+    let download_client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build() {
+        Ok(c) => c,
+        Err(e) => return Json(ApiResponse::error(format!("Failed to create download client: {}", e))),
+    };
+    let binary_data = match download_client.get(&download_url)
+        .header("User-Agent", "miao")
+        .send()
+        .await {
+        Ok(r) => {
+            if !r.status().is_success() {
+                return Json(ApiResponse::error(format!("Download failed with status: {}", r.status())));
+            }
+            match r.bytes().await {
+                Ok(b) => b,
+                Err(e) => return Json(ApiResponse::error(format!("Failed to download binary: {}", e))),
+            }
         },
         Err(e) => return Json(ApiResponse::error(format!("Failed to download: {}", e))),
     };
