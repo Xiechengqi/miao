@@ -127,13 +127,13 @@ echo ""
 echo "==> Building Rust binary for ${TARGET}..."
 
 if [ "$TARGET" = "arm64" ]; then
-    cargo zigbuild --release --locked --features tcp_tunnel --target aarch64-unknown-linux-musl
+    cargo zigbuild --release --features tcp_tunnel --target aarch64-unknown-linux-musl
     ls -alht target/aarch64-unknown-linux-musl/release/miao-rust
     echo ""
     echo "==> Build completed successfully!"
     echo "Binary location: target/aarch64-unknown-linux-musl/release/miao-rust"
 else
-    cargo zigbuild --release --locked --features tcp_tunnel --target x86_64-unknown-linux-musl
+    cargo zigbuild --release --features tcp_tunnel --target x86_64-unknown-linux-musl
     ls -alht target/x86_64-unknown-linux-musl/release/miao-rust
     echo ""
     echo "==> Build completed successfully!"

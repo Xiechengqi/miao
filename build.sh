@@ -102,7 +102,7 @@ rm build-info-temp.json
 echo ""
 echo "==> Building Rust binary..."
 rm -rf target
-cargo build --release --locked --features tcp_tunnel > /dev/null
+cargo build --release --features tcp_tunnel > /dev/null
 ls -alht target/release/miao-rust
 
 echo ""

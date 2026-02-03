@@ -699,29 +699,29 @@ class ApiClient {
 
   // Hosts
   async getHosts(): Promise<Host[]> {
-    const res = await this.fetch<{ data: { items: Host[] } }>("/api/hosts");
+    const res = await this.fetch<{ data: { items: Host[] } }>("/api/v1/hosts");
     return res.data.items;
   }
 
   async getHostDefaultKeyPath(): Promise<string | null> {
-    const res = await this.fetch<{ data: { path: string | null } }>("/api/hosts/default-key-path");
+    const res = await this.fetch<{ data: { path: string | null } }>("/api/v1/hosts/default-key-path");
     return res.data.path;
   }
 
   async testHostConfig(config: Partial<Host> & { auth_type: string }): Promise<void> {
-    await this.fetch("/api/hosts/test", {
+    await this.fetch("/api/v1/hosts/test", {
       method: "POST",
       body: JSON.stringify(config),
     });
   }
 
   async getHost(id: string): Promise<Host> {
-    const res = await this.fetch<{ data: Host }>(`/api/hosts/${id}`);
+    const res = await this.fetch<{ data: Host }>(`/api/v1/hosts/${id}`);
     return res.data;
   }
 
   async createHost(config: Omit<Host, "id">): Promise<Host> {
-    const res = await this.fetch<{ data: Host }>("/api/hosts", {
+    const res = await this.fetch<{ data: Host }>("/api/v1/hosts", {
       method: "POST",
       body: JSON.stringify(config),
     });
@@ -729,20 +729,20 @@ class ApiClient {
   }
 
   async updateHost(id: string, config: Partial<Host>): Promise<void> {
-    await this.fetch(`/api/hosts/${id}`, {
+    await this.fetch(`/api/v1/hosts/${id}`, {
       method: "PUT",
       body: JSON.stringify(config),
     });
   }
 
   async deleteHost(id: string): Promise<void> {
-    await this.fetch(`/api/hosts/${id}`, {
+    await this.fetch(`/api/v1/hosts/${id}`, {
       method: "DELETE",
     });
   }
 
   async testHost(id: string): Promise<HostTestResult> {
-    const res = await this.fetch<{ data: HostTestResult }>(`/api/hosts/${id}/test`, {
+    const res = await this.fetch<{ data: HostTestResult }>(`/api/v1/hosts/${id}/test`, {
       method: "POST",
     });
     return res.data;
