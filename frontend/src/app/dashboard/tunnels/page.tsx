@@ -30,12 +30,12 @@ const defaultForm = {
   allow_public_bind: false,
   strict_host_key_checking: false,
   host_key_fingerprint: "",
-  connect_timeout_ms: "",
-  keepalive_interval_ms: "",
-  backoff_base_ms: "",
-  backoff_max_ms: "",
-  scan_interval_ms: "",
-  debounce_ms: "",
+  connect_timeout_ms: "10000",
+  keepalive_interval_ms: "30000",
+  backoff_base_ms: "1000",
+  backoff_max_ms: "30000",
+  scan_interval_ms: "3000",
+  debounce_ms: "8000",
   exclude_ports_text: "",
 };
 
