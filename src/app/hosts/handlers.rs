@@ -139,12 +139,12 @@ pub async fn get_hosts(
 /// 获取单个主机
 pub async fn get_host(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let hosts = { state.config.lock().await.hosts.clone() };
     let config = state.config.lock().await;
 
-    let host = hosts.iter().find(|h| h.id == id.to_string())
+    let host = hosts.iter().find(|h| h.id == id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?;
 
     let group_names: std::collections::HashMap<String, String> = config.host_groups.iter()
@@ -266,12 +266,12 @@ pub async fn create_host(
 /// 更新主机
 pub async fn update_host(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(req): Json<HostUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let updated = {
         let mut config = state.config.lock().await;
-        let pos = config.hosts.iter().position(|h| h.id == id.to_string())
+        let pos = config.hosts.iter().position(|h| h.id == id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?;
 
         let existing = &config.hosts[pos];
@@ -339,11 +339,11 @@ pub async fn update_host(
 /// 删除主机
 pub async fn delete_host(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
     {
         let mut config = state.config.lock().await;
-        let pos = config.hosts.iter().position(|h| h.id == id.to_string())
+        let pos = config.hosts.iter().position(|h| h.id == id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?;
 
         config.hosts.remove(pos);
@@ -358,11 +358,11 @@ pub async fn delete_host(
 /// 测试主机连接
 pub async fn test_host(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let host = {
         let config = state.config.lock().await;
-        config.hosts.iter().find(|h| h.id == id.to_string())
+        config.hosts.iter().find(|h| h.id == id)
             .cloned()
             .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?
     };
