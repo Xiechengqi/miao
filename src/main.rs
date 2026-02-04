@@ -10811,7 +10811,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
-        .route("/api/upgrade/ws", get(upgrade_ws))
         // Clash API proxy (protected HTTP)
         .route("/api/clash/proxies", get(clash_get_proxies))
         .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
@@ -10882,7 +10881,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 公开路由（不需要认证）
     let ws_routes = Router::new()
         .route("/api/clash/ws/traffic", get(clash_ws_traffic))
-        .route("/api/clash/ws/logs", get(clash_ws_logs));
+        .route("/api/clash/ws/logs", get(clash_ws_logs))
+        .route("/api/upgrade/ws", get(upgrade_ws));
 
     let app = Router::new()
         // API routes (highest priority)
