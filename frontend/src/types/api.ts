@@ -338,6 +338,9 @@ export interface Host {
   port: number;
   username: string;
   auth_type: HostAuthType;
+  enabled?: boolean;
+  connection_timeout_ms?: number;
+  keepalive_interval_ms?: number;
   password?: string;
   private_key_path?: string;
   private_key_passphrase?: string;
