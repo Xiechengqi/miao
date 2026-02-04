@@ -999,11 +999,14 @@ struct TcpTunnelSetCreateRequest {
     enabled: Option<bool>,
     #[serde(default)]
     remote_bind_addr: Option<String>,
-    ssh_host: String,
+    #[serde(default)]
+    ssh_host: Option<String>,
     #[serde(default)]
     ssh_port: Option<u16>,
-    username: String,
-    auth: TcpTunnelAuth,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    auth: Option<TcpTunnelAuth>,
     #[serde(default)]
     strict_host_key_checking: Option<bool>,
     #[serde(default)]
@@ -6923,7 +6926,9 @@ async fn update_tcp_tunnel_set(
         _ => {}
     }
 
-    let ssh_host = req.ssh_host.trim().to_string();
+    let ssh_host = req.ssh_host.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("ssh_host is required")))
+    })?.trim().to_string();
     if ssh_host.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("ssh_host is required"))));
     }
@@ -7060,7 +7065,17 @@ async fn create_tcp_tunnel_set(
         ));
     }
 
-    match &req.auth {
+    let ssh_host = req.ssh_host.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("ssh_host is required")))
+    })?;
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("username is required")))
+    })?;
+    let auth = req.auth.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("auth is required")))
+    })?;
+
+    match &auth {
         TcpTunnelAuth::PrivateKeyPath { path, .. } if path.is_empty() => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -7077,9 +7092,9 @@ async fn create_tcp_tunnel_set(
             name: req.name,
             enabled,
             remote_bind_addr,
-            ssh_host: req.ssh_host,
+            ssh_host,
             ssh_port,
-            username: req.username,
+            username,
             auth,
             strict_host_key_checking,
             host_key_fingerprint,
@@ -7888,7 +7903,9 @@ async fn update_sync(
         } else {
             existing.name.clone()
         };
-        let auth = req.auth;
+        let auth = req.auth.ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, Json(ApiResponse::error("auth is required")))
+        })?;
 
         match &auth {
             TcpTunnelAuth::PrivateKeyPath { .. } => {
