@@ -1135,11 +1135,14 @@ struct SyncUpsertRequest {
     local_paths: Vec<String>,
     #[serde(default)]
     remote_path: Option<String>,
-    ssh_host: String,
+    #[serde(default)]
+    ssh_host: Option<String>,
     #[serde(default)]
     ssh_port: Option<u16>,
-    username: String,
-    auth: TcpTunnelAuth,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    auth: Option<TcpTunnelAuth>,
     #[serde(default)]
     options: SyncOptions,
     #[serde(default)]
@@ -6924,7 +6927,9 @@ async fn update_tcp_tunnel_set(
     if ssh_host.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("ssh_host is required"))));
     }
-    let username = req.username.trim().to_string();
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH username is required")))
+    })?.trim().to_string();
     if username.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("username is required"))));
     }
@@ -7075,7 +7080,7 @@ async fn create_tcp_tunnel_set(
             ssh_host: req.ssh_host,
             ssh_port,
             username: req.username,
-            auth: req.auth,
+            auth,
             strict_host_key_checking,
             host_key_fingerprint,
             exclude_ports,
@@ -7416,7 +7421,9 @@ async fn test_host_config(
     if host.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Host is required"))));
     }
-    let username = req.username.trim().to_string();
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH username is required")))
+    })?.trim().to_string();
     if username.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Username is required"))));
     }
@@ -7465,7 +7472,9 @@ async fn create_host(
     if host.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Host is required"))));
     }
-    let username = req.username.trim().to_string();
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH username is required")))
+    })?.trim().to_string();
     if username.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Username is required"))));
     }
@@ -7537,7 +7546,9 @@ async fn update_host(
     if host.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Host is required"))));
     }
-    let username = req.username.trim().to_string();
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH username is required")))
+    })?.trim().to_string();
     if username.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("Username is required"))));
     }
@@ -7742,20 +7753,27 @@ async fn create_sync(
     let schedule = normalize_sync_schedule(req.schedule)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
 
-    let host = req.ssh_host.trim().to_string();
+    let host = req.ssh_host.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH host is required")))
+    })?.trim().to_string();
     if host.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error("SSH host is required")),
         ));
     }
-    let username = req.username.trim().to_string();
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH username is required")))
+    })?.trim().to_string();
     if username.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error("SSH username is required")),
         ));
     }
+    let auth = req.auth.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH auth is required")))
+    })?;
 
     let options = normalize_sync_options(req.options);
     let cfg = SyncConfig {
@@ -7768,7 +7786,7 @@ async fn create_sync(
             host,
             port: req.ssh_port.unwrap_or(default_ssh_port()),
             username,
-            auth: req.auth,
+            auth,
         },
         options,
         schedule,
@@ -7839,14 +7857,18 @@ async fn update_sync(
     let schedule = normalize_sync_schedule(req.schedule)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
 
-    let host = req.ssh_host.trim().to_string();
+    let host = req.ssh_host.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH host is required")))
+    })?.trim().to_string();
     if host.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error("SSH host is required")),
         ));
     }
-    let username = req.username.trim().to_string();
+    let username = req.username.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ApiResponse::error("SSH username is required")))
+    })?.trim().to_string();
     if username.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
