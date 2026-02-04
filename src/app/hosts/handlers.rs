@@ -465,11 +465,11 @@ pub async fn import_hosts(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let mut imported = 0;
     let mut skipped = 0;
-    let mut failed = 0;
-    let mut errors: Vec<ImportError> = Vec::new();
+    let failed = 0;
+    let errors: Vec<ImportError> = Vec::new();
 
     {
-        let mut config = state.config.lock().await;
+        let config = state.config.lock().await;
         let existing_hosts: std::collections::HashSet<String> = config.hosts.iter()
             .map(|h| format!("{}@{}:{}", h.username, h.host, h.port)).collect();
 

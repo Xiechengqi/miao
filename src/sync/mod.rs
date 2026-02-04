@@ -85,6 +85,7 @@ impl SyncLogStorage {
         self.broadcast_tx.subscribe()
     }
 
+    #[allow(dead_code)]
     async fn clear(&self) {
         let mut logs = self.logs.lock().await;
         logs.clear();
@@ -261,6 +262,7 @@ impl SyncManager {
         logs.get(id).map(|storage| storage.subscribe())
     }
 
+    #[allow(dead_code)]
     pub async fn clear_logs(&self, id: &str) {
         let logs = self.inner.logs.lock().await;
         if let Some(storage) = logs.get(id) {
@@ -367,7 +369,7 @@ async fn run_sync_task(
     cfg: SyncConfig,
     status: Arc<RwLock<SyncRuntimeStatus>>,
     stop_rx: watch::Receiver<bool>,
-    sync_id: String,
+    _sync_id: String,
     log_tx: Option<Arc<dyn Fn(SyncLogEntry) + Send + Sync>>,
 ) {
     {

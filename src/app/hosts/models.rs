@@ -181,6 +181,7 @@ pub struct HostDetailResponse {
 }
 
 /// 分页响应
+#[allow(dead_code)]
 #[derive(ToSchema, Serialize, Clone, Debug)]
 pub struct HostPageResponse {
     pub items: Vec<HostResponse>,
@@ -202,12 +203,14 @@ pub struct HostTestResponse {
 }
 
 /// 批量测试结果
+#[allow(dead_code)]
 #[derive(ToSchema, Serialize, Clone, Debug)]
 pub struct BatchTestResult {
     pub results: Vec<HostTestResponse>,
 }
 
 /// 导入结果
+#[allow(dead_code)]
 #[derive(ToSchema, Serialize, Clone, Debug)]
 pub struct ImportResult {
     pub imported: usize,
@@ -223,6 +226,7 @@ pub struct ImportError {
 }
 
 /// 导出响应
+#[allow(dead_code)]
 #[derive(ToSchema, Serialize, Clone, Debug)]
 pub struct ExportResponse {
     pub format: String,
@@ -231,6 +235,7 @@ pub struct ExportResponse {
 }
 
 /// 默认私钥路径响应
+#[allow(dead_code)]
 #[derive(ToSchema, Serialize, Clone, Debug)]
 pub struct HostDefaultKeyPathResponse {
     pub path: Option<String>,
