@@ -4432,7 +4432,7 @@ async fn handle_upgrade_websocket(mut socket: WebSocket) {
     let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
 
     // Spawn the upgrade task
-    let upgrade_handle = tokio::spawn(async move {
+    let mut upgrade_handle = tokio::spawn(async move {
         perform_upgrade_with_logs(log_tx).await
     });
 
@@ -4445,7 +4445,7 @@ async fn handle_upgrade_websocket(mut socket: WebSocket) {
                     break;
                 }
             }
-            _ = upgrade_handle => {
+            _ = &mut upgrade_handle => {
                 break;
             }
         }
