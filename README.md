@@ -44,8 +44,7 @@ miao/
 │       └── types/          # TypeScript 类型定义
 ├── embedded/               # 内嵌二进制文件
 │   ├── sing-box-amd64/arm64
-│   ├── gotty-amd64/arm64
-│   └── sy-amd64/arm64      # (保留，未使用)
+│   └── gotty-amd64/arm64
 ├── public/                 # 静态资源（Next.js 构建产物）
 ├── config.yaml             # 运行时配置
 ├── build.sh                # 本地构建脚本

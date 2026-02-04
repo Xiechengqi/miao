@@ -76,14 +76,6 @@ if [ ! -f "embedded/gotty-${TARGET}" ] || [ ! -s "embedded/gotty-${TARGET}" ]; t
     chmod +x "embedded/gotty-${TARGET}"
 fi
 
-# Download sy
-if [ ! -f "embedded/sy-${TARGET}" ] || [ ! -s "embedded/sy-${TARGET}" ]; then
-    echo "Downloading sy-${TARGET}..."
-    curl -L -o "embedded/sy-${TARGET}" \
-        "https://github.com/Xiechengqi/sy/releases/download/latest/sy-linux-${TARGET}"
-    chmod +x "embedded/sy-${TARGET}"
-fi
-
 # Download or build sing-box
 if [ ! -f "embedded/sing-box-${TARGET}" ] || [ ! -s "embedded/sing-box-${TARGET}" ]; then
     echo "Building sing-box-${TARGET}..."
