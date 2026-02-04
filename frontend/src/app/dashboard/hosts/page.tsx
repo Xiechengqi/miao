@@ -182,6 +182,9 @@ export default function HostsPage() {
         port: Number(formData.port) || 22,
         username: formData.username.trim(),
         auth_type: formData.auth_type,
+        enabled: true,
+        connection_timeout_ms: 10000,
+        keepalive_interval_ms: 30000,
       };
 
       if (formData.auth_type === "password") {
