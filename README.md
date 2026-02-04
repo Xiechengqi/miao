@@ -1,23 +1,17 @@
 # Miao
 
-一个开箱即用的 [sing-box](https://github.com/SagerNet/sing-box) 管理器。下载、配置节点、运行，即可实现 **TUN 模式透明代理 + 国内外自动分流**。
-
-> **当前仅支持 Hysteria2 协议节点**
+一个基于 SSH 协议的服务器运维管理工具，提供 Web 管理面板，集成 SSH 隧道、远程终端、文件同步、VNC 桌面等功能。
 
 ## 特性
 
-- **零配置 sing-box** - 内嵌 sing-box 二进制，无需单独安装
-- **TUN 透明代理** - 系统级代理，所有流量自动走代理
-- **国内外自动分流** - 基于 geosite/geoip 规则，国内直连、国外代理
-- **Web 管理面板** - 节点管理、实时流量监控、测速
-- **TCP 穿透 (SSH -R)** - 将本机 TCP 端口映射到远程服务器端口
-- **Web Terminal** - 内置 gotty 提供浏览器终端
-- **KasmVNC 桌面访问** - 通过 VNC Web 端访问桌面/应用
-- **桌面应用管理** - Chromium/CCSwitch 等应用可在 Web 面板启动并绑定到 VNC DISPLAY
-- **Sync 同步** - 基于 sy 的本地文件/目录同步到 SSH 远端（支持定时 cron）
-- **节点候选池 + 自动切换** - 支持 Ctrl/⌘ 多选候选节点，后端定时健康检查失败自动切换
+- **SSH 主机管理** - 集中管理多台 SSH 服务器，支持密码/私钥认证
+- **TCP 穿透 (SSH -R)** - 基于 SSH 反向隧道，将本机端口映射到远程服务器
+- **Web Terminal** - 内置 gotty 提供浏览器终端，无需本地 SSH 客户端
+- **文件同步 (sy)** - 基于 SSH 的本地文件/目录同步到远端（支持定时 cron）
+- **KasmVNC 桌面** - 通过 VNC Web 端访问远程桌面/应用
+- **桌面应用管理** - Chromium 等应用可在 Web 面板启动并绑定到 VNC DISPLAY
+- **流量转发** - 集成 sing-box，支持通过 SSH 隧道转发流量
 - **自动更新** - 支持从 GitHub 一键更新到最新版本
-- **OpenWrt 支持** - 自动安装所需内核模块
 
 ## 技术栈
 
@@ -27,7 +21,7 @@
 | 前端 | Next.js 16 + React 19 + TypeScript 5 + Tailwind CSS 4 |
 | 状态管理 | Zustand |
 | 动画 | Framer Motion |
-| 代理核心 | sing-box（内嵌） |
+| 流量转发 | sing-box（内嵌） |
 
 ## 目录结构
 
@@ -62,32 +56,18 @@ miao/
 
 ## 功能模块
 
-### 代理服务 (sing-box)
+### SSH 主机管理
 
 | 功能 | 说明 |
 |------|------|
-| TUN 模式 | 系统级透明代理，流量自动拦截 |
-| 自动分流 | geosite/geoip 规则，国内直连/国外代理 |
-| DNS 健康检查 | 多 DoH 服务器自动探测与切换 |
-| 节点候选池 | 多选节点 + 定时健康检查 + 自动故障转移 |
+| 主机列表 | 集中管理多台 SSH 服务器 |
+| 认证方式 | 支持密码、私钥、SSH Agent |
+| 分组管理 | 按项目/环境分组管理主机 |
+| 连接测试 | 一键测试 SSH 连接状态 |
 
-### Web 管理面板
+### TCP 隧道 (SSH -R)
 
-| 页面 | 功能 |
-|------|------|
-| `/dashboard` | 仪表盘、流量监控、服务状态 |
-| `/dashboard/proxies` | 节点管理、测速 |
-| `/dashboard/tunnels` | TCP 隧道配置与管理 |
-| `/dashboard/hosts` | SSH 主机管理 |
-| `/dashboard/sync` | 文件同步配置、定时任务 |
-| `/dashboard/terminals` | Web Terminal (gotty) 配置 |
-| `/dashboard/vnc` | KasmVNC 远程桌面配置 |
-| `/dashboard/apps` | 桌面应用管理（绑定 VNC） |
-| `/dashboard/logs` | 实时日志（WebSocket 流） |
-
-### TCP 隧道
-
-- 基于 SSH `-R` 反向隧道
+- 基于 SSH `-R` 反向隧道实现端口映射
 - 支持密码/私钥/SSH Agent 认证
 - 端口自动扫描（tcp_tunnel_sets）
 - 连接状态：`Stopped` → `Connecting` → `Forwarding` → `Error`
@@ -95,10 +75,34 @@ miao/
 
 ### 文件同步 (sy)
 
-- 本地文件/目录同步到 SSH 远端
+- 基于 SSH 协议的本地文件/目录同步到远端
 - 支持 cron 定时任务
 - 同步选项：压缩、限速、排除规则、删除同步
 - 验证模式确保数据完整性
+
+### 流量转发 (sing-box)
+
+集成 sing-box 提供流量转发功能，可配合 SSH 隧道使用：
+
+| 功能 | 说明 |
+|------|------|
+| TUN 模式 | 系统级流量拦截 |
+| 分流规则 | 基于 geosite/geoip 规则分流 |
+| DNS 健康检查 | 多 DoH 服务器自动探测与切换 |
+
+### Web 管理面板
+
+| 页面 | 功能 |
+|------|------|
+| `/dashboard` | 仪表盘、服务状态 |
+| `/dashboard/hosts` | SSH 主机管理 |
+| `/dashboard/tunnels` | TCP 隧道配置与管理 |
+| `/dashboard/sync` | 文件同步配置、定时任务 |
+| `/dashboard/terminals` | Web Terminal (gotty) 配置 |
+| `/dashboard/vnc` | KasmVNC 远程桌面配置 |
+| `/dashboard/apps` | 桌面应用管理（绑定 VNC） |
+| `/dashboard/proxies` | 流量转发节点管理 |
+| `/dashboard/logs` | 实时日志（WebSocket 流） |
 
 ## 快速开始
 
@@ -123,16 +127,6 @@ wget https://github.com/YUxiangLuo/miao/releases/latest/download/miao-rust-linux
 password: admin
 ```
 
-手动配置节点：
-
-```yaml
-# 手动配置节点
-nodes:
-  - '{"type":"hysteria2","tag":"节点名","server":"example.com","server_port":443,"password":"xxx"}'
-  # server 是 IP 时需指定 sni
-  - '{"type":"hysteria2","tag":"节点2","server":"1.2.3.4","server_port":443,"password":"xxx","sni":"example.com"}'
-```
-
 ### 3. 运行
 
 ```bash
@@ -149,9 +143,9 @@ sudo ./miao
 |------|------|--------|
 | `port` | Web 面板端口 | `6161` |
 | `password` | Web 登录密码 | `admin` |
-| `selections` | 记住的节点选择（selector -> node） | `{}` |
-| `proxy_pool` | 代理候选节点池（按顺序优先级，2+ 时启用自动切换） | - |
-| `nodes` | 手动配置的节点 (JSON 格式) | - |
+| `hosts` | SSH 主机配置列表 | - |
+| `host_groups` | 主机分组配置 | - |
+| `tcp_tunnels` | SSH 隧道配置列表 | - |
 | `terminals` | Web Terminal (gotty) 配置列表 | - |
 | `vnc_sessions` | KasmVNC 会话配置列表 | - |
 | `apps` | 桌面应用配置列表 | - |
@@ -159,9 +153,7 @@ sudo ./miao
 
 ### Web Terminal (gotty)
 
-启用后会在独立端口启动 gotty（默认 `127.0.0.1:7681`），登录认证由 miao 配置。可在 `config.yaml` 中配置多个终端节点，支持独立端口、地址、命令和额外参数（见 `config.yaml.example`）；面板里留空认证不会清空，需勾选"清除认证"。默认额外参数为 `-w --enable-idle-alert`。
-
-> 默认规则会让所有 `tcp/22`（SSH）直连，避免代理出口对 22 端口的限制导致 SSH 断连。
+启用后会在独立端口启动 gotty（默认 `127.0.0.1:7681`），登录认证由 miao 配置。可在 `config.yaml` 中配置多个终端节点，支持独立端口、地址、命令和额外参数；面板里留空认证不会清空，需勾选"清除认证"。默认额外参数为 `-w --enable-idle-alert`。
 
 ### KasmVNC Sessions
 
@@ -169,7 +161,7 @@ sudo ./miao
 
 ### Desktop Apps
 
-桌面应用支持绑定到某个 VNC 会话（自动使用该 DISPLAY），或手动指定 DISPLAY。应用模板预设可快速生成 Chromium/CCSwitch 等配置，后续可在面板中编辑参数与环境变量。
+桌面应用支持绑定到某个 VNC 会话（自动使用该 DISPLAY），或手动指定 DISPLAY。应用模板预设可快速生成 Chromium 等配置，后续可在面板中编辑参数与环境变量。
 
 ### Sync (sy)
 
@@ -182,14 +174,6 @@ Sync 功能使用 sy 在本地和 SSH 远端同步文件/目录，默认只新�
 - 多路径同步时远端路径固定为本地路径
 - 定时执行使用 cron 表达式，默认时区为 `Asia/Shanghai`
 - 同步时不校验 SSH 主机指纹
-
-## DNS 说明（DoH 优先 + 自动切换）
-
-默认使用多个 DoH 远程 DNS（Cloudflare/Google/Quad9）并在后端定时探测可用性。
-
-可在 `config.yaml` 中通过 `dns_active` / `dns_candidates` / `dns_check_interval_ms` 等字段调整策略（见 `config.yaml.example`）。
-
-如果希望"切换 DNS 不重启 sing-box"，需要把 DNS 切换从 sing-box 配置层挪到外部（例如让 sing-box 只指向本地 `smartdns/mosdns/dnsmasq`，由本地转发器做上游健康检查与切换）。
 
 ## 本地开发
 
@@ -227,6 +211,10 @@ npm run dev:mock
 # 真实 API 模式
 npm run dev:real
 ```
+
+## 免责声明
+
+本项目仅供学习和研究目的，禁止用于商业用途。使用者应遵守当地法律法规，因使用本项目产生的任何问题由使用者自行承担。
 
 ## 协议
 
