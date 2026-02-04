@@ -7,7 +7,7 @@
 - **SSH 主机管理** - 集中管理多台 SSH 服务器，支持密码/私钥认证
 - **TCP 穿透 (SSH -R)** - 基于 SSH 反向隧道，将本机端口映射到远程服务器
 - **Web Terminal** - 内置 gotty 提供浏览器终端，无需本地 SSH 客户端
-- **文件同步 (sy)** - 基于 SSH 的本地文件/目录同步到远端（支持定时 cron）
+- **文件同步** - 基于 SSH 协议的本地文件/目录同步到远端（支持定时 cron）
 - **KasmVNC 桌面** - 通过 VNC Web 端访问远程桌面/应用
 - **桌面应用管理** - Chromium 等应用可在 Web 面板启动并绑定到 VNC DISPLAY
 - **流量转发** - 集成 sing-box，支持通过 SSH 隧道转发流量
@@ -45,7 +45,7 @@ miao/
 ├── embedded/               # 内嵌二进制文件
 │   ├── sing-box-amd64/arm64
 │   ├── gotty-amd64/arm64
-│   └── sy-amd64/arm64
+│   └── sy-amd64/arm64      # (保留，未使用)
 ├── public/                 # 静态资源（Next.js 构建产物）
 ├── config.yaml             # 运行时配置
 ├── build.sh                # 本地构建脚本
@@ -73,7 +73,7 @@ miao/
 - 连接状态：`Stopped` → `Connecting` → `Forwarding` → `Error`
 - 断线重连（指数退避算法）
 
-### 文件同步 (sy)
+### 文件同步
 
 - 基于 SSH 协议的本地文件/目录同步到远端
 - 支持 cron 定时任务
@@ -149,7 +149,7 @@ sudo ./miao
 | `terminals` | Web Terminal (gotty) 配置列表 | - |
 | `vnc_sessions` | KasmVNC 会话配置列表 | - |
 | `apps` | 桌面应用配置列表 | - |
-| `syncs` | sy 文件同步配置列表 | - |
+| `syncs` | 文件同步配置列表 | - |
 
 ### Web Terminal (gotty)
 
@@ -163,13 +163,12 @@ sudo ./miao
 
 桌面应用支持绑定到某个 VNC 会话（自动使用该 DISPLAY），或手动指定 DISPLAY。应用模板预设可快速生成 Chromium 等配置，后续可在面板中编辑参数与环境变量。
 
-### Sync (sy)
+### Sync
 
-Sync 功能使用 sy 在本地和 SSH 远端同步文件/目录，默认只新增或更新（不删除远端多余文件）。
+文件同步功能基于 SSH 协议实现，将本地文件/目录同步到远端服务器，默认只新增或更新（不删除远端多余文件）。
 
 注意事项：
 
-- 远端必须预先安装 sy（包含 sy-remote）
 - 仅支持 SSH 用户名/密码认证（密码留空时使用本机 ~/.ssh 下的密钥）
 - 多路径同步时远端路径固定为本地路径
 - 定时执行使用 cron 表达式，默认时区为 `Asia/Shanghai`
