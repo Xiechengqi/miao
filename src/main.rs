@@ -704,6 +704,13 @@ impl HostConfig {
             HostAuth::PrivateKeyPath { .. } => "private_key_path".to_string(),
         }
     }
+
+    pub(crate) fn private_key_path(&self) -> Option<String> {
+        match &self.auth {
+            HostAuth::PrivateKeyPath { path, .. } => Some(path.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -166,6 +166,7 @@ pub struct HostResponse {
     pub port: u16,
     pub username: String,
     pub auth_type: String,
+    pub private_key_path: Option<String>,
     pub group_id: Option<String>,
     pub group_name: Option<String>,
     pub tags: Vec<String>,
