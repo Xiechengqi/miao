@@ -364,6 +364,8 @@ pub async fn test_host(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use crate::{test_host_connection, ping_host};
+
     let host = {
         let config = state.config.lock().await;
         config.hosts.iter().find(|h| h.id == id)
@@ -371,12 +373,21 @@ pub async fn test_host(
             .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?
     };
 
+    // 实际执行 SSH 连接测试
+    let (ssh_ok, ssh_error) = match test_host_connection(&host).await {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e)),
+    };
+
+    // 实际执行 ping 测试
+    let ping_avg_ms = ping_host(&host.host).await;
+
     let response = HostTestResponse {
         id: host.id.clone(),
         host: host.host.clone(),
-        ssh_ok: true,
-        ssh_error: None,
-        ping_avg_ms: Some(1.5),
+        ssh_ok,
+        ssh_error,
+        ping_avg_ms,
         timestamp: Utc::now().to_rfc3339(),
     };
 
