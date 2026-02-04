@@ -58,6 +58,7 @@ export default function TunnelsPage() {
   const [viewMode, setViewMode] = useState<"single" | "full">("single");
   const [hosts, setHosts] = useState<Host[]>([]);
   const [testingTunnelId, setTestingTunnelId] = useState<string | null>(null);
+  const [loadErrors, setLoadErrors] = useState<{ single?: string; full?: string }>({});
   const [tunnelTestResults, setTunnelTestResults] = useState<Record<string, TunnelTestResult>>({});
   const availableHosts = useMemo(
     () => hosts,
@@ -102,14 +103,44 @@ export default function TunnelsPage() {
     try {
       const data = await api.getHosts();
       setHosts(data);
+      return data;
     } catch (error) {
       console.error("Failed to load hosts:", error);
+      return [];
     }
   };
 
   const loadTunnels = async () => {
     try {
-      const { supported, items } = await api.getTcpTunnels();
+      setLoadErrors({});
+      const [singleRes, fullRes] = await Promise.allSettled([
+        api.getTcpTunnels(),
+        api.getTcpTunnelSets(),
+      ]);
+      const items: TcpTunnel[] = [];
+      let supported = true;
+
+      if (singleRes.status === "fulfilled") {
+        items.push(...singleRes.value.items);
+        supported = supported && singleRes.value.supported;
+      } else {
+        console.error("Failed to load single tunnels:", singleRes.reason);
+        setLoadErrors((prev) => ({ ...prev, single: "单穿透加载失败" }));
+      }
+
+      if (fullRes.status === "fulfilled") {
+        items.push(...fullRes.value.items);
+        supported = supported && fullRes.value.supported;
+      } else {
+        console.error("Failed to load full tunnels:", fullRes.reason);
+        setLoadErrors((prev) => ({ ...prev, full: "全穿透加载失败" }));
+      }
+
+      if (items.length === 0) {
+        setTcpTunnelsSupported(false);
+        return;
+      }
+
       setTcpTunnels(items);
       setTcpTunnelsSupported(supported);
       setTcpTunnelsLoaded(true);
@@ -194,16 +225,45 @@ export default function TunnelsPage() {
       const keepalive = parseNumber(formData.keepalive_interval_ms);
       if (keepalive !== undefined) payload.keepalive_interval_ms = keepalive;
       const backoffBase = parseNumber(formData.backoff_base_ms);
-      if (backoffBase !== undefined) payload.backoff_base_ms = backoffBase;
       const backoffMax = parseNumber(formData.backoff_max_ms);
-      if (backoffMax !== undefined) payload.backoff_max_ms = backoffMax;
+      if (formData.mode === "single" && (backoffBase !== undefined || backoffMax !== undefined)) {
+        payload.reconnect_backoff_ms = {
+          base_ms: backoffBase ?? 1000,
+          max_ms: backoffMax ?? 30000,
+        };
+      }
 
-      if (editingTunnel) {
-        await api.updateTcpTunnel(editingTunnel.id, payload);
-        addToast({ type: "success", message: "隧道已更新" });
+      if (formData.mode === "single") {
+        if (editingTunnel) {
+          await api.updateTcpTunnel(editingTunnel.id, payload);
+          addToast({ type: "success", message: "隧道已更新" });
+        } else {
+          await api.createTcpTunnel(payload);
+          addToast({ type: "success", message: "隧道已创建" });
+        }
       } else {
-        await api.createTcpTunnel(payload);
-        addToast({ type: "success", message: "隧道已创建" });
+        const setPayload = {
+          name: payload.name,
+          enabled: payload.enabled,
+          remote_bind_addr: payload.remote_bind_addr,
+          ssh_host: payload.ssh_host,
+          ssh_port: payload.ssh_port,
+          username: payload.username,
+          auth: payload.auth,
+          strict_host_key_checking: payload.strict_host_key_checking,
+          host_key_fingerprint: payload.host_key_fingerprint,
+          scan_interval_ms: payload.scan_interval_ms,
+          debounce_ms: payload.debounce_ms,
+          exclude_ports: payload.exclude_ports,
+          connect_timeout_ms: payload.connect_timeout_ms,
+        };
+        if (editingTunnel) {
+          await api.updateTcpTunnelSet(editingTunnel.id, setPayload);
+          addToast({ type: "success", message: "隧道已更新" });
+        } else {
+          await api.createTcpTunnelSet(setPayload);
+          addToast({ type: "success", message: "隧道已创建" });
+        }
       }
       setShowModal(false);
       setEditingTunnel(null);
@@ -220,10 +280,18 @@ export default function TunnelsPage() {
     const isEnabled = tunnel.enabled ?? tunnel.status.state === "forwarding";
     setLoading(true, isEnabled ? "stop" : "start");
     try {
-      if (isEnabled) {
-        await api.stopTcpTunnel(tunnel.id);
+      if (tunnel.mode === "full") {
+        if (isEnabled) {
+          await api.stopTcpTunnelSet(tunnel.id);
+        } else {
+          await api.startTcpTunnelSet(tunnel.id);
+        }
       } else {
-        await api.startTcpTunnel(tunnel.id);
+        if (isEnabled) {
+          await api.stopTcpTunnel(tunnel.id);
+        } else {
+          await api.startTcpTunnel(tunnel.id);
+        }
       }
       loadTunnels();
     } catch (error) {
@@ -236,7 +304,11 @@ export default function TunnelsPage() {
   const handleRestart = async (tunnel: TcpTunnel) => {
     setLoading(true, "restart");
     try {
-      await api.restartTcpTunnel(tunnel.id);
+      if (tunnel.mode === "full") {
+        await api.restartTcpTunnelSet(tunnel.id);
+      } else {
+        await api.restartTcpTunnel(tunnel.id);
+      }
       addToast({ type: "success", message: "隧道已重启" });
       loadTunnels();
     } catch (error) {
@@ -249,7 +321,9 @@ export default function TunnelsPage() {
   const handleTest = async (tunnel: TcpTunnel) => {
     setTestingTunnelId(tunnel.id);
     try {
-      const result = await api.testTcpTunnel(tunnel.id);
+      const result = tunnel.mode === "full"
+        ? await api.testTcpTunnelSet(tunnel.id)
+        : await api.testTcpTunnel(tunnel.id);
       setTunnelTestResults(prev => ({
         ...prev,
         [tunnel.id]: { ok: result.ok, latency_ms: result.latency_ms }
@@ -270,7 +344,11 @@ export default function TunnelsPage() {
   const handleCopy = async (tunnel: TcpTunnel) => {
     setLoading(true, "copy");
     try {
-      await api.copyTcpTunnel(tunnel.id);
+      if (tunnel.mode === "full") {
+        await api.copyTcpTunnelSet(tunnel.id);
+      } else {
+        await api.copyTcpTunnel(tunnel.id);
+      }
       addToast({ type: "success", message: "隧道已复制" });
       loadTunnels();
     } catch (error) {
@@ -285,7 +363,12 @@ export default function TunnelsPage() {
 
     setLoading(true, "delete");
     try {
-      await api.deleteTcpTunnel(id);
+      const tunnel = tcpTunnels.find((t) => t.id === id);
+      if (tunnel?.mode === "full") {
+        await api.deleteTcpTunnelSet(id);
+      } else {
+        await api.deleteTcpTunnel(id);
+      }
       addToast({ type: "success", message: "隧道已删除" });
       loadTunnels();
     } catch (error) {
@@ -295,36 +378,72 @@ export default function TunnelsPage() {
     }
   };
 
-  const openModal = (tunnel?: TcpTunnel) => {
-    void loadHosts();
+  const openModal = async (tunnel?: TcpTunnel) => {
+    const hostList = await loadHosts();
     if (tunnel) {
-      const matchedHost = availableHosts.find(
-        (host) =>
-          host.host === tunnel.ssh_host &&
-          host.port === tunnel.ssh_port &&
-          host.username === tunnel.username
-      );
-      setEditingTunnel(tunnel);
-      setFormData({
-        name: tunnel.name || "",
-        enabled: tunnel.enabled ?? true,
-        mode: tunnel.mode,
-        host_id: matchedHost?.id || "",
-        local_addr: tunnel.local_addr || "127.0.0.1",
-        local_port: tunnel.local_port?.toString() || "22",
-        remote_bind_addr: tunnel.remote_bind_addr || "127.0.0.1",
-        remote_port: tunnel.remote_port?.toString() || "",
-        allow_public_bind: !!tunnel.allow_public_bind,
-        strict_host_key_checking: !!tunnel.strict_host_key_checking,
-        host_key_fingerprint: tunnel.host_key_fingerprint || "",
-        connect_timeout_ms: tunnel.connect_timeout_ms?.toString() || "",
-        keepalive_interval_ms: tunnel.keepalive_interval_ms?.toString() || "",
-        backoff_base_ms: tunnel.backoff_base_ms?.toString() || "",
-        backoff_max_ms: tunnel.backoff_max_ms?.toString() || "",
-        scan_interval_ms: tunnel.scan_interval_ms?.toString() || "",
-        debounce_ms: tunnel.debounce_ms?.toString() || "",
-        exclude_ports_text: tunnel.exclude_ports?.join(", ") || "",
-      });
+      if (tunnel.mode === "full") {
+        try {
+          const detail = await api.getTcpTunnelSet(tunnel.id);
+          const matchedHost = hostList.find(
+            (host) =>
+              host.host === detail.ssh_host &&
+              host.port === detail.ssh_port &&
+              host.username === detail.username
+          );
+          setEditingTunnel({ ...tunnel, mode: "full" });
+          setFormData({
+            name: detail.name || "",
+            enabled: detail.enabled ?? true,
+            mode: "full",
+            host_id: matchedHost?.id || "",
+            local_addr: "127.0.0.1",
+            local_port: "22",
+            remote_bind_addr: detail.remote_bind_addr || "127.0.0.1",
+            remote_port: "",
+            allow_public_bind: detail.remote_bind_addr === "0.0.0.0",
+            strict_host_key_checking: !!detail.strict_host_key_checking,
+            host_key_fingerprint: detail.host_key_fingerprint || "",
+            connect_timeout_ms: detail.connect_timeout_ms?.toString() || "",
+            keepalive_interval_ms: "",
+            backoff_base_ms: "",
+            backoff_max_ms: "",
+            scan_interval_ms: detail.scan_interval_ms?.toString() || "",
+            debounce_ms: detail.debounce_ms?.toString() || "",
+            exclude_ports_text: detail.exclude_ports?.join(", ") || "",
+          });
+        } catch (error) {
+          addToast({ type: "error", message: error instanceof Error ? error.message : "加载失败" });
+          return;
+        }
+      } else {
+        const matchedHost = hostList.find(
+          (host) =>
+            host.host === tunnel.ssh_host &&
+            host.port === tunnel.ssh_port &&
+            host.username === tunnel.username
+        );
+        setEditingTunnel(tunnel);
+        setFormData({
+          name: tunnel.name || "",
+          enabled: tunnel.enabled ?? true,
+          mode: tunnel.mode,
+          host_id: matchedHost?.id || "",
+          local_addr: tunnel.local_addr || "127.0.0.1",
+          local_port: tunnel.local_port?.toString() || "22",
+          remote_bind_addr: tunnel.remote_bind_addr || "127.0.0.1",
+          remote_port: tunnel.remote_port?.toString() || "",
+          allow_public_bind: !!tunnel.allow_public_bind,
+          strict_host_key_checking: !!tunnel.strict_host_key_checking,
+          host_key_fingerprint: tunnel.host_key_fingerprint || "",
+          connect_timeout_ms: tunnel.connect_timeout_ms?.toString() || "",
+          keepalive_interval_ms: tunnel.keepalive_interval_ms?.toString() || "",
+          backoff_base_ms: tunnel.backoff_base_ms?.toString() || "",
+          backoff_max_ms: tunnel.backoff_max_ms?.toString() || "",
+          scan_interval_ms: tunnel.scan_interval_ms?.toString() || "",
+          debounce_ms: tunnel.debounce_ms?.toString() || "",
+          exclude_ports_text: tunnel.exclude_ports?.join(", ") || "",
+        });
+      }
     } else {
       setEditingTunnel(null);
       setFormData({ ...defaultForm, mode: viewMode });
@@ -355,6 +474,22 @@ export default function TunnelsPage() {
 
   return (
     <div className="space-y-6">
+      {(loadErrors.single || loadErrors.full) && (
+        <Card className="border border-amber-200 bg-amber-50 p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm text-amber-700 font-semibold mb-1">部分数据加载失败</p>
+              <div className="text-sm text-amber-700">
+                {loadErrors.single && <div>{loadErrors.single}</div>}
+                {loadErrors.full && <div>{loadErrors.full}</div>}
+              </div>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => void loadTunnels()}>
+              重试
+            </Button>
+          </div>
+        </Card>
+      )}
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -380,7 +515,7 @@ export default function TunnelsPage() {
               全穿透
             </Button>
           </div>
-          <Button onClick={() => openModal()}>
+          <Button onClick={() => void openModal()}>
             <Plus className="w-4 h-4" />
             添加隧道
           </Button>
@@ -472,7 +607,7 @@ export default function TunnelsPage() {
                         : tunnelTestResults[tunnel.id].ok ? "成功" : "失败"}
                     </Badge>
                   )}
-                  <Button variant="ghost" size="sm" onClick={() => openModal(tunnel)}>
+                  <Button variant="ghost" size="sm" onClick={() => void openModal(tunnel)}>
                     <Pencil className="w-4 h-4" />
                     编辑
                   </Button>

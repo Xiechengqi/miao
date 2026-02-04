@@ -36,6 +36,8 @@ export default function HostsPage() {
   const [pendingDeleteHost, setPendingDeleteHost] = useState<Host | null>(null);
   const [hostTestResults, setHostTestResults] = useState<Record<string, HostTestResult>>({});
   const [defaultPrivateKeyPath, setDefaultPrivateKeyPath] = useState<string | null>(null);
+  const [autoFilledKeyPath, setAutoFilledKeyPath] = useState(false);
+  const [defaultKeyPathLoaded, setDefaultKeyPathLoaded] = useState(false);
 
   const [showModal, setShowModal] = useState(false);
   const [editingHostId, setEditingHostId] = useState<string | null>(null);
@@ -46,7 +48,13 @@ export default function HostsPage() {
     if (!formData.host.trim() || !formData.username.trim()) return false;
     const port = Number(formData.port);
     if (!port || port < 1 || port > 65535) return false;
-    return true;
+    if (formData.auth_type === "password") {
+      return formData.password.trim().length > 0;
+    }
+    if (formData.auth_type === "private_key_path") {
+      return formData.private_key_path.trim().length > 0;
+    }
+    return false;
   }, [formData]);
 
   const safeGetItem = <T,>(key: string, fallback: T): T => {
@@ -69,7 +77,8 @@ export default function HostsPage() {
       .then((path) => {
         if (path) setDefaultPrivateKeyPath(path);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setDefaultKeyPathLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -88,6 +97,7 @@ export default function HostsPage() {
       if (prev.private_key_path.trim() !== "") return prev;
       return { ...prev, private_key_path: defaultPrivateKeyPath };
     });
+    setAutoFilledKeyPath(true);
   }, [defaultPrivateKeyPath, formData.auth_type, formData.private_key_path, showModal]);
 
   useEffect(() => {
@@ -126,21 +136,29 @@ export default function HostsPage() {
 
   const resetForm = () => {
     setFormData(defaultHostForm);
+    setAutoFilledKeyPath(false);
   };
 
-  const openModal = (host?: Host) => {
+  const openModal = async (host?: Host) => {
     if (host) {
-      setEditingHostId(host.id);
-      setFormData({
-        name: host.name || "",
-        host: host.host || "",
-        port: host.port?.toString() || "22",
-        username: host.username || "root",
-        auth_type: host.auth_type || "password",
-        password: "",
-        private_key_path: host.private_key_path || "",
-        private_key_passphrase: "",
-      });
+      try {
+        const detail = await api.getHost(host.id);
+        setEditingHostId(detail.id);
+        setFormData({
+          name: detail.name || "",
+          host: detail.host || "",
+          port: detail.port?.toString() || "22",
+          username: detail.username || "root",
+          auth_type: detail.auth_type || "password",
+          password: detail.password || "",
+          private_key_path: detail.private_key_path || "",
+          private_key_passphrase: detail.private_key_passphrase || "",
+        });
+        setAutoFilledKeyPath(false);
+      } catch (error) {
+        addToast({ type: "error", message: error instanceof Error ? error.message : "获取主机失败" });
+        return;
+      }
     } else {
       setEditingHostId(null);
       resetForm();
@@ -274,7 +292,7 @@ export default function HostsPage() {
             <h2 className="text-2xl font-bold text-slate-900">主机管理</h2>
             <p className="text-slate-500 text-sm mt-1">集中管理 SSH 主机认证配置</p>
           </div>
-          <Button onClick={() => openModal()}>
+          <Button onClick={() => void openModal()}>
             <Plus className="w-4 h-4" />
             添加主机
           </Button>
@@ -325,7 +343,7 @@ export default function HostsPage() {
                       <Zap className="w-4 h-4" />
                       测试
                     </Button>
-                    <Button variant="ghost" size="sm" onClick={() => openModal(host)}>
+                    <Button variant="ghost" size="sm" onClick={() => void openModal(host)}>
                       <Pencil className="w-4 h-4" />
                       编辑
                     </Button>
@@ -397,7 +415,7 @@ export default function HostsPage() {
             <Input
               label="密码"
               type="password"
-              placeholder={editingHostId ? "留空保持不变" : "留空使用 ~/.ssh 密钥"}
+              placeholder="请输入密码"
               value={formData.password}
               onChange={(e) => setFormData({ ...formData, password: e.target.value })}
             />
@@ -409,12 +427,28 @@ export default function HostsPage() {
                 label="私钥路径"
                 placeholder="/root/.ssh/id_ed25519"
                 value={formData.private_key_path}
-                onChange={(e) => setFormData({ ...formData, private_key_path: e.target.value })}
+                onChange={(e) => {
+                  setFormData({ ...formData, private_key_path: e.target.value });
+                  setAutoFilledKeyPath(false);
+                }}
               />
+              {autoFilledKeyPath && (
+                <p className="text-xs text-amber-700">
+                  已自动填充默认私钥路径：{defaultPrivateKeyPath}
+                </p>
+              )}
+              {!autoFilledKeyPath
+                && defaultKeyPathLoaded
+                && !defaultPrivateKeyPath
+                && formData.private_key_path.trim().length === 0 && (
+                  <p className="text-xs text-red-600">
+                    未检测到默认私钥路径，请手动填写。
+                  </p>
+                )}
               <Input
                 label="私钥口令（可选）"
                 type="password"
-                placeholder={editingHostId ? "留空保持不变" : "无口令留空"}
+                placeholder="无口令留空"
                 value={formData.private_key_passphrase}
                 onChange={(e) => setFormData({ ...formData, private_key_passphrase: e.target.value })}
               />

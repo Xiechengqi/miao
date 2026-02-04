@@ -278,7 +278,7 @@ export default function SyncPage() {
       const timezone = syncForm.schedule_timezone.trim() || "Asia/Shanghai";
       const schedule = syncForm.schedule_enabled
         ? { enabled: true, cron, timezone }
-        : { enabled: false };
+        : null;
 
       const selectedHost = availableHosts.find((host) => host.id === syncForm.host_id);
       if (!selectedHost) {

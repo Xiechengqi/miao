@@ -480,6 +480,91 @@ class ApiClient {
     return { supported, items };
   }
 
+  async getTcpTunnelSets(): Promise<{ supported: boolean; items: TcpTunnel[] }> {
+    const res = await this.fetch<{
+      data: {
+        supported: boolean;
+        items: Array<{
+          id: string;
+          name?: string | null;
+          enabled: boolean;
+          remote_bind_addr: string;
+          ssh_host: string;
+          ssh_port: number;
+          username: string;
+          scan_interval_ms: number;
+          debounce_ms: number;
+          exclude_ports: number[];
+          connect_timeout_ms: number;
+          status: TcpTunnel["status"];
+        }>;
+      };
+    }>("/api/tcp-tunnel-sets");
+
+    const items = res.data.items.map((item) => ({
+      id: item.id,
+      name: item.name ?? undefined,
+      mode: "full" as const,
+      enabled: item.enabled,
+      local_addr: "127.0.0.1",
+      local_port: 0,
+      remote_bind_addr: item.remote_bind_addr,
+      remote_port: undefined,
+      ssh_host: item.ssh_host,
+      ssh_port: item.ssh_port,
+      username: item.username,
+      auth_type: undefined,
+      allow_public_bind: item.remote_bind_addr === "0.0.0.0",
+      connect_timeout_ms: item.connect_timeout_ms,
+      scan_interval_ms: item.scan_interval_ms,
+      debounce_ms: item.debounce_ms,
+      exclude_ports: item.exclude_ports,
+      status: item.status,
+    }));
+
+    const supported = res.data.supported ?? true;
+    return { supported, items };
+  }
+
+  async getTcpTunnelSet(id: string): Promise<{
+    id: string;
+    name?: string | null;
+    enabled: boolean;
+    remote_bind_addr: string;
+    ssh_host: string;
+    ssh_port: number;
+    username: string;
+    auth: { type: "password"; password?: string } | { type: "private_key_path"; path: string };
+    strict_host_key_checking: boolean;
+    host_key_fingerprint: string;
+    exclude_ports: number[];
+    scan_interval_ms: number;
+    debounce_ms: number;
+    connect_timeout_ms: number;
+    start_batch_size: number;
+    start_batch_interval_ms: number;
+  }> {
+    const res = await this.fetch<{ data: {
+      id: string;
+      name?: string | null;
+      enabled: boolean;
+      remote_bind_addr: string;
+      ssh_host: string;
+      ssh_port: number;
+      username: string;
+      auth: { type: "password"; password?: string } | { type: "private_key_path"; path: string };
+      strict_host_key_checking: boolean;
+      host_key_fingerprint: string;
+      exclude_ports: number[];
+      scan_interval_ms: number;
+      debounce_ms: number;
+      connect_timeout_ms: number;
+      start_batch_size: number;
+      start_batch_interval_ms: number;
+    } }>(`/api/tcp-tunnel-sets/${id}`);
+    return res.data;
+  }
+
   async createTcpTunnel(config: Record<string, unknown>): Promise<TcpTunnel> {
     const res = await this.fetch<{ data: TcpTunnel }>("/api/tcp-tunnels", {
       method: "POST",
@@ -527,6 +612,56 @@ class ApiClient {
 
   async copyTcpTunnel(id: string): Promise<void> {
     await this.fetch(`/api/tcp-tunnels/${id}/copy`, {
+      method: "POST",
+    });
+  }
+
+  async createTcpTunnelSet(config: Record<string, unknown>): Promise<void> {
+    await this.fetch("/api/tcp-tunnel-sets", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async updateTcpTunnelSet(id: string, config: Record<string, unknown>): Promise<void> {
+    await this.fetch(`/api/tcp-tunnel-sets/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async deleteTcpTunnelSet(id: string): Promise<void> {
+    await this.fetch(`/api/tcp-tunnel-sets/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  async restartTcpTunnelSet(id: string): Promise<void> {
+    await this.fetch(`/api/tcp-tunnel-sets/${id}/restart`, {
+      method: "POST",
+    });
+  }
+
+  async startTcpTunnelSet(id: string): Promise<void> {
+    await this.fetch(`/api/tcp-tunnel-sets/${id}/start`, {
+      method: "POST",
+    });
+  }
+
+  async stopTcpTunnelSet(id: string): Promise<void> {
+    await this.fetch(`/api/tcp-tunnel-sets/${id}/stop`, {
+      method: "POST",
+    });
+  }
+
+  async testTcpTunnelSet(id: string): Promise<{ ok: boolean; latency_ms?: number }> {
+    return this.fetch(`/api/tcp-tunnel-sets/${id}/test`, {
+      method: "POST",
+    });
+  }
+
+  async copyTcpTunnelSet(id: string): Promise<void> {
+    await this.fetch(`/api/tcp-tunnel-sets/${id}/copy`, {
       method: "POST",
     });
   }
@@ -716,8 +851,8 @@ class ApiClient {
   }
 
   async getHost(id: string): Promise<Host> {
-    const res = await this.fetch<{ data: Host }>(`/api/v1/hosts/${id}`);
-    return res.data;
+    const res = await this.fetch<{ data: { host: Host } }>(`/api/v1/hosts/${id}`);
+    return res.data.host;
   }
 
   async createHost(config: Omit<Host, "id">): Promise<Host> {

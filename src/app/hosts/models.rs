@@ -159,7 +159,11 @@ pub struct HostResponse {
     pub port: u16,
     pub username: String,
     pub auth_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     pub private_key_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_passphrase: Option<String>,
     pub group_id: Option<String>,
     pub group_name: Option<String>,
     pub tags: Vec<String>,

@@ -107,7 +107,9 @@ pub async fn get_hosts(
             port: h.port,
             username: h.username.clone(),
             auth_type: h.auth_type(),
+            password: None,
             private_key_path: h.private_key_path(),
+            private_key_passphrase: None,
             group_id: h.group_id.clone(),
             group_name: h.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
             tags: h.tags.clone(),
@@ -159,7 +161,15 @@ pub async fn get_host(
             port: host.port,
             username: host.username.clone(),
             auth_type: host.auth_type(),
+            password: match &host.auth {
+                HostAuth::Password { password } => password.clone(),
+                _ => None,
+            },
             private_key_path: host.private_key_path(),
+            private_key_passphrase: match &host.auth {
+                HostAuth::PrivateKeyPath { passphrase, .. } => passphrase.clone(),
+                _ => None,
+            },
             group_id: host.group_id.clone(),
             group_name: host.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
             tags: host.tags.clone(),
@@ -196,14 +206,45 @@ pub async fn create_host(
     let now = Utc::now().timestamp();
     let id = Uuid::new_v4().to_string();
 
-    let auth = if req.auth_type == "private_key_path" {
-        HostAuth::PrivateKeyPath {
-            path: req.private_key_path.unwrap_or_default(),
-            passphrase: req.private_key_passphrase,
+    let auth = match req.auth_type.as_str() {
+        "private_key_path" => {
+            let path = req
+                .private_key_path
+                .map(|p| p.trim().to_string())
+                .unwrap_or_default();
+            let resolved = if path.trim().is_empty() {
+                crate::default_private_key_path().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"success": false, "error": "Private key path is required"})),
+                    )
+                })?
+            } else {
+                path
+            };
+            HostAuth::PrivateKeyPath {
+                path: resolved,
+                passphrase: req
+                    .private_key_passphrase
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty()),
+            }
         }
-    } else {
-        HostAuth::Password {
-            password: req.password,
+        "password" => {
+            let password = req.password.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+            if password.is_none() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"success": false, "error": "Password is required"})),
+                ));
+            }
+            HostAuth::Password { password }
+        }
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"success": false, "error": format!("Invalid auth_type: {}", other)})),
+            ));
         }
     };
 
@@ -247,7 +288,15 @@ pub async fn create_host(
         port: host.port,
         username: host.username.clone(),
         auth_type: host.auth_type(),
+        password: match &host.auth {
+            HostAuth::Password { password } => password.clone(),
+            _ => None,
+        },
         private_key_path: host.private_key_path(),
+        private_key_passphrase: match &host.auth {
+            HostAuth::PrivateKeyPath { passphrase, .. } => passphrase.clone(),
+            _ => None,
+        },
         group_id: host.group_id.clone(),
         group_name: host.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
         tags: host.tags.clone(),
@@ -280,13 +329,60 @@ pub async fn update_host(
         let existing = &config.hosts[pos];
         let now = Utc::now().timestamp();
 
+        let auth_type = req.auth_type.clone().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"success": false, "error": "auth_type is required"})),
+            )
+        })?;
+
+        let auth = match auth_type.as_str() {
+            "password" => {
+                let password = req.password.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+                if password.is_none() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"success": false, "error": "Password is required"})),
+                    ));
+                }
+                crate::HostAuth::Password { password }
+            }
+            "private_key_path" => {
+                let path = req
+                    .private_key_path
+                    .map(|p| p.trim().to_string())
+                    .unwrap_or_default();
+                let resolved = if path.trim().is_empty() {
+                    crate::default_private_key_path().ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"success": false, "error": "Private key path is required"})),
+                        )
+                    })?
+                } else {
+                    path
+                };
+                let passphrase = req
+                    .private_key_passphrase
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty());
+                crate::HostAuth::PrivateKeyPath { path: resolved, passphrase }
+            }
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"success": false, "error": format!("Invalid auth_type: {}", other)})),
+                ));
+            }
+        };
+
         let host = crate::HostConfig {
             id: id.to_string(),
             name: req.name.or(existing.name.clone()),
             host: req.host.unwrap_or_else(|| existing.host.clone()),
             port: req.port.unwrap_or(existing.port),
             username: req.username.unwrap_or_else(|| existing.username.clone()),
-            auth: existing.auth.clone(),
+            auth,
             group_id: req.group_id.map(|id| id.to_string()).or(existing.group_id.clone()),
             tags: req.tags.unwrap_or_else(|| existing.tags.clone()),
             description: req.description.or(existing.description.clone()),
@@ -320,7 +416,15 @@ pub async fn update_host(
         port: updated.port,
         username: updated.username.clone(),
         auth_type: updated.auth_type(),
+        password: match &updated.auth {
+            HostAuth::Password { password } => password.clone(),
+            _ => None,
+        },
         private_key_path: updated.private_key_path(),
+        private_key_passphrase: match &updated.auth {
+            HostAuth::PrivateKeyPath { passphrase, .. } => passphrase.clone(),
+            _ => None,
+        },
         group_id: updated.group_id.clone(),
         group_name: updated.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
         tags: updated.tags.clone(),

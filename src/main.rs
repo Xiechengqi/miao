@@ -614,32 +614,91 @@ fn resolve_private_key_path(path: &str) -> Result<String, String> {
 }
 
 async fn test_host_connection(cfg: &HostConfig) -> Result<(), String> {
-    let mut cmd = tokio::process::Command::new("ssh");
-    cmd.arg("-o").arg("BatchMode=yes")
-       .arg("-o").arg("ConnectTimeout=5")
-       .arg("-o").arg("StrictHostKeyChecking=no")
-       .arg("-p").arg(cfg.port.to_string());
+    use russh::client;
+    use russh::keys::key::PrivateKeyWithHashAlg;
+    use russh::keys::load_secret_key;
+    use std::borrow::Cow;
 
-    match &cfg.auth {
-        HostAuth::PrivateKeyPath { path, .. } => {
-            let resolved_path = resolve_private_key_path(path)?;
-            cmd.arg("-i").arg(resolved_path);
+    struct HostClientHandler;
+    impl russh::client::Handler for HostClientHandler {
+        type Error = russh::Error;
+
+        async fn check_server_key(
+            &mut self,
+            _server_public_key: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
         }
-        _ => {}
     }
 
-    cmd.arg(format!("{}@{}", cfg.username, cfg.host))
-       .arg("echo")
-       .arg("ok");
+    let handler = HostClientHandler;
+    let client_cfg = client::Config {
+        nodelay: true,
+        inactivity_timeout: None,
+        preferred: russh::Preferred {
+            kex: Cow::Owned(vec![
+                russh::kex::CURVE25519_PRE_RFC_8731,
+                russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+            ]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client_cfg = Arc::new(client_cfg);
+    let addr = (cfg.host.as_str(), cfg.port);
+    let connect_timeout = Duration::from_millis(cfg.connection_timeout_ms.max(1000).min(60000));
 
-    let output = cmd.output().await.map_err(|e| format!("Failed to run SSH: {}", e))?;
+    let mut session = tokio::time::timeout(
+        connect_timeout,
+        client::connect(client_cfg, addr, handler),
+    )
+    .await
+    .map_err(|_| "connect timeout".to_string())?
+    .map_err(|e| format!("{e:?}"))?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Connection failed: {}", stderr.trim()))
+    let auth = match &cfg.auth {
+        HostAuth::Password { password } => {
+            let Some(pwd) = password.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) else {
+                return Err("password is required".to_string());
+            };
+            tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_password(cfg.username.clone(), pwd.to_string()),
+            )
+            .await
+            .map_err(|_| "authentication timeout".to_string())?
+            .map_err(|e| format!("{e:?}"))?
+        }
+        HostAuth::PrivateKeyPath { path, passphrase } => {
+            let resolved_path = resolve_private_key_path(path)?;
+            let key = load_secret_key(&resolved_path, passphrase.as_deref())
+                .map_err(|e| format!("{e:?}"))?;
+            let rsa_hash = tokio::time::timeout(connect_timeout, session.best_supported_rsa_hash())
+                .await
+                .map_err(|_| "authentication timeout".to_string())?
+                .map_err(|e| format!("{e:?}"))?
+                .flatten();
+            tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_publickey(
+                    cfg.username.clone(),
+                    PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash),
+                ),
+            )
+            .await
+            .map_err(|_| "authentication timeout".to_string())?
+            .map_err(|e| format!("{e:?}"))?
+        }
+    };
+
+    if !auth.success() {
+        return Err("authentication failed".to_string());
     }
+
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "test done", "en")
+        .await;
+    Ok(())
 }
 
 /// Ping host 3 times and return average latency in ms
@@ -891,6 +950,28 @@ struct TcpTunnelSaveResponse {
 struct TcpTunnelListResponse {
     supported: bool,
     items: Vec<TcpTunnelItem>,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelSetListItem {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    remote_bind_addr: String,
+    ssh_host: String,
+    ssh_port: u16,
+    username: String,
+    scan_interval_ms: u64,
+    debounce_ms: u64,
+    exclude_ports: Vec<u16>,
+    connect_timeout_ms: u64,
+    status: tcp_tunnel::TunnelRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct TcpTunnelSetListResponse {
+    supported: bool,
+    items: Vec<TcpTunnelSetListItem>,
 }
 
 #[derive(Serialize)]
@@ -5282,22 +5363,45 @@ async fn add_node(
                         node.insert("user".to_string(), serde_json::Value::String(user));
                     }
                 }
-                // Support both password and private key authentication
+                // Support both password and private key authentication (must provide one)
+                let mut has_auth = false;
                 if let Some(ref key_path) = req.private_key_path {
-                    if !key_path.is_empty() {
-                        if let Ok(resolved) = resolve_private_key_path(key_path) {
-                            node.insert("private_key_path".to_string(), serde_json::Value::String(resolved));
+                    let resolved = if key_path.trim().is_empty() {
+                        resolve_private_key_path(key_path)
+                    } else {
+                        resolve_private_key_path(key_path)
+                    };
+                    match resolved {
+                        Ok(path) => {
+                            node.insert("private_key_path".to_string(), serde_json::Value::String(path));
+                            has_auth = true;
                         }
-                        if let Some(ref passphrase) = req.private_key_passphrase {
-                            if !passphrase.is_empty() {
-                                node.insert("private_key_passphrase".to_string(), serde_json::Value::String(passphrase.clone()));
-                            }
+                        Err(e) => {
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                Json(ApiResponse::error(e)),
+                            ));
                         }
                     }
-                } else if let Some(ref pwd) = req.password {
-                    if !pwd.is_empty() {
-                        node.insert("password".to_string(), serde_json::Value::String(pwd.clone()));
+                    if let Some(ref passphrase) = req.private_key_passphrase {
+                        if !passphrase.is_empty() {
+                            node.insert("private_key_passphrase".to_string(), serde_json::Value::String(passphrase.clone()));
+                        }
                     }
+                }
+                if !has_auth {
+                    if let Some(ref pwd) = req.password {
+                        if !pwd.is_empty() {
+                            node.insert("password".to_string(), serde_json::Value::String(pwd.clone()));
+                            has_auth = true;
+                        }
+                    }
+                }
+                if !has_auth {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::error("SSH node requires password or private_key_path")),
+                    ));
                 }
                 serde_json::to_string(&serde_json::Value::Object(node))
             }
@@ -5932,7 +6036,7 @@ fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
 fn redact_sync_auth(auth: &TcpTunnelAuth) -> SyncAuthPublic {
     match auth {
         TcpTunnelAuth::Password { password } => SyncAuthPublic::Password {
-            password: password.clone(),
+            password: if password.is_empty() { "".to_string() } else { "******".to_string() },
         },
         TcpTunnelAuth::PrivateKeyPath { path, .. } => SyncAuthPublic::PrivateKeyPath {
             path: path.clone(),
@@ -6666,6 +6770,52 @@ async fn get_tcp_tunnel_overview(
     Json(ApiResponse::success(
         "TCP tunnel overview",
         TcpTunnelOverviewResponse { supported, items },
+    ))
+}
+
+async fn get_tcp_tunnel_sets(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<TcpTunnelSetListResponse>> {
+    let supported = state.tcp_tunnel.supported();
+    let sets = { state.config.lock().await.tcp_tunnel_sets.clone() };
+
+    let mut items: Vec<TcpTunnelSetListItem> = Vec::with_capacity(sets.len());
+    for s in sets {
+        let mut status = tcp_tunnel::TunnelRuntimeStatus::default();
+        let st = state.full_tunnel.get_status(&s.id).await;
+        status.state = if !s.enabled {
+            tcp_tunnel::TunnelState::Stopped
+        } else if st.last_error.is_some() {
+            tcp_tunnel::TunnelState::Error
+        } else {
+            tcp_tunnel::TunnelState::Forwarding
+        };
+        if let Some(e) = st.last_error {
+            status.last_error = Some(tcp_tunnel::TunnelErrorInfo {
+                code: "SCAN_FAILED".to_string(),
+                message: e,
+                at_ms: chrono::Utc::now().timestamp_millis(),
+            });
+        }
+        items.push(TcpTunnelSetListItem {
+            id: s.id,
+            name: s.name,
+            enabled: s.enabled,
+            remote_bind_addr: s.remote_bind_addr,
+            ssh_host: s.ssh_host,
+            ssh_port: s.ssh_port,
+            username: s.username,
+            scan_interval_ms: s.scan_interval_ms,
+            debounce_ms: s.debounce_ms,
+            exclude_ports: s.exclude_ports,
+            connect_timeout_ms: s.connect_timeout_ms,
+            status,
+        });
+    }
+
+    Json(ApiResponse::success(
+        "TCP tunnel sets",
+        TcpTunnelSetListResponse { supported, items },
     ))
 }
 
@@ -7516,15 +7666,6 @@ async fn update_sync(
             (StatusCode::BAD_REQUEST, Json(ApiResponse::error("auth is required")))
         })?;
 
-        match &auth {
-            TcpTunnelAuth::PrivateKeyPath { .. } => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error("sync only supports password auth")),
-                ));
-            }
-            TcpTunnelAuth::Password { .. } => {}
-        }
         let cfg = SyncConfig {
             id: id.clone(),
             name,
@@ -10079,6 +10220,18 @@ async fn auth_middleware(
         }
     }
 
+    // Allow token via query param for websocket endpoints (browser can't set headers)
+    if let Some(query) = req.uri().query() {
+        for part in query.split('&') {
+            if let Some(value) = part.strip_prefix("token=") {
+                let token = value.trim();
+                if !token.is_empty() && verify_token(token).is_ok() {
+                    return Ok(next.run(req).await);
+                }
+            }
+        }
+    }
+
     // 认证失败
     Err(StatusCode::UNAUTHORIZED)
 }
@@ -10515,7 +10668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/tcp-tunnels/bulk/start", post(bulk_start_tcp_tunnels))
         .route("/api/tcp-tunnels/bulk/stop", post(bulk_stop_tcp_tunnels))
         .route("/api/tcp-tunnel/overview", get(get_tcp_tunnel_overview))
-        .route("/api/tcp-tunnel-sets", post(create_tcp_tunnel_set))
+        .route("/api/tcp-tunnel-sets", get(get_tcp_tunnel_sets).post(create_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}", get(get_tcp_tunnel_set).put(update_tcp_tunnel_set).delete(delete_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/start", post(start_tcp_tunnel_set))
         .route("/api/tcp-tunnel-sets/{id}/stop", post(stop_tcp_tunnel_set))

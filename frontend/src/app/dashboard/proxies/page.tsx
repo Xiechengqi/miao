@@ -224,19 +224,31 @@ export default function ProxiesPage() {
   const handleAddHostAsNode = async (host: Host) => {
     setAddingHostId(host.id);
     try {
-      const tag = host.name ? `${host.name} (${host.host})` : host.host;
+      const detail = await api.getHost(host.id);
+      const tag = detail.name ? `${detail.name} (${detail.host})` : detail.host;
       const nodeData: Partial<ManualNode> & { tag: string; node_type: "ssh"; server: string; server_port: number; user: string } = {
         tag,
         node_type: "ssh",
-        server: host.host,
-        server_port: host.port || 22,
-        user: host.username,
+        server: detail.host,
+        server_port: detail.port || 22,
+        user: detail.username,
       };
       // Use private key if available, otherwise use password
-      if (host.auth_type === "private_key_path" && host.private_key_path) {
-        nodeData.private_key_path = host.private_key_path;
+      if (detail.auth_type === "private_key_path") {
+        if (!detail.private_key_path) {
+          addToast({ type: "error", message: "主机缺少私钥路径" });
+          return;
+        }
+        nodeData.private_key_path = detail.private_key_path;
+        if (detail.private_key_passphrase) {
+          nodeData.private_key_passphrase = detail.private_key_passphrase;
+        }
       } else {
-        nodeData.password = host.password || "";
+        if (!detail.password) {
+          addToast({ type: "error", message: "主机缺少密码" });
+          return;
+        }
+        nodeData.password = detail.password;
       }
       await api.createNode(nodeData as ManualNode);
       addToast({

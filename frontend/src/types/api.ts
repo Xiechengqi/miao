@@ -149,6 +149,7 @@ export interface ManualNode {
   user?: string;
   password?: string;
   private_key_path?: string;
+  private_key_passphrase?: string;
   sni?: string;
   cipher?: string;
 }
