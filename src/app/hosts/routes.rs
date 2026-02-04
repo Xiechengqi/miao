@@ -20,7 +20,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         // 主机操作
         .route("/api/v1/hosts/test", post(test_host_config))
         .route("/api/v1/hosts/{id}/test", post(test_host))
-        .route("/api/v1/hosts/batch/test", post(batch_test_hosts))
         .route("/api/v1/hosts/batch/delete", post(batch_delete_hosts))
         // 导入导出
         .route("/api/v1/hosts/import", post(import_hosts))

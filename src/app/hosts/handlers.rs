@@ -437,28 +437,6 @@ pub async fn test_host_config(
     }
 }
 
-/// 批量测试主机
-pub async fn batch_test_hosts(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<BatchTestRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let hosts = { state.config.lock().await.hosts.clone() };
-
-    let results: Vec<HostTestResponse> = req.ids.iter().filter_map(|id| {
-        let host = hosts.iter().find(|h| h.id == id.to_string())?;
-        Some(HostTestResponse {
-            id: host.id.clone(),
-            host: host.host.clone(),
-            ssh_ok: true,
-            ssh_error: None,
-            ping_avg_ms: Some(1.5),
-            timestamp: Utc::now().to_rfc3339(),
-        })
-    }).collect();
-
-    Ok(Json(json!({"success": true, "data": {"results": results}})))
-}
-
 /// 批量删除主机
 pub async fn batch_delete_hosts(
     State(state): State<Arc<AppState>>,

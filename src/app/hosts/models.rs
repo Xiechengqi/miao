@@ -107,13 +107,6 @@ pub struct HostUpdateRequest {
     pub keepalive_interval_ms: Option<u32>,
 }
 
-/// 批量测试请求
-#[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]
-pub struct BatchTestRequest {
-    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
-    pub ids: Vec<Uuid>,
-}
-
 /// 批量删除请求
 #[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]
 pub struct BatchDeleteRequest {
