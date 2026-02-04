@@ -119,10 +119,12 @@ export default function TunnelsPage() {
       ]);
       const items: TcpTunnel[] = [];
       let supported = true;
+      let hasSuccess = false;
 
       if (singleRes.status === "fulfilled") {
         items.push(...singleRes.value.items);
         supported = supported && singleRes.value.supported;
+        hasSuccess = true;
       } else {
         console.error("Failed to load single tunnels:", singleRes.reason);
         setLoadErrors((prev) => ({ ...prev, single: "单穿透加载失败" }));
@@ -131,22 +133,19 @@ export default function TunnelsPage() {
       if (fullRes.status === "fulfilled") {
         items.push(...fullRes.value.items);
         supported = supported && fullRes.value.supported;
+        hasSuccess = true;
       } else {
         console.error("Failed to load full tunnels:", fullRes.reason);
         setLoadErrors((prev) => ({ ...prev, full: "全穿透加载失败" }));
       }
 
-      if (items.length === 0) {
-        setTcpTunnelsSupported(false);
-        return;
-      }
-
       setTcpTunnels(items);
-      setTcpTunnelsSupported(supported);
-      setTcpTunnelsLoaded(true);
+      setTcpTunnelsSupported(hasSuccess ? supported : false);
     } catch (error) {
       console.error("Failed to load tunnels:", error);
       setTcpTunnelsSupported(false);
+    } finally {
+      setTcpTunnelsLoaded(true);
     }
   };
 
