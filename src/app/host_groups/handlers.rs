@@ -88,6 +88,7 @@ pub async fn get_group(
                 port: h.port,
                 username: h.username.clone(),
                 auth_type: h.auth_type(),
+                private_key_path: h.private_key_path(),
                 group_id: h.group_id.clone(),
                 group_name: Some(group.name.clone()),
                 tags: h.tags.clone(),

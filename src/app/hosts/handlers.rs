@@ -320,6 +320,7 @@ pub async fn update_host(
         port: updated.port,
         username: updated.username.clone(),
         auth_type: updated.auth_type(),
+        private_key_path: updated.private_key_path(),
         group_id: updated.group_id.clone(),
         group_name: updated.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
         tags: updated.tags.clone(),
@@ -392,7 +393,7 @@ pub async fn test_host_config(
 
     let auth = match req.auth_type.as_str() {
         "password" => HostAuth::Password {
-            password: req.password.unwrap_or_default(),
+            password: req.password,
         },
         _ => HostAuth::PrivateKeyPath {
             path: req.private_key_path.unwrap_or_default(),
