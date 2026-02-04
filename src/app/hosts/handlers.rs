@@ -379,6 +379,49 @@ pub async fn test_host(
     Ok(Json(json!({"success": true, "message": "Test completed", "data": response})))
 }
 
+/// 测试主机配置（不需要已保存的主机）
+pub async fn test_host_config(
+    Json(req): Json<HostTestConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use crate::{HostConfig, HostAuth, test_host_connection};
+
+    let port = req.port.unwrap_or(22);
+
+    let auth = match req.auth_type.as_str() {
+        "password" => HostAuth::Password {
+            password: req.password.unwrap_or_default(),
+        },
+        _ => HostAuth::PrivateKeyPath {
+            path: req.private_key_path.unwrap_or_default(),
+            passphrase: req.private_key_passphrase,
+        },
+    };
+
+    let cfg = HostConfig {
+        id: String::new(),
+        name: None,
+        host: req.host.clone(),
+        port,
+        username: req.username,
+        auth,
+        group_id: None,
+        tags: vec![],
+        description: None,
+        enabled: true,
+        connection_timeout_ms: 10000,
+        keepalive_interval_ms: 30000,
+        created_at: None,
+        updated_at: None,
+        last_connected_at: None,
+        last_test_result: None,
+    };
+
+    match test_host_connection(&cfg).await {
+        Ok(()) => Ok(Json(json!({"success": true, "message": "Connection successful"}))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": e})))),
+    }
+}
+
 /// 批量测试主机
 pub async fn batch_test_hosts(
     State(state): State<Arc<AppState>>,

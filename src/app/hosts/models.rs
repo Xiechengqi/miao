@@ -141,6 +141,18 @@ pub struct HostListParams {
     pub sort_order: Option<String>,
 }
 
+/// 测试主机配置请求（不需要已保存的主机）
+#[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]
+pub struct HostTestConfigRequest {
+    pub host: String,
+    pub port: Option<u16>,
+    pub username: String,
+    pub auth_type: String,
+    pub password: Option<String>,
+    pub private_key_path: Option<String>,
+    pub private_key_passphrase: Option<String>,
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
