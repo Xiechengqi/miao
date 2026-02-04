@@ -952,15 +952,20 @@ struct TcpTunnelUpsertRequest {
     host_id: Option<String>,
     #[serde(default)]
     local_addr: Option<String>,
-    local_port: u16,
+    #[serde(default)]
+    local_port: Option<u16>,
     #[serde(default)]
     remote_bind_addr: Option<String>,
-    remote_port: u16,
-    ssh_host: String,
+    #[serde(default)]
+    remote_port: Option<u16>,
+    #[serde(default)]
+    ssh_host: Option<String>,
     #[serde(default)]
     ssh_port: Option<u16>,
-    username: String,
-    auth: TcpTunnelAuth,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    auth: Option<TcpTunnelAuth>,
     #[serde(default)]
     strict_host_key_checking: Option<bool>,
     #[serde(default)]
@@ -6169,8 +6174,13 @@ fn normalize_subscriptions(config: &mut Config) -> bool {
 
 fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTunnelConfig, String> {
     let local_addr = req.local_addr.unwrap_or_else(default_local_addr);
+    let local_port = req.local_port.unwrap_or(22);
     let remote_bind_addr = req.remote_bind_addr.unwrap_or_else(default_remote_bind_addr);
+    let remote_port = req.remote_port.unwrap_or(0);
+    let ssh_host = req.ssh_host.ok_or("ssh_host is required")?;
     let ssh_port = req.ssh_port.unwrap_or_else(default_ssh_port);
+    let username = req.username.ok_or("username is required")?;
+    let auth = req.auth.ok_or("auth is required")?;
     let strict_host_key_checking = req.strict_host_key_checking.unwrap_or(true);
     let host_key_fingerprint = req.host_key_fingerprint.unwrap_or_default();
     let allow_public_bind = req.allow_public_bind.unwrap_or(false);
@@ -6181,7 +6191,7 @@ fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTu
     let reconnect_backoff_ms = req.reconnect_backoff_ms.unwrap_or_else(default_tcp_tunnel_backoff);
     let enabled = req.enabled.unwrap_or(false);
 
-    if req.remote_port == 0 {
+    if remote_port == 0 {
         return Err("remote_port must be > 0".to_string());
     }
     if remote_bind_addr == "0.0.0.0" && !allow_public_bind {
@@ -6196,13 +6206,13 @@ fn normalize_tcp_tunnel(req: TcpTunnelUpsertRequest, id: String) -> Result<TcpTu
         name: req.name,
         enabled,
         local_addr,
-        local_port: req.local_port,
+        local_port,
         remote_bind_addr,
-        remote_port: req.remote_port,
-        ssh_host: req.ssh_host,
+        remote_port,
+        ssh_host,
         ssh_port,
-        username: req.username,
-        auth: req.auth,
+        username,
+        auth,
         strict_host_key_checking,
         host_key_fingerprint,
         allow_public_bind,
@@ -6314,10 +6324,10 @@ async fn create_tcp_tunnel(
                 Json(ApiResponse::error(e)),
             )
         })?;
-        req.ssh_host = host.host.clone();
+        req.ssh_host = Some(host.host.clone());
         req.ssh_port = Some(host.port);
-        req.username = host.username.clone();
-        req.auth = auth;
+        req.username = Some(host.username.clone());
+        req.auth = Some(auth);
     }
 
     let cfg = normalize_tcp_tunnel(req, id.clone())
@@ -6417,10 +6427,10 @@ async fn update_tcp_tunnel(
                 Json(ApiResponse::error(e)),
             )
         })?;
-        req.ssh_host = host.host.clone();
+        req.ssh_host = Some(host.host.clone());
         req.ssh_port = Some(host.port);
-        req.username = host.username.clone();
-        req.auth = auth;
+        req.username = Some(host.username.clone());
+        req.auth = Some(auth);
     }
 
     let mut cfg = normalize_tcp_tunnel(req, id.clone())
@@ -7713,10 +7723,10 @@ async fn create_sync(
                 Json(ApiResponse::error(e)),
             )
         })?;
-        req.ssh_host = host.host.clone();
+        req.ssh_host = Some(host.host.clone());
         req.ssh_port = Some(host.port);
-        req.username = host.username.clone();
-        req.auth = auth;
+        req.username = Some(host.username.clone());
+        req.auth = Some(auth);
     }
 
     let local_paths = build_sync_local_paths(&req.local_paths)
@@ -7810,10 +7820,10 @@ async fn update_sync(
                 Json(ApiResponse::error(e)),
             )
         })?;
-        req.ssh_host = host.host.clone();
+        req.ssh_host = Some(host.host.clone());
         req.ssh_port = Some(host.port);
-        req.username = host.username.clone();
-        req.auth = auth;
+        req.username = Some(host.username.clone());
+        req.auth = Some(auth);
     }
 
     let local_paths = build_sync_local_paths(&req.local_paths)
