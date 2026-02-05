@@ -3975,8 +3975,11 @@ struct ConnectivityRequest {
 async fn test_connectivity(
     Json(req): Json<ConnectivityRequest>,
 ) -> Json<ApiResponse<ConnectivityResult>> {
+    // 使用 sing-box 的 mixed 代理（如果可用）或直连
+    // TUN 模式下，系统流量会自动经过代理
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(false)
         .build()
     {
         Ok(c) => c,
@@ -3986,19 +3989,26 @@ async fn test_connectivity(
     };
 
     let start = Instant::now();
-    let result = match client.head(&req.url).send().await {
-        Ok(_) => ConnectivityResult {
-            name: String::new(),
-            url: req.url,
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-            success: true,
-        },
-        Err(_) => ConnectivityResult {
-            name: String::new(),
-            url: req.url,
-            latency_ms: None,
-            success: false,
-        },
+    let result = match client.get(&req.url).send().await {
+        Ok(resp) => {
+            // 检查是否成功（2xx 或 3xx 状态码）
+            let success = resp.status().is_success() || resp.status().is_redirection();
+            ConnectivityResult {
+                name: String::new(),
+                url: req.url,
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+                success,
+            }
+        }
+        Err(e) => {
+            log_info!("Connectivity test failed for {}: {}", req.url, e);
+            ConnectivityResult {
+                name: String::new(),
+                url: req.url,
+                latency_ms: None,
+                success: false,
+            }
+        }
     };
 
     Json(ApiResponse::success("Test completed", result))

@@ -65,6 +65,9 @@ export function useStatus() {
     setLoading(true, "dns-switch");
     try {
       await api.switchDns(name);
+      // 刷新 DNS 状态
+      const data = await api.getDnsStatus();
+      setDnsStatus(data);
       addToast({
         type: "success",
         message: `已切换 DNS 到 ${name}`,
@@ -77,7 +80,7 @@ export function useStatus() {
     } finally {
       setLoading(false);
     }
-  }, [setLoading, addToast]);
+  }, [setLoading, addToast, setDnsStatus]);
 
   return {
     status,
