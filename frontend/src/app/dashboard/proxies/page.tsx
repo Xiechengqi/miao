@@ -327,6 +327,10 @@ export default function ProxiesPage() {
       addToast({ type: "warning", message: "请先启动 sing-box" });
       return;
     }
+    if (status.pending_restart) {
+      addToast({ type: "warning", message: "请先重启 sing-box 使节点生效" });
+      return;
+    }
     setSwitchingNode(true);
     try {
       await api.switchProxy("proxy", nodeTag);
@@ -735,15 +739,15 @@ export default function ProxiesPage() {
                     {isExisting ? (
                       <>
                         {currentNode !== displayName && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleSwitchNode(displayName)}
-                            loading={switchingNode}
-                            disabled={!status.running}
-                          >
-                            使用
-                          </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => handleSwitchNode(displayName)}
+                          loading={switchingNode}
+                          disabled={!status.running || needsRestart}
+                        >
+                          使用
+                        </Button>
                         )}
                         <Button
                           variant="ghost"
