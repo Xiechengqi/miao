@@ -1,11 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
-import { Terminal as TerminalIcon, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil } from "lucide-react";
-import { formatUptime } from "@/lib/utils";
+import { Terminal as TerminalIcon, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, Download } from "lucide-react";
+import { formatUptime, cn } from "@/lib/utils";
+
+// 升级日志类型
+type UpgradeLogEntry = {
+  step: number;
+  total_steps: number;
+  message: string;
+  level: string;
+  progress?: number;
+};
 
 const defaultForm = {
   name: "",
@@ -39,6 +48,14 @@ export default function TerminalsPage() {
   // Gotty 安装状态
   const [gottyInstalled, setGottyInstalled] = useState<boolean | null>(null);
   const [installingGotty, setInstallingGotty] = useState(false);
+
+  // gotty 升级状态
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
+  const [upgradeLogs, setUpgradeLogs] = useState<UpgradeLogEntry[]>([]);
+  const [upgradeProgress, setUpgradeProgress] = useState(0);
+  const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
+  const upgradeLogsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     checkGottyAndLoad();
@@ -195,16 +212,60 @@ export default function TerminalsPage() {
     setShowModal(true);
   };
 
-  const handleUpgradeGotty = async () => {
-    setLoading(true, "upgrade");
-    try {
-      await api.upgradeGotty();
-      addToast({ type: "success", message: "Gotty 已更新" });
-    } catch (error) {
-      addToast({ type: "error", message: error instanceof Error ? error.message : "更新失败" });
-    } finally {
-      setLoading(false);
-    }
+  const handleUpgradeGotty = () => {
+    if (upgrading) return;
+
+    setUpgrading(true);
+    setShowUpgradeModal(true);
+    setUpgradeLogs([]);
+    setUpgradeProgress(0);
+    setUpgradeStatus("running");
+
+    const token = localStorage.getItem("miao_token");
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/binaries/upgrade/gotty/ws?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const entry: UpgradeLogEntry = JSON.parse(event.data);
+        setUpgradeLogs((prev) => [...prev, entry]);
+        setUpgradeProgress(Math.round((entry.step / entry.total_steps) * 100));
+
+        if (entry.level === "error") {
+          setUpgradeStatus("error");
+        }
+
+        setTimeout(() => {
+          if (upgradeLogsRef.current) {
+            upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
+          }
+        }, 50);
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    ws.onclose = () => {
+      setUpgradeLogs((prev) => {
+        const hasError = prev.some((log) => log.level === "error");
+        if (!hasError && prev.length > 0) {
+          setUpgradeStatus("success");
+        }
+        return prev;
+      });
+      setUpgrading(false);
+    };
+
+    ws.onerror = () => {
+      setUpgradeStatus("error");
+      setUpgradeLogs((prev) => [
+        ...prev,
+        { step: 0, total_steps: 5, message: "WebSocket 连接失败", level: "error" },
+      ]);
+      setUpgrading(false);
+    };
   };
 
   const handleInstallGotty = async () => {
@@ -286,9 +347,9 @@ export default function TerminalsPage() {
           )}
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" onClick={handleUpgradeGotty} loading={loading}>
-            <RefreshCw className="w-4 h-4" />
-            更新 Gotty
+          <Button variant="secondary" onClick={handleUpgradeGotty} disabled={upgrading}>
+            <Download className="w-4 h-4" />
+            {upgrading ? "更新中..." : "更新 Gotty"}
           </Button>
           <Button onClick={() => openModal()}>
             <Plus className="w-4 h-4" />
@@ -476,6 +537,69 @@ export default function TerminalsPage() {
               保存
             </Button>
           </div>
+        </div>
+      </Modal>
+
+      {/* gotty 升级弹框 */}
+      <Modal
+        isOpen={showUpgradeModal}
+        onClose={() => {
+          if (upgradeStatus !== "running") {
+            setShowUpgradeModal(false);
+          }
+        }}
+        title="更新 Gotty"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-slate-600">
+              <span>更新进度</span>
+              <span>{upgradeProgress}%</span>
+            </div>
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  "h-full transition-all duration-300 rounded-full",
+                  upgradeStatus === "error" ? "bg-red-500" :
+                  upgradeStatus === "success" ? "bg-emerald-500" : "bg-indigo-500"
+                )}
+                style={{ width: `${upgradeProgress}%` }}
+              />
+            </div>
+          </div>
+
+          <div
+            ref={upgradeLogsRef}
+            className="h-64 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+          >
+            {upgradeLogs.map((log, index) => (
+              <div
+                key={index}
+                className={cn(
+                  "py-0.5",
+                  log.level === "error" && "text-red-400",
+                  log.level === "success" && "text-emerald-400",
+                  log.level === "info" && "text-slate-300",
+                  log.level === "progress" && "text-sky-400"
+                )}
+              >
+                <span className="text-slate-500">[{log.step}/{log.total_steps}]</span>{" "}
+                {log.message}
+                {log.level === "progress" && log.progress != null && (
+                  <span className="text-slate-500"> ({log.progress}%)</span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {upgradeStatus !== "running" && (
+            <div className="flex justify-end">
+              <Button onClick={() => setShowUpgradeModal(false)}>
+                关闭
+              </Button>
+            </div>
+          )}
         </div>
       </Modal>
     </div>

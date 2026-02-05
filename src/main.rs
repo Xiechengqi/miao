@@ -2249,22 +2249,24 @@ async fn install_gotty() -> Json<ApiResponse<serde_json::Value>> {
 
 /// WebSocket endpoint for sing-box upgrade with progress
 async fn upgrade_sing_box_ws(
+    State(state): State<Arc<AppState>>,
     Query(q): Query<WsAuthQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
     if verify_token(&q.token).is_err() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(ws.on_upgrade(handle_sing_box_upgrade_websocket))
+    Ok(ws.on_upgrade(move |socket| handle_sing_box_upgrade_websocket(socket, state)))
 }
 
-async fn handle_sing_box_upgrade_websocket(mut socket: WebSocket) {
+async fn handle_sing_box_upgrade_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     use tokio::sync::mpsc;
 
     let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
 
+    let state_clone = state.clone();
     let mut upgrade_handle = tokio::spawn(async move {
-        perform_sing_box_upgrade(log_tx).await
+        perform_sing_box_upgrade(log_tx, state_clone).await
     });
 
     loop {
@@ -2289,13 +2291,13 @@ async fn handle_sing_box_upgrade_websocket(mut socket: WebSocket) {
     let _ = socket.close().await;
 }
 
-async fn perform_sing_box_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+async fn perform_sing_box_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>, state: Arc<AppState>) {
     use futures_util::StreamExt;
 
     let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
         let entry = UpgradeLogEntry {
             step,
-            total_steps: 5,
+            total_steps: 6,
             message: message.to_string(),
             level: level.to_string(),
             progress,
@@ -2408,7 +2410,32 @@ async fn perform_sing_box_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEn
 
     send_log(3, "解压完成", "success", None).await;
 
-    // Step 4: Replace binary
+    // Step 4: Stop sing-box and replace binary
+    send_log(4, "停止 sing-box...", "info", None).await;
+
+    // Check if sing-box is running and stop it
+    let was_running = {
+        let mut lock = SING_PROCESS.lock().await;
+        if let Some(ref mut proc) = *lock {
+            if proc.child.try_wait().ok().flatten().is_none() {
+                // Process is running, kill it
+                let _ = proc.child.kill().await;
+                let _ = proc.child.wait().await;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    // Clear the process handle
+    if was_running {
+        let mut lock = SING_PROCESS.lock().await;
+        *lock = None;
+        send_log(4, "sing-box 已停止", "success", None).await;
+    }
+
     send_log(4, "替换 sing-box...", "info", None).await;
 
     let sing_box_path = current_dir.join("sing-box");
@@ -2446,8 +2473,201 @@ async fn perform_sing_box_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEn
 
     send_log(4, "替换完成", "success", None).await;
 
+    // Step 5: Restart sing-box if it was running
+    if was_running {
+        send_log(5, "重启 sing-box...", "info", None).await;
+        match start_sing_internal(&state.sing_box_home).await {
+            Ok(_) => {
+                send_log(5, "sing-box 已重启", "success", None).await;
+            }
+            Err(e) => {
+                send_log(5, &format!("重启失败: {}", e), "error", None).await;
+                return;
+            }
+        }
+    } else {
+        send_log(5, "sing-box 未运行，跳过重启", "info", None).await;
+    }
+
+    // Step 6: Done
+    send_log(6, &format!("sing-box 已更新到 v{}", version), "success", None).await;
+}
+
+/// WebSocket endpoint for gotty upgrade with progress
+async fn upgrade_gotty_ws(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(handle_gotty_upgrade_websocket))
+}
+
+async fn handle_gotty_upgrade_websocket(mut socket: WebSocket) {
+    use tokio::sync::mpsc;
+
+    let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
+
+    let mut upgrade_handle = tokio::spawn(async move {
+        perform_gotty_upgrade(log_tx).await
+    });
+
+    loop {
+        tokio::select! {
+            Some(entry) = log_rx.recv() => {
+                let json = serde_json::to_string(&entry).unwrap_or_default();
+                if socket.send(axum::extract::ws::Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = &mut upgrade_handle => {
+                break;
+            }
+        }
+    }
+
+    while let Ok(entry) = log_rx.try_recv() {
+        let json = serde_json::to_string(&entry).unwrap_or_default();
+        let _ = socket.send(axum::extract::ws::Message::Text(json.into())).await;
+    }
+
+    let _ = socket.close().await;
+}
+
+async fn perform_gotty_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    use futures_util::StreamExt;
+
+    let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
+        let entry = UpgradeLogEntry {
+            step,
+            total_steps: 5,
+            message: message.to_string(),
+            level: level.to_string(),
+            progress,
+        };
+        let tx = log_tx.clone();
+        async move { let _ = tx.send(entry).await; }
+    };
+
+    // Step 1: Stop all running terminals
+    send_log(1, "停止所有终端...", "info", None).await;
+
+    {
+        let mut lock = GOTTY_PROCESSES.lock().await;
+        for id in lock.keys().cloned().collect::<Vec<_>>() {
+            drop(lock);
+            let _ = stop_terminal_internal(&id).await;
+            lock = GOTTY_PROCESSES.lock().await;
+        }
+    }
+
+    send_log(1, "终端已停止", "success", None).await;
+
+    // Step 2: Download gotty
+    send_log(2, "下载 gotty...", "info", None).await;
+
+    let download_url = if cfg!(target_arch = "x86_64") {
+        "https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-arm64"
+    } else {
+        send_log(2, "不支持的架构", "error", None).await;
+        return;
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            send_log(2, &format!("创建 HTTP 客户端失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let response = match client.get(download_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            send_log(2, &format!("下载失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    if !response.status().is_success() {
+        send_log(2, &format!("下载失败: HTTP {}", response.status()), "error", None).await;
+        return;
+    }
+
+    let total_size = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(data) => {
+                downloaded += data.len() as u64;
+                bytes.extend_from_slice(&data);
+                if total_size > 0 {
+                    let progress = ((downloaded * 100) / total_size) as u8;
+                    send_log(2, "下载中...", "progress", Some(progress)).await;
+                }
+            }
+            Err(e) => {
+                send_log(2, &format!("下载失败: {}", e), "error", None).await;
+                return;
+            }
+        }
+    }
+
+    send_log(2, "下载完成", "success", None).await;
+
+    // Step 3: Backup current binary
+    send_log(3, "备份当前版本...", "info", None).await;
+
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            send_log(3, &format!("获取目录失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let gotty_path = current_dir.join("gotty");
+    let backup_path = current_dir.join("gotty.bak");
+
+    if gotty_path.exists() {
+        if let Err(e) = fs::copy(&gotty_path, &backup_path) {
+            send_log(3, &format!("备份失败: {}", e), "error", None).await;
+            return;
+        }
+    }
+
+    send_log(3, "备份完成", "success", None).await;
+
+    // Step 4: Replace binary
+    send_log(4, "替换 gotty...", "info", None).await;
+
+    if let Err(e) = fs::write(&gotty_path, &bytes) {
+        let _ = fs::copy(&backup_path, &gotty_path);
+        send_log(4, &format!("替换失败: {}", e), "error", None).await;
+        return;
+    }
+
+    if let Err(e) = fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::copy(&backup_path, &gotty_path);
+        send_log(4, &format!("设置权限失败: {}", e), "error", None).await;
+        return;
+    }
+
+    let _ = fs::remove_file(&backup_path);
+
+    send_log(4, "替换完成", "success", None).await;
+
     // Step 5: Done
-    send_log(5, &format!("sing-box 已更新到 v{}", version), "success", None).await;
+    send_log(5, "gotty 更新完成", "success", None).await;
 }
 
 async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
@@ -10287,6 +10507,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/binaries/install/sing-box", post(install_sing_box))
         .route("/api/binaries/install/gotty", post(install_gotty))
         .route("/api/binaries/upgrade/sing-box/ws", get(upgrade_sing_box_ws))
+        .route("/api/binaries/upgrade/gotty/ws", get(upgrade_gotty_ws))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/status", get(get_system_status))
         .route("/api/system/metrics", get(get_system_metrics))
