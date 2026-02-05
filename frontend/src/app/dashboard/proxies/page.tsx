@@ -680,11 +680,24 @@ export default function ProxiesPage() {
                     <Server className="w-5 h-5 text-slate-400" />
                     <div>
                       <div className="font-medium text-slate-900">{displayName}</div>
-                      <div className="text-xs text-slate-500">
-                        {host.username}@{host.host}:{host.port}
-                        <Badge variant="info" className="ml-2">
+                      <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <span>{host.username}@{host.host}:{host.port}</span>
+                        <Badge variant="info">
                           {host.auth_type === "password" ? "密码" : "私钥"}
                         </Badge>
+                        {hostTestResults[host.id] && (
+                          <Badge variant={hostTestResults[host.id].success ? "success" : "error"}>
+                            {hostTestResults[host.id].latency_ms != null
+                              ? `${Math.round(hostTestResults[host.id].latency_ms!)}ms`
+                              : hostTestResults[host.id].error ?? "失败"}
+                          </Badge>
+                        )}
+                        {isExisting && currentNode === displayName && (
+                          <Badge variant="success" className="gap-1">
+                            <Check className="w-3 h-3" />
+                            使用中
+                          </Badge>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -698,21 +711,9 @@ export default function ProxiesPage() {
                       <Zap className="w-4 h-4" />
                       测试
                     </Button>
-                    {hostTestResults[host.id] && (
-                      <Badge variant={hostTestResults[host.id].success ? "success" : "error"}>
-                        {hostTestResults[host.id].latency_ms != null
-                          ? `${Math.round(hostTestResults[host.id].latency_ms!)}ms`
-                          : hostTestResults[host.id].error ?? "失败"}
-                      </Badge>
-                    )}
                     {isExisting ? (
                       <>
-                        {currentNode === displayName ? (
-                          <Badge variant="success" className="gap-1">
-                            <Check className="w-3 h-3" />
-                            使用中
-                          </Badge>
-                        ) : (
+                        {currentNode !== displayName && (
                           <Button
                             variant="secondary"
                             size="sm"
