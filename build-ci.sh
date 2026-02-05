@@ -54,6 +54,11 @@ rm -rf public
 mkdir -p frontend/public
 cp build-info-temp.json frontend/public/build-info.json
 
+echo "==> Debugging frontend logs route..."
+git rev-parse HEAD
+git ls-files frontend/src/app/dashboard/logs/page.tsx || true
+ls -la frontend/src/app/dashboard
+
 cd frontend
 rm -rf out
 pnpm install --no-frozen-lockfile
