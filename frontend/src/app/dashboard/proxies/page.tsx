@@ -299,15 +299,15 @@ export default function ProxiesPage() {
   const handleTestHost = async (host: Host) => {
     setTestingHostId(host.id);
     try {
-      const result = await api.testSSHConnection(host.id);
+      const result = await api.testPing(host.id);
       setHostTestResults(prev => ({
         ...prev,
-        [host.id]: { success: result.success, latency_ms: result.latency_ms, error: result.error }
+        [host.id]: { success: result.success, latency_ms: result.avg_latency_ms, error: result.error }
       }));
       if (result.success) {
-        addToast({ type: "success", message: `SSH 连接成功 (${result.latency_ms?.toFixed(0) ?? 0}ms)` });
+        addToast({ type: "success", message: `Ping 成功 (${result.avg_latency_ms?.toFixed(0) ?? 0}ms)` });
       } else {
-        addToast({ type: "error", message: result.error || "SSH 连接失败" });
+        addToast({ type: "error", message: result.error || "Ping 失败" });
       }
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "测试失败" });
