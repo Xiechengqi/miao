@@ -690,18 +690,47 @@ async fn test_ssh_connection(cfg: &HostConfig) -> Result<f64, String> {
     Ok(start.elapsed().as_secs_f64() * 1000.0)
 }
 
+/// Get default network interface name from routing table
+async fn get_default_interface() -> Option<String> {
+    let output = tokio::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Parse: "default via x.x.x.x dev eth0 ..."
+    for part in stdout.split_whitespace().collect::<Vec<_>>().windows(2) {
+        if part[0] == "dev" {
+            return Some(part[1].to_string());
+        }
+    }
+    None
+}
+
 /// Ping host 3 times and return average latency in ms, or None if failed
 async fn ping_host(host: &str) -> Option<f64> {
+    // Get default interface to bypass TUN
+    let interface = get_default_interface().await;
+
     let mut latencies = Vec::new();
     for _ in 0..3 {
         let start = std::time::Instant::now();
-        let output = tokio::process::Command::new("ping")
-            .arg("-c").arg("1")
-            .arg("-W").arg("5")
-            .arg(host)
-            .output()
-            .await
-            .ok()?;
+        let mut cmd = tokio::process::Command::new("ping");
+        cmd.arg("-c").arg("1").arg("-W").arg("5");
+
+        // Specify source interface if available (bypasses sing-box TUN)
+        if let Some(ref iface) = interface {
+            cmd.arg("-I").arg(iface);
+        }
+
+        cmd.arg(host);
+
+        let output = cmd.output().await.ok()?;
         if output.status.success() {
             latencies.push(start.elapsed().as_secs_f64() * 1000.0);
         }
