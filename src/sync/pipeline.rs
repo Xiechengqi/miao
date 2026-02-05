@@ -198,11 +198,11 @@ impl BackupPipeline {
 
         let sent = Arc::new(AtomicU64::new(0));
         let done = Arc::new(AtomicBool::new(false));
-        if log_tx.is_some() {
+        let progress_handle = if log_tx.is_some() {
             let sent_clone = sent.clone();
             let done_clone = done.clone();
             let log_tx_clone = log_tx.clone();
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let log = |entry: SyncLogEntry| {
                     if let Some(ref tx) = log_tx_clone {
                         tx(entry);
@@ -219,16 +219,22 @@ impl BackupPipeline {
                     }
                     log(SyncLogEntry::info(None, format!("传输中: {}/{} bytes", sent_now, total)));
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         let cursor = Cursor::new(data);
         let reader = ProgressReader::new(cursor, sent.clone());
         let start = std::time::Instant::now();
         let result = transport.exec_with_stdin(&cmd, reader).await?;
         done.store(true, Ordering::Relaxed);
+        if let Some(handle) = progress_handle {
+            let _ = handle.await;
+        }
         let elapsed = start.elapsed().as_secs_f64();
         log(SyncLogEntry::info(None, format!("传输结束: {} bytes, {:.2}s", total, elapsed)));
+        log(SyncLogEntry::info(None, "进度停止".to_string()));
 
         if result.exit_code != 0 {
             let stderr_preview = String::from_utf8_lossy(&result.stderr)
