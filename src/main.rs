@@ -744,7 +744,7 @@ async fn ping_host(host: &str) -> Option<f64> {
 
 /// Test bandwidth using dd + ssh pipeline
 async fn test_bandwidth(cfg: &HostConfig) -> Result<(f64, f64), String> {
-    let test_size_mb = 10;
+    let test_size_mb = 1;
 
     // Build SSH command args
     let ssh_args = format!(
