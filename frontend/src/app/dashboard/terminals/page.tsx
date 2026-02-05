@@ -277,11 +277,13 @@ export default function TerminalsPage() {
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-black">
-            终端
-          </h1>
-          <p className="text-slate-500 mt-1">管理 SSH 终端会话</p>
+        <div className="flex items-center gap-3">
+          <h1 className="text-3xl font-black">终端</h1>
+          {gottyInstalled && (
+            <span className="px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
+              gotty 已安装
+            </span>
+          )}
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" onClick={handleUpgradeGotty} loading={loading}>

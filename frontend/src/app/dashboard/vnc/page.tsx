@@ -208,11 +208,13 @@ export default function VncPage() {
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-black">
-            远程桌面
-          </h1>
-          <p className="text-slate-500 mt-1">管理 VNC 桌面会话</p>
+        <div className="flex items-center gap-3">
+          <h1 className="text-3xl font-black">远程桌面</h1>
+          {vncAvailable && (
+            <span className="px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
+              VNC 已安装
+            </span>
+          )}
         </div>
         <Button onClick={() => openModal()}>
           <Plus className="w-4 h-4" />

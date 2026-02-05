@@ -486,10 +486,15 @@ export default function ProxiesPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
+        <div className="flex items-center gap-3">
           <h1 className="text-3xl font-black">代理管理</h1>
-          <p className="text-slate-500 mt-1">管理SSH节点代理</p>
+          {singBoxInstalled && (
+            <span className="px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
+              sing-box 已安装
+            </span>
+          )}
         </div>
+        <p className="text-slate-500 mt-1 sm:hidden">管理SSH节点代理</p>
       </div>
 
       <Card className="p-4">

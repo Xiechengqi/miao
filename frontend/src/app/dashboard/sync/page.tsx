@@ -492,9 +492,13 @@ export default function SyncPage() {
 
       <Card className="p-6" hoverEffect={false}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
+          <div className="flex items-center gap-3">
             <h2 className="text-2xl font-bold text-slate-900">备份同步</h2>
-            <p className="text-slate-500 text-sm mt-1">高性能流式备份同步</p>
+            {toolsStatus?.tar && toolsStatus?.zstd && (
+              <span className="px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
+                备份工具已安装
+              </span>
+            )}
           </div>
           <Button onClick={() => openSyncModal()}>
             <Plus className="w-4 h-4" />
