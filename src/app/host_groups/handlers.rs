@@ -104,7 +104,6 @@ pub async fn get_group(
                     .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
                 last_connected_at: h.last_connected_at.map(|ts| chrono::DateTime::from_timestamp(ts, 0)
                     .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
-                last_test_result: h.last_test_result.clone(),
             })
             .collect()
     };

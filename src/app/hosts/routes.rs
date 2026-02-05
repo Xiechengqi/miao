@@ -17,9 +17,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/v1/hosts/{id}", get(get_host))
         .route("/api/v1/hosts/{id}", put(update_host))
         .route("/api/v1/hosts/{id}", delete(delete_host))
-        // 主机操作
-        .route("/api/v1/hosts/test", post(test_host_config))
-        .route("/api/v1/hosts/{id}/test", post(test_host))
+        // 主机测试
+        .route("/api/v1/hosts/{id}/test/ssh", post(test_ssh))
+        .route("/api/v1/hosts/{id}/test/ping", post(test_ping))
+        .route("/api/v1/hosts/{id}/test/bandwidth", post(test_bandwidth))
+        // 批量操作
         .route("/api/v1/hosts/batch/delete", post(batch_delete_hosts))
         // 导入导出
         .route("/api/v1/hosts/import", post(import_hosts))

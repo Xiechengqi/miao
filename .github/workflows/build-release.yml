@@ -62,25 +62,6 @@ jobs:
         with:
           version: 9
 
-      - name: Determine required Go version
-        id: go-version
-        run: |
-          # Clone sing-box to read go.mod
-          git clone --depth=1 https://github.com/SagerNet/sing-box.git sing-box-temp
-          cd sing-box-temp
-          # Extract Go version from go.mod
-          GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
-          echo "Required Go version: ${GO_VERSION}"
-          echo "version=${GO_VERSION}" >> $GITHUB_OUTPUT
-          cd ..
-          rm -rf sing-box-temp
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ steps.go-version.outputs.version }}
-          cache: false
-
       - name: Install Zig for cross-compilation
         run: |
           sudo snap install zig --classic --edge

@@ -9,11 +9,4 @@ export const mockStatus: Status = {
 export const mockDnsStatus: DnsStatus = {
   active: "cloudflare",
   candidates: ["cloudflare", "google", "quad9", "alidns"],
-  health: {
-    cloudflare: "ok",
-    google: "ok",
-    quad9: "ok",
-    alidns: "bad",
-  },
-  last_check_secs_ago: 60,
 };

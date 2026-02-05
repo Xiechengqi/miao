@@ -5,7 +5,7 @@ import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
 import { SyncConfig, Host, SyncLogEntry } from "@/types/api";
-import { Plus, Trash2, Pencil, Zap, Play, FileText, Clock, RefreshCw } from "lucide-react";
+import { Plus, Trash2, Pencil, Zap, Play, FileText, Clock, RefreshCw, AlertTriangle } from "lucide-react";
 
 function LogModal({
   isOpen,
@@ -182,6 +182,7 @@ export default function SyncPage() {
   const [syncForm, setSyncForm] = useState(defaultSyncForm);
   const [showLogModal, setShowLogModal] = useState(false);
   const [selectedSyncForLog, setSelectedSyncForLog] = useState<{ id: string; name: string } | null>(null);
+  const [toolsStatus, setToolsStatus] = useState<{ tar: boolean; zstd: boolean } | null>(null);
 
   const localPaths = useMemo(() => {
     return syncForm.local_paths_text
@@ -200,7 +201,17 @@ export default function SyncPage() {
   useEffect(() => {
     loadSyncs();
     loadHosts();
+    checkToolsStatus();
   }, []);
+
+  const checkToolsStatus = async () => {
+    try {
+      const tools = await api.getToolsStatus();
+      setToolsStatus({ tar: tools.tar, zstd: tools.zstd });
+    } catch (error) {
+      console.error("Failed to check tools status:", error);
+    }
+  };
 
   const loadHosts = async () => {
     try {
@@ -461,6 +472,24 @@ export default function SyncPage() {
 
   return (
     <div className="space-y-8">
+      {/* Tools Not Available Warning */}
+      {toolsStatus && (!toolsStatus.tar || !toolsStatus.zstd) && (
+        <Card className="p-4 bg-amber-50 border-amber-200">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-800">备份工具不完整</p>
+              <p className="text-sm text-amber-700 mt-1">
+                当前环境缺少以下工具：
+                {!toolsStatus.tar && " tar"}
+                {!toolsStatus.zstd && " zstd"}
+                ，请先安装后再使用备份功能。
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       <Card className="p-6" hoverEffect={false}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>

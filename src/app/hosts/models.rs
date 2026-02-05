@@ -6,8 +6,6 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::HostTestResult;
-
 // ============================================================================
 // Request Types
 // ============================================================================
@@ -134,17 +132,6 @@ pub struct HostListParams {
     pub sort_order: Option<String>,
 }
 
-/// 测试主机配置请求（不需要已保存的主机）
-#[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]
-pub struct HostTestConfigRequest {
-    pub host: String,
-    pub port: Option<u16>,
-    pub username: String,
-    pub auth_type: String,
-    pub password: Option<String>,
-    pub private_key_path: Option<String>,
-    pub private_key_passphrase: Option<String>,
-}
 
 // ============================================================================
 // Response Types
@@ -174,7 +161,6 @@ pub struct HostResponse {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub last_connected_at: Option<String>,
-    pub last_test_result: Option<HostTestResult>,
 }
 
 /// 主机详情响应
@@ -195,22 +181,39 @@ pub struct HostPageResponse {
     pub total_pages: u32,
 }
 
-/// 测试响应
+/// SSH 测试响应
 #[derive(ToSchema, Serialize, Clone, Debug)]
-pub struct HostTestResponse {
+pub struct SSHTestResponse {
     pub id: String,
     pub host: String,
-    pub ssh_ok: bool,
-    pub ssh_error: Option<String>,
-    pub ping_avg_ms: Option<f64>,
+    pub success: bool,
+    pub latency_ms: Option<f64>,
+    pub error: Option<String>,
     pub timestamp: String,
 }
 
-/// 批量测试结果
-#[allow(dead_code)]
+/// Ping 测试响应
 #[derive(ToSchema, Serialize, Clone, Debug)]
-pub struct BatchTestResult {
-    pub results: Vec<HostTestResponse>,
+pub struct PingTestResponse {
+    pub id: String,
+    pub host: String,
+    pub success: bool,
+    pub avg_latency_ms: Option<f64>,
+    pub packet_loss_percent: Option<f64>,
+    pub error: Option<String>,
+    pub timestamp: String,
+}
+
+/// 带宽测试响应
+#[derive(ToSchema, Serialize, Clone, Debug)]
+pub struct BandwidthTestResponse {
+    pub id: String,
+    pub host: String,
+    pub success: bool,
+    pub upload_mbps: Option<f64>,
+    pub download_mbps: Option<f64>,
+    pub error: Option<String>,
+    pub timestamp: String,
 }
 
 /// 导入结果

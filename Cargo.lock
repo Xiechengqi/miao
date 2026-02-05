@@ -1908,6 +1908,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "flate2",
  "futures-util",
  "ignore",
  "jsonwebtoken",

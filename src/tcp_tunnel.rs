@@ -1,7 +1,6 @@
 use crate::TcpTunnelConfig;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch, Mutex};
 use tokio::time::{sleep, Duration};

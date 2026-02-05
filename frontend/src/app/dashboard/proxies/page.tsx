@@ -7,7 +7,7 @@ import { useProxies, useStatus, useTraffic } from "@/hooks";
 import { api } from "@/lib/api";
 import { formatUptime, formatSpeed } from "@/lib/utils";
 import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check } from "lucide-react";
-import { Host, ManualNode, DnsCandidate } from "@/types/api";
+import { Host, ManualNode } from "@/types/api";
 
 const CONNECTIVITY_SITES = [
   { name: "Google", url: "https://www.google.com" },
@@ -30,14 +30,18 @@ type ConnectivityCache = {
   results: Record<string, ConnectivityResult>;
 };
 
-type HostTestResult = {
-  ssh_ok: boolean;
-  ping_avg_ms?: number | null;
+type SSHHostTestResult = {
+  success: boolean;
+  latency_ms?: number;
+  error?: string | null;
 };
 
 type HostTestCache = {
-  results: Record<string, HostTestResult>;
+  results: Record<string, SSHHostTestResult>;
 };
+
+// 默认 DNS 候选列表
+const DEFAULT_DNS_CANDIDATES = ["doh-cf", "doh-google"];
 
 export default function ProxiesPage() {
   const {
@@ -48,12 +52,12 @@ export default function ProxiesPage() {
     setProxyGroups,
     setNodes: setProxyNodes,
     setStatus,
+    dnsStatus,
     setDnsStatus,
   } = useStore();
   const { fetchProxies } = useProxies();
-  const { status, dnsStatus, loadingAction, checkDnsNow, switchDnsActive, toggleService } = useStatus();
+  const { status, loadingAction, switchDnsActive, toggleService } = useStatus();
   const { traffic } = useTraffic();
-  const [dnsSelected, setDnsSelected] = useState("");
   const [connectivityResults, setConnectivityResults] = useState<Record<string, ConnectivityResult>>({});
   const [testingConnectivity, setTestingConnectivity] = useState(false);
   const [currentTestingSite, setCurrentTestingSite] = useState<string | null>(null);
@@ -65,7 +69,7 @@ export default function ProxiesPage() {
   const [hostsLoading, setHostsLoading] = useState(false);
   const [addingHostId, setAddingHostId] = useState<string | null>(null);
   const [testingHostId, setTestingHostId] = useState<string | null>(null);
-  const [hostTestResults, setHostTestResults] = useState<Record<string, HostTestResult>>({});
+  const [hostTestResults, setHostTestResults] = useState<Record<string, SSHHostTestResult>>({});
   const [existingNodeTags, setExistingNodeTags] = useState<Set<string>>(() => new Set());
   const [manualNodes, setManualNodes] = useState<ManualNode[]>([]);
   const [switchingNode, setSwitchingNode] = useState(false);
@@ -73,16 +77,12 @@ export default function ProxiesPage() {
   // DNS 切换确认对话框
   const [showDnsConfirm, setShowDnsConfirm] = useState(false);
   const [pendingDns, setPendingDns] = useState<string>("");
-  const normalizedDnsCandidates = useMemo(() => {
-    if (!dnsStatus?.candidates) return [];
-    return (dnsStatus.candidates as Array<string | DnsCandidate>).map((candidate) => {
-      if (typeof candidate === "string") {
-        return { name: candidate, health: dnsStatus.health?.[candidate] };
-      }
-      const name = candidate?.name ?? String(candidate);
-      return { name, health: candidate?.health ?? dnsStatus.health?.[name] };
-    });
-  }, [dnsStatus]);
+  const dnsCandidates = useMemo(() => dnsStatus?.candidates || DEFAULT_DNS_CANDIDATES, [dnsStatus]);
+  const activeDns = useMemo(() => dnsStatus?.active || dnsCandidates[0] || "", [dnsStatus, dnsCandidates]);
+
+  // Binary 安装状态
+  const [singBoxInstalled, setSingBoxInstalled] = useState<boolean | null>(null);
+  const [installingSingBox, setInstallingSingBox] = useState(false);
 
   // 当前选中的代理节点
   const currentNode = useMemo(() => {
@@ -128,7 +128,18 @@ export default function ProxiesPage() {
       setLoading(true, "init");
       let statusData = null;
       try {
-        // 先加载核心状态（快速响应）
+        // 先检查 binary 状态
+        const binStatus = await api.getBinariesStatus();
+        if (!isMounted) return;
+        setSingBoxInstalled(binStatus.sing_box.installed);
+
+        // 如果 sing-box 未安装，不继续加载其他数据
+        if (!binStatus.sing_box.installed) {
+          setLoading(false);
+          return;
+        }
+
+        // 加载核心状态
         [statusData] = await Promise.all([
           api.getStatus(),
         ]);
@@ -136,19 +147,15 @@ export default function ProxiesPage() {
         setStatus(statusData);
 
         // 然后并行加载其他数据
-        const [dnsData, { proxies, nodes: nodeList }] = await Promise.all([
-          api.getDnsStatus().catch(() => null),
+        const [{ proxies, nodes: nodeList }] = await Promise.all([
           api.getProxies(),
         ]);
         if (!isMounted) return;
-        if (dnsData) setDnsStatus(dnsData);
         setProxyGroups(proxies);
         setProxyNodes(nodeList);
       } catch (error) {
         if (!isMounted) return;
         console.error("Failed to load data:", error);
-        // 只在 sing-box 运行中且加载失败时才显示错误
-        // 如果 sing-box 未运行，UI 会显示友好提示，不需要额外的错误 toast
         if (statusData?.running) {
           addToast({ type: "error", message: "加载数据失败" });
         }
@@ -275,15 +282,15 @@ export default function ProxiesPage() {
   const handleTestHost = async (host: Host) => {
     setTestingHostId(host.id);
     try {
-      const result = await api.testHost(host.id);
+      const result = await api.testSSHConnection(host.id);
       setHostTestResults(prev => ({
         ...prev,
-        [host.id]: { ssh_ok: result.ssh_ok, ping_avg_ms: result.ping_avg_ms }
+        [host.id]: { success: result.success, latency_ms: result.latency_ms, error: result.error }
       }));
-      if (result.ssh_ok) {
-        addToast({ type: "success", message: "SSH 连接成功" });
+      if (result.success) {
+        addToast({ type: "success", message: `SSH 连接成功 (${result.latency_ms?.toFixed(0) ?? 0}ms)` });
       } else {
-        addToast({ type: "error", message: result.ssh_error || "SSH 连接失败" });
+        addToast({ type: "error", message: result.error || "SSH 连接失败" });
       }
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "测试失败" });
@@ -341,13 +348,6 @@ export default function ProxiesPage() {
     }
   };
 
-  useEffect(() => {
-    if (!dnsSelected && normalizedDnsCandidates.length) {
-      const activeName = dnsStatus?.active;
-      setDnsSelected(activeName || normalizedDnsCandidates[0].name);
-    }
-  }, [dnsStatus, dnsSelected, normalizedDnsCandidates]);
-
   // 并行测试所有连通性
   const testAllConnectivity = async () => {
     if (testingConnectivity) return;
@@ -392,13 +392,6 @@ export default function ProxiesPage() {
     return `${result.latency_ms}ms`;
   };
 
-  const getDnsHealthVariant = (health?: "ok" | "bad" | "cooldown") => {
-    if (health === "ok") return "success";
-    if (health === "bad") return "error";
-    if (health === "cooldown") return "warning";
-    return "default";
-  };
-
   const testConnectivity = async (site: { name: string; url: string }) => {
     if (currentTestingSite) return;
     setCurrentTestingSite(site.name);
@@ -418,13 +411,71 @@ export default function ProxiesPage() {
     }
   };
 
+  // 安装 sing-box
+  const handleInstallSingBox = async () => {
+    setInstallingSingBox(true);
+    try {
+      await api.installSingBox();
+      setSingBoxInstalled(true);
+      addToast({ type: "success", message: "sing-box 安装成功" });
+      // 重新加载页面数据
+      const statusData = await api.getStatus();
+      setStatus(statusData);
+    } catch (error) {
+      addToast({
+        type: "error",
+        message: error instanceof Error ? error.message : "安装失败",
+      });
+    } finally {
+      setInstallingSingBox(false);
+    }
+  };
+
+  // sing-box 未安装提示
+  if (singBoxInstalled === false) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-black">代理管理</h1>
+          <p className="text-slate-500 mt-1">管理SSH节点代理</p>
+        </div>
+        <Card className="p-6">
+          <div className="text-center py-8">
+            <Server className="w-16 h-16 mx-auto text-slate-300 mb-4" />
+            <h2 className="text-xl font-bold text-slate-700 mb-2">sing-box 未安装</h2>
+            <p className="text-slate-500 mb-6">
+              当前环境没有 sing-box 程序，请点击下方按钮安装
+            </p>
+            <Button
+              onClick={handleInstallSingBox}
+              disabled={installingSingBox}
+              className="px-6"
+            >
+              {installingSingBox ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  安装中...
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4 mr-2" />
+                  安装 sing-box
+                </>
+              )}
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   // 渲染骨架屏（初始加载时）
   if (loading && loadingAction === "init" && Object.keys(status).length === 0) {
     return (
       <div className="space-y-6">
         <div>
           <h1 className="text-3xl font-black">代理管理</h1>
-          <p className="text-slate-500 mt-1">SSH 节点与连通性测试</p>
+          <p className="text-slate-500 mt-1">管理SSH节点代理</p>
         </div>
         <SkeletonCard />
         <SkeletonCard />
@@ -437,7 +488,7 @@ export default function ProxiesPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-black">代理管理</h1>
-          <p className="text-slate-500 mt-1">SSH 节点与连通性测试</p>
+          <p className="text-slate-500 mt-1">管理SSH节点代理</p>
         </div>
       </div>
 
@@ -446,6 +497,18 @@ export default function ProxiesPage() {
           <Activity className="w-5 h-5 text-indigo-600" />
           <span className="text-lg font-bold text-slate-900">Sing-box 状态</span>
           <div className="ml-auto flex items-center gap-3">
+            {status.running && (
+              <>
+                <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-50 text-xs">
+                  <Zap className="w-3.5 h-3.5 text-emerald-600" />
+                  <span className="font-mono text-emerald-700">{formatSpeed(traffic.up)}</span>
+                </div>
+                <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-sky-50 text-xs">
+                  <RefreshCw className="w-3.5 h-3.5 text-sky-600" />
+                  <span className="font-mono text-sky-700">{formatSpeed(traffic.down)}</span>
+                </div>
+              </>
+            )}
             <TogglePower
               running={status.running}
               loading={loading && (loadingAction === "start" || loadingAction === "stop")}
@@ -476,74 +539,26 @@ export default function ProxiesPage() {
 
             <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-100 text-xs">
               <Wifi className="w-3.5 h-3.5 text-slate-600" />
-              <span>{dnsStatus?.active || "-"}</span>
+              <select
+                className="bg-transparent text-slate-700 font-mono text-xs cursor-pointer outline-none"
+                value={activeDns}
+                onChange={(e) => {
+                  if (e.target.value && e.target.value !== activeDns) {
+                    setPendingDns(e.target.value);
+                    setShowDnsConfirm(true);
+                  }
+                }}
+                disabled={loading || loadingAction === "dns-switch"}
+              >
+                {dnsCandidates.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
             </div>
-
-            <button
-              onClick={checkDnsNow}
-              disabled={loading || loadingAction === "dns-check"}
-              className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 transition-colors"
-              title="刷新 DNS"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingAction === "dns-check" ? "animate-spin" : ""}`} />
-            </button>
-
-            {status.running && (
-              <>
-                <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-emerald-50 text-xs">
-                  <Zap className="w-3.5 h-3.5 text-emerald-600" />
-                  <span className="font-mono text-emerald-700">↑ {formatSpeed(traffic.up)}</span>
-                </div>
-                <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-sky-50 text-xs">
-                  <RefreshCw className="w-3.5 h-3.5 text-sky-600" />
-                  <span className="font-mono text-sky-700">↓ {formatSpeed(traffic.down)}</span>
-                </div>
-              </>
-            )}
           </div>
 
-          {normalizedDnsCandidates.length > 0 && (
-            <div className="mt-3 pt-3 border-t border-slate-100 space-y-3">
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <select
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700"
-                  value={dnsSelected}
-                  onChange={(e) => setDnsSelected(e.target.value)}
-                >
-                  {normalizedDnsCandidates.map((candidate) => (
-                    <option key={candidate.name} value={candidate.name}>
-                      {candidate.name}
-                    </option>
-                  ))}
-                </select>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    setPendingDns(dnsSelected);
-                    setShowDnsConfirm(true);
-                  }}
-                  loading={loadingAction === "dns-switch"}
-                  disabled={!dnsSelected || dnsSelected === dnsStatus?.active}
-                >
-                  切换 DNS
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {normalizedDnsCandidates.map((candidate) => {
-                  const health = candidate.health;
-                  return (
-                    <Badge key={candidate.name} variant={getDnsHealthVariant(health)}>
-                      <span title={health ? `${candidate.name} (${health})` : candidate.name}>{candidate.name}</span>
-                    </Badge>
-                  );
-                })}
-                {dnsStatus?.last_check_secs_ago !== undefined && dnsStatus?.last_check_secs_ago !== null && (
-                  <span className="text-xs text-slate-500">{dnsStatus.last_check_secs_ago}s ago</span>
-                )}
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
 
@@ -600,10 +615,10 @@ export default function ProxiesPage() {
                       测试
                     </Button>
                     {hostTestResults[host.id] && (
-                      <Badge variant={hostTestResults[host.id].ssh_ok ? "success" : "error"}>
-                        {hostTestResults[host.id].ping_avg_ms != null
-                          ? `${Math.round(hostTestResults[host.id].ping_avg_ms!)}ms`
-                          : "超时"}
+                      <Badge variant={hostTestResults[host.id].success ? "success" : "error"}>
+                        {hostTestResults[host.id].latency_ms != null
+                          ? `${Math.round(hostTestResults[host.id].latency_ms!)}ms`
+                          : hostTestResults[host.id].error ?? "失败"}
                       </Badge>
                     )}
                     {isExisting ? (

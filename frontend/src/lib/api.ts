@@ -1,11 +1,9 @@
 import {
-  ApiResponse,
   Status,
   SystemInfo,
   SystemStatus,
   SystemMetricsResponse,
   DnsStatus,
-  Node,
   ManualNode,
   ProxyGroup,
   SyncConfig,
@@ -15,10 +13,13 @@ import {
   VncSession,
   App,
   AppTemplate,
-  TrafficData,
   VersionInfo,
   Host,
-  HostTestResult,
+  SSHTestResult,
+  PingTestResult,
+  BandwidthTestResult,
+  ToolsStatus,
+  Node,
 } from "@/types/api";
 
 // 重试配置
@@ -142,6 +143,36 @@ class ApiClient {
     return res.data;
   }
 
+  // Binaries
+  async getBinariesStatus(): Promise<{
+    sing_box: { installed: boolean; path: string };
+    gotty: { installed: boolean; path: string };
+    arch: string;
+  }> {
+    const res = await this.fetch<{
+      data: {
+        sing_box: { installed: boolean; path: string };
+        gotty: { installed: boolean; path: string };
+        arch: string;
+      };
+    }>("/api/binaries/status");
+    return res.data;
+  }
+
+  async installSingBox(): Promise<{ path: string }> {
+    const res = await this.fetch<{ data: { path: string } }>("/api/binaries/install/sing-box", {
+      method: "POST",
+    });
+    return res.data;
+  }
+
+  async installGotty(): Promise<{ path: string }> {
+    const res = await this.fetch<{ data: { path: string } }>("/api/binaries/install/gotty", {
+      method: "POST",
+    });
+    return res.data;
+  }
+
   async getSystemInfo(): Promise<SystemInfo> {
     const res = await this.fetch<{ data: SystemInfo }>("/api/system/info");
     return res.data;
@@ -187,6 +218,11 @@ class ApiClient {
     };
   }
 
+  async getToolsStatus(): Promise<ToolsStatus> {
+    const res = await this.fetch<{ data: ToolsStatus }>("/api/system/tools");
+    return res.data;
+  }
+
   async startService(): Promise<void> {
     await this.fetch("/api/service/start", {
       method: "POST",
@@ -200,22 +236,16 @@ class ApiClient {
   }
 
   // DNS
-  async getDnsStatus(): Promise<DnsStatus> {
-    const res = await this.fetch<{ data: DnsStatus }>("/api/dns/status");
-    return res.data;
-  }
-
-  async checkDns(): Promise<void> {
-    await this.fetch("/api/dns/check", {
-      method: "POST",
-    });
-  }
-
   async switchDns(name: string): Promise<void> {
     await this.fetch("/api/dns/switch", {
       method: "POST",
       body: JSON.stringify({ tag: name }),
     });
+  }
+
+  async getDnsStatus(): Promise<DnsStatus> {
+    const res = await this.fetch<{ data: DnsStatus }>("/api/dns/status");
+    return res.data;
   }
 
   // Nodes
@@ -843,11 +873,25 @@ class ApiClient {
     return res.data.path;
   }
 
-  async testHostConfig(config: Partial<Host> & { auth_type: string }): Promise<void> {
-    await this.fetch("/api/v1/hosts/test", {
+  async testSSHConnection(id: string): Promise<SSHTestResult> {
+    const res = await this.fetch<{ data: SSHTestResult }>(`/api/v1/hosts/${id}/test/ssh`, {
       method: "POST",
-      body: JSON.stringify(config),
     });
+    return res.data;
+  }
+
+  async testPing(id: string): Promise<PingTestResult> {
+    const res = await this.fetch<{ data: PingTestResult }>(`/api/v1/hosts/${id}/test/ping`, {
+      method: "POST",
+    });
+    return res.data;
+  }
+
+  async testBandwidth(id: string): Promise<BandwidthTestResult> {
+    const res = await this.fetch<{ data: BandwidthTestResult }>(`/api/v1/hosts/${id}/test/bandwidth`, {
+      method: "POST",
+    });
+    return res.data;
   }
 
   async getHost(id: string): Promise<Host> {
@@ -874,13 +918,6 @@ class ApiClient {
     await this.fetch(`/api/v1/hosts/${id}`, {
       method: "DELETE",
     });
-  }
-
-  async testHost(id: string): Promise<HostTestResult> {
-    const res = await this.fetch<{ data: HostTestResult }>(`/api/v1/hosts/${id}/test`, {
-      method: "POST",
-    });
-    return res.data;
   }
 }
 

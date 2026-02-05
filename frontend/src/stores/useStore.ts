@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Status, DnsStatus, Node, ProxyGroup, SyncConfig, TcpTunnel, TrafficData, LogEntry, ToastMessage, Terminal } from "@/types/api";
+import { Status, Node, ProxyGroup, SyncConfig, TcpTunnel, TrafficData, LogEntry, ToastMessage, Terminal, DnsStatus } from "@/types/api";
 
 interface AppState {
   // Auth State

@@ -34,7 +34,6 @@ use tokio::sync::{broadcast, Mutex};
 use tokio::task::spawn_blocking;
 use tokio::time::sleep;
 use tokio::io::AsyncWriteExt;
-use base64::Engine;
 use chrono::Utc;
 use rust_embed::RustEmbed;
 use axum::response::IntoResponse;
@@ -46,20 +45,6 @@ mod app;
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// Embed sing-box binary based on target architecture
-#[cfg(target_arch = "x86_64")]
-const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-amd64");
-
-#[cfg(target_arch = "aarch64")]
-const SING_BOX_BINARY: &[u8] = include_bytes!("../embedded/sing-box-arm64");
-
-// Embed gotty binary based on target architecture
-#[cfg(target_arch = "x86_64")]
-const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-amd64");
-
-#[cfg(target_arch = "aarch64")]
-const GOTTY_BINARY: &[u8] = include_bytes!("../embedded/gotty-arm64");
 
 // Embed static assets (Next.js build output) at compile time
 #[derive(RustEmbed)]
@@ -613,7 +598,8 @@ fn resolve_private_key_path(path: &str) -> Result<String, String> {
     default_private_key_path().ok_or_else(|| "Private key path is required".to_string())
 }
 
-async fn test_host_connection(cfg: &HostConfig) -> Result<(), String> {
+/// Test SSH connection and return latency on success
+async fn test_ssh_connection(cfg: &HostConfig) -> Result<f64, String> {
     use russh::client;
     use russh::keys::key::PrivateKeyWithHashAlg;
     use russh::keys::load_secret_key;
@@ -647,6 +633,8 @@ async fn test_host_connection(cfg: &HostConfig) -> Result<(), String> {
     let client_cfg = Arc::new(client_cfg);
     let addr = (cfg.host.as_str(), cfg.port);
     let connect_timeout = Duration::from_millis(cfg.connection_timeout_ms.max(1000).min(60000));
+
+    let start = std::time::Instant::now();
 
     let mut session = tokio::time::timeout(
         connect_timeout,
@@ -698,10 +686,11 @@ async fn test_host_connection(cfg: &HostConfig) -> Result<(), String> {
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "test done", "en")
         .await;
-    Ok(())
+
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// Ping host 3 times and return average latency in ms
+/// Ping host 3 times and return average latency in ms, or None if failed
 async fn ping_host(host: &str) -> Option<f64> {
     let mut latencies = Vec::new();
     for _ in 0..3 {
@@ -720,8 +709,83 @@ async fn ping_host(host: &str) -> Option<f64> {
     if latencies.is_empty() {
         None
     } else {
-        Some(latencies.iter().sum::<f64>() / latencies.len() as f64)
+        Some(latencies.iter().sum::<f64>() / latencies.iter().count() as f64)
     }
+}
+
+/// Test bandwidth using dd + ssh pipeline
+async fn test_bandwidth(cfg: &HostConfig) -> Result<(f64, f64), String> {
+    let test_size_mb = 10;
+
+    // Build SSH command args
+    let ssh_args = format!(
+        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout={} -p {}",
+        cfg.connection_timeout_ms / 1000,
+        cfg.port
+    );
+
+    let username = &cfg.username;
+    let host = &cfg.host;
+
+    // Build the auth part for SSH
+    let auth_part = match &cfg.auth {
+        HostAuth::Password { password } => {
+            let pwd = password.as_ref().ok_or("password is required")?;
+            format!("sshpass -p {} ssh {}", pwd, ssh_args)
+        }
+        HostAuth::PrivateKeyPath { path, passphrase } => {
+            let key_path = resolve_private_key_path(path).map_err(|e| e.to_string())?;
+            if let Some(pass) = passphrase {
+                format!("ssh -i {} -o Passphrase={} {}", key_path, pass, ssh_args)
+            } else {
+                format!("ssh -i {} {}", key_path, ssh_args)
+            }
+        }
+    };
+
+    // Test upload: local dd -> remote (dd + ssh)
+    // dd if=/dev/urandom bs=1M count=10 | ssh user@host "cat > /dev/null"
+    let upload_cmd = format!(
+        "dd if=/dev/urandom bs=1M count={} 2>/dev/null | {} {}@{} 'cat > /dev/null'",
+        test_size_mb, auth_part, username, host
+    );
+
+    let upload_start = std::time::Instant::now();
+    let upload_status = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg(&upload_cmd)
+        .output()
+        .await
+        .map_err(|e| format!("Upload test failed: {}", e))?;
+    let upload_duration = upload_start.elapsed().as_secs_f64();
+    let upload_mbps = if upload_status.status.success() && upload_duration > 0.0 {
+        (test_size_mb as f64 * 8.0) / upload_duration
+    } else {
+        return Err("Upload test failed".to_string());
+    };
+
+    // Test download: remote dd -> local (ssh + dd)
+    // ssh user@host "dd if=/dev/urandom bs=1M count=10" | dd of=/dev/null
+    let download_cmd = format!(
+        "{} {}@{} 'dd if=/dev/urandom bs=1M count={} 2>/dev/null' | dd of=/dev/null 2>/dev/null",
+        auth_part, username, host, test_size_mb
+    );
+
+    let download_start = std::time::Instant::now();
+    let download_status = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg(&download_cmd)
+        .output()
+        .await
+        .map_err(|e| format!("Download test failed: {}", e))?;
+    let download_duration = download_start.elapsed().as_secs_f64();
+    let download_mbps = if download_status.status.success() && download_duration > 0.0 {
+        (test_size_mb as f64 * 8.0) / download_duration
+    } else {
+        return Err("Download test failed".to_string());
+    };
+
+    Ok((upload_mbps, download_mbps))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -821,29 +885,6 @@ struct Config {
     dns_active: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dns_candidates: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dns_check_interval_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dns_fail_threshold: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dns_cooldown_ms: Option<u64>,
-    // Proxy multi-select & auto failover (optional)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_pool: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_monitor_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_check_interval_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_check_timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_fail_threshold: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_window_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_window_fail_rate: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy_pause_ms: Option<u64>,
 
     // SSH reverse TCP tunnels (optional)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1276,8 +1317,6 @@ pub struct AppState {
     subscriptions_root: PathBuf,
     subscription_status: Mutex<HashMap<String, SubscriptionRuntime>>,
     node_type_by_tag: Mutex<HashMap<String, String>>,
-    dns_monitor: Mutex<DnsMonitorState>,
-    proxy_monitor: Mutex<ProxyMonitorState>,
     setup_required: AtomicBool,
     tcp_tunnel: tcp_tunnel::TunnelManager,
     full_tunnel: full_tunnel::FullTunnelManager,
@@ -2040,6 +2079,174 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
     ))
 }
 
+/// GET /api/binaries/status - Check if sing-box and gotty binaries exist
+async fn get_binaries_status() -> Json<ApiResponse<serde_json::Value>> {
+    let current_dir = std::env::current_dir().unwrap_or_default();
+    let sing_box_exists = current_dir.join("sing-box").exists();
+    let gotty_exists = current_dir.join("gotty").exists();
+
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+
+    Json(ApiResponse::success("ok", json!({
+        "sing_box": {
+            "installed": sing_box_exists,
+            "path": current_dir.join("sing-box").to_string_lossy()
+        },
+        "gotty": {
+            "installed": gotty_exists,
+            "path": current_dir.join("gotty").to_string_lossy()
+        },
+        "arch": arch
+    })))
+}
+
+/// POST /api/binaries/install/sing-box - Download and install sing-box
+async fn install_sing_box() -> Json<ApiResponse<serde_json::Value>> {
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::error(format!("获取当前目录失败: {}", e))),
+    };
+
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let client = reqwest::Client::new();
+    let release_url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+
+    // Get latest release info
+    let download_url = match client
+        .get(release_url)
+        .header("User-Agent", "miao-rust")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(release) = resp.json::<serde_json::Value>().await {
+                let tag = release["tag_name"].as_str().unwrap_or("latest");
+                let version = tag.trim_start_matches('v');
+                format!(
+                    "https://github.com/SagerNet/sing-box/releases/download/{}/sing-box-{}-linux-{}.tar.gz",
+                    tag, version, arch
+                )
+            } else {
+                return Json(ApiResponse::error("获取版本信息失败".to_string()));
+            }
+        }
+        Err(e) => return Json(ApiResponse::error(format!("请求失败: {}", e))),
+    };
+
+    log_info!("Downloading sing-box from: {}", download_url);
+
+    let response = match client.get(&download_url).send().await {
+        Ok(r) => r,
+        Err(e) => return Json(ApiResponse::error(format!("下载失败: {}", e))),
+    };
+
+    if !response.status().is_success() {
+        return Json(ApiResponse::error(format!("下载失败: HTTP {}", response.status())));
+    }
+
+    let bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Json(ApiResponse::error(format!("读取响应失败: {}", e))),
+    };
+
+    let sing_box_path = current_dir.join("sing-box");
+
+    // Extract from tar.gz
+    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
+    let mut archive = tar::Archive::new(decoder);
+
+    let temp_dir = current_dir.join(".sing-box-temp");
+    let _ = fs::remove_dir_all(&temp_dir);
+    if let Err(e) = fs::create_dir_all(&temp_dir) {
+        return Json(ApiResponse::error(format!("创建临时目录失败: {}", e)));
+    }
+
+    if let Err(e) = archive.unpack(&temp_dir) {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Json(ApiResponse::error(format!("解压失败: {}", e)));
+    }
+
+    // Find sing-box binary
+    let mut found = false;
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let binary_path = path.join("sing-box");
+                if binary_path.exists() {
+                    if let Err(e) = fs::copy(&binary_path, &sing_box_path) {
+                        let _ = fs::remove_dir_all(&temp_dir);
+                        return Json(ApiResponse::error(format!("复制文件失败: {}", e)));
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    if !found {
+        return Json(ApiResponse::error("解压后未找到 sing-box 文件".to_string()));
+    }
+
+    if let Err(e) = fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755)) {
+        return Json(ApiResponse::error(format!("设置权限失败: {}", e)));
+    }
+
+    log_info!("sing-box installed successfully to {:?}", sing_box_path);
+    Json(ApiResponse::success("sing-box 安装成功", json!({
+        "path": sing_box_path.to_string_lossy()
+    })))
+}
+
+/// POST /api/binaries/install/gotty - Download and install gotty
+async fn install_gotty() -> Json<ApiResponse<serde_json::Value>> {
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::error(format!("获取当前目录失败: {}", e))),
+    };
+
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let url = format!(
+        "https://github.com/Xiechengqi/gotty/releases/download/latest/gotty-linux-{}",
+        arch
+    );
+
+    log_info!("Downloading gotty from: {}", url);
+
+    let client = reqwest::Client::new();
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return Json(ApiResponse::error(format!("下载失败: {}", e))),
+    };
+
+    if !response.status().is_success() {
+        return Json(ApiResponse::error(format!("下载失败: HTTP {}", response.status())));
+    }
+
+    let bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Json(ApiResponse::error(format!("读取响应失败: {}", e))),
+    };
+
+    let gotty_path = current_dir.join("gotty");
+
+    if let Err(e) = fs::write(&gotty_path, &bytes) {
+        return Json(ApiResponse::error(format!("写入文件失败: {}", e)));
+    }
+
+    if let Err(e) = fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755)) {
+        return Json(ApiResponse::error(format!("设置权限失败: {}", e)));
+    }
+
+    log_info!("gotty installed successfully to {:?}", gotty_path);
+    Json(ApiResponse::success("gotty 安装成功", json!({
+        "path": gotty_path.to_string_lossy()
+    })))
+}
+
 async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
     let mut machine = state.system_monitor.machine.lock().await;
     let mut info = machine.system_info();
@@ -2357,6 +2564,20 @@ fn load_metrics_series(
         points.push(row.map_err(|e| format!("Failed to parse metrics row: {}", e))?);
     }
     Ok(points)
+}
+
+async fn get_tools_status() -> Json<ApiResponse<serde_json::Value>> {
+    let vnc_available = binary_exists("vncserver") && binary_exists("vncpasswd");
+    let tar_available = binary_exists("tar");
+    let zstd_available = binary_exists("zstd");
+
+    let data = serde_json::json!({
+        "vnc": vnc_available,
+        "tar": tar_available,
+        "zstd": zstd_available,
+    });
+
+    Json(ApiResponse::success("Tools status", data))
 }
 
 async fn get_system_info(
@@ -4710,11 +4931,6 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
     }
     let _ = fs::remove_file(temp_path);
 
-    // Mark embedded binaries for forced re-extraction
-    if let Ok(current_dir) = std::env::current_dir() {
-        let _ = fs::write(current_dir.join(".force_extract_sing_box"), b"1");
-        let _ = fs::write(current_dir.join(".force_extract_gotty"), b"1");
-    }
     send_log(9, "替换完成", "success", None).await;
 
     // Step 10: Restart
@@ -4862,12 +5078,6 @@ async fn upgrade() -> Json<ApiResponse<String>> {
         return Json(ApiResponse::error(format!("Failed to set permissions: {}", e)));
     }
     let _ = fs::remove_file(temp_path);
-
-    // Mark embedded binaries for forced re-extraction on next start.
-    if let Ok(current_dir) = std::env::current_dir() {
-        let _ = fs::write(current_dir.join(".force_extract_sing_box"), b"1");
-        let _ = fs::write(current_dir.join(".force_extract_gotty"), b"1");
-    }
 
     log_info!("Upgrade successful! Restarting...");
 
@@ -5775,98 +5985,6 @@ async fn test_node(
     }
 }
 
-async fn get_dns_status(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (stored_active, raw_candidates, interval_ms, fail_threshold, cooldown_ms) = {
-        let config = state.config.lock().await;
-        (
-            config
-                .dns_active
-                .clone()
-                .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
-            config
-                .dns_candidates
-                .clone()
-                .unwrap_or_else(default_dns_candidates),
-            config.dns_check_interval_ms.unwrap_or(180_000),
-            config.dns_fail_threshold.unwrap_or(3),
-            config.dns_cooldown_ms.unwrap_or(300_000),
-        )
-    };
-
-    let candidates = normalize_dns_candidates(raw_candidates);
-    let active = sanitize_dns_active(&stored_active);
-
-    let now = Instant::now();
-    let monitor = state.dns_monitor.lock().await;
-    let last_check_secs_ago = monitor
-        .last_check_at
-        .map(|t| now.saturating_duration_since(t).as_secs());
-
-    let mut health: HashMap<String, DnsHealthPublic> = HashMap::new();
-    for tag in candidates.iter() {
-        let entry = monitor.health.get(tag).cloned().unwrap_or_default();
-        let cooldown_remaining_secs = entry
-            .cooldown_until
-            .and_then(|t| t.checked_duration_since(now).map(|d| d.as_secs()))
-            .unwrap_or(0);
-        let last_checked_secs_ago = entry
-            .last_checked_at
-            .map(|t| now.saturating_duration_since(t).as_secs());
-        health.insert(
-            tag.clone(),
-            DnsHealthPublic {
-                ok: entry.ok,
-                failures: entry.failures,
-                cooldown_remaining_secs,
-                last_error: entry.last_error,
-                last_checked_secs_ago,
-            },
-        );
-    }
-
-    Ok(Json(ApiResponse::success(
-        "DNS status",
-        DnsStatusResponse {
-            active,
-            candidates,
-            interval_ms,
-            fail_threshold,
-            cooldown_ms,
-            health,
-            last_check_secs_ago,
-        },
-    )))
-}
-
-async fn check_dns_now(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<DnsStatusResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (stored_active, fail_threshold, cooldown_ms) = {
-        let config = state.config.lock().await;
-        (
-            config
-                .dns_active
-                .clone()
-                .unwrap_or_else(|| DEFAULT_DNS_ACTIVE.to_string()),
-            config.dns_fail_threshold.unwrap_or(3),
-            config.dns_cooldown_ms.unwrap_or(300_000),
-        )
-    };
-    let active = sanitize_dns_active(&stored_active);
-    let candidates = vec![active];
-    let _ = run_dns_checks(
-        &state,
-        &candidates,
-        fail_threshold,
-        cooldown_ms,
-        Duration::from_millis(2_500),
-    )
-    .await;
-    get_dns_status(State(state)).await
-}
-
 async fn switch_dns_active(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DnsSwitchRequest>,
@@ -5908,118 +6026,6 @@ async fn switch_dns_active(
     }
 
     Ok(Json(ApiResponse::success_no_data("DNS switched")))
-}
-
-async fn get_proxy_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<ApiResponse<ProxyStatusResponse>> {
-    let (enabled, pool, active, interval_ms, timeout_ms, fail_threshold, window_size, window_fail_rate, pause_ms) = {
-        let config = state.config.lock().await;
-        (
-            config.proxy_monitor_enabled.unwrap_or(true),
-            config.proxy_pool.clone().unwrap_or_default(),
-            config.selections.get("proxy").cloned(),
-            config.proxy_check_interval_ms.unwrap_or(180_000),
-            config.proxy_check_timeout_ms.unwrap_or(3_000),
-            config.proxy_fail_threshold.unwrap_or(3),
-            config.proxy_window_size.unwrap_or(10),
-            config.proxy_window_fail_rate.unwrap_or(0.6),
-            config.proxy_pause_ms.unwrap_or(60_000),
-        )
-    };
-
-    let now = Instant::now();
-    let monitor = state.proxy_monitor.lock().await;
-    let last_check_secs_ago = monitor
-        .last_check_at
-        .map(|t| now.saturating_duration_since(t).as_secs());
-    let paused_remaining_secs = monitor
-        .paused_until
-        .and_then(|t| t.checked_duration_since(now).map(|d| d.as_secs()))
-        .unwrap_or(0);
-
-    let mut health: HashMap<String, ProxyHealthPublic> = HashMap::new();
-    for tag in pool.iter() {
-        let entry = monitor.health.get(tag).cloned().unwrap_or_default();
-        let last_checked_secs_ago = entry
-            .last_checked_at
-            .map(|t| now.saturating_duration_since(t).as_secs());
-        let window_size_seen = entry.window.len();
-        let window_fails = entry.window.iter().filter(|v| !**v).count() as u32;
-        health.insert(
-            tag.clone(),
-            ProxyHealthPublic {
-                ok: entry.ok,
-                consecutive_failures: entry.consecutive_failures,
-                window_fails,
-                window_size: window_size_seen,
-                last_error: entry.last_error,
-                last_ip: entry.last_ip,
-                last_location: entry.last_location,
-                last_checked_secs_ago,
-            },
-        );
-    }
-
-    Json(ApiResponse::success(
-        "Proxy status",
-        ProxyStatusResponse {
-            enabled,
-            pool,
-            active,
-            interval_ms,
-            timeout_ms,
-            fail_threshold,
-            window_size,
-            window_fail_rate,
-            pause_ms,
-            paused_remaining_secs,
-            health,
-            last_check_secs_ago,
-        },
-    ))
-}
-
-async fn update_proxy_pool(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<ProxyPoolUpdateRequest>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let pool = normalize_pool(&req.pool, 64);
-    {
-        let mut config = state.config.lock().await;
-        config.proxy_pool = if pool.is_empty() { None } else { Some(pool.clone()) };
-        if let Err(e) = save_config(&config).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-    }
-
-    {
-        let mut monitor = state.proxy_monitor.lock().await;
-        monitor.paused_until = None;
-        if pool.is_empty() {
-            monitor.health.clear();
-        } else {
-            monitor.health.retain(|k, _| pool.iter().any(|n| n == k));
-        }
-    }
-
-    if !pool.is_empty() && is_sing_running().await {
-        let current_selected = { state.config.lock().await.selections.get("proxy").cloned() };
-        let should_align = current_selected
-            .as_ref()
-            .map(|cur| !pool.iter().any(|n| n == cur))
-            .unwrap_or(true);
-        if should_align {
-            if let Err(e) = switch_selector_and_save(&state, "proxy", &pool[0]).await {
-                log_error!("Failed to align active proxy after pool update: {}", e);
-            }
-        }
-    }
-
-    Ok(Json(ApiResponse::success_no_data("Proxy pool updated")))
 }
 
 fn redact_tunnel_auth(auth: &TcpTunnelAuth) -> TcpTunnelAuthPublic {
@@ -7962,24 +7968,6 @@ async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + 
     Ok(())
 }
 
-fn normalize_pool(input: &[String], max_len: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for raw in input.iter() {
-        if out.len() >= max_len {
-            break;
-        }
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if seen.insert(trimmed.to_string()) {
-            out.push(trimmed.to_string());
-        }
-    }
-    out
-}
-
 fn normalize_sync_name(name: Option<String>) -> Option<String> {
     name.and_then(|n| {
         let trimmed = n.trim();
@@ -8152,99 +8140,6 @@ fn build_node_type_map(config: &Config, subs: &LoadedSubscriptions) -> HashMap<S
     node_type_by_tag
 }
 
-#[derive(Clone)]
-struct DohCandidate {
-    host: &'static str,
-    ip: &'static str,
-    path: &'static str,
-}
-
-#[derive(Clone, Default)]
-struct DnsMonitorState {
-    health: HashMap<String, DnsHealthEntry>,
-    last_check_at: Option<Instant>,
-}
-
-#[derive(Clone, Default)]
-struct DnsHealthEntry {
-    ok: bool,
-    failures: u32,
-    cooldown_until: Option<Instant>,
-    last_error: Option<String>,
-    last_checked_at: Option<Instant>,
-}
-
-#[derive(Clone, Default)]
-struct ProxyMonitorState {
-    health: HashMap<String, ProxyHealthEntry>,
-    last_check_at: Option<Instant>,
-    paused_until: Option<Instant>,
-}
-
-#[derive(Clone, Default)]
-struct ProxyHealthEntry {
-    ok: bool,
-    consecutive_failures: u32,
-    window: VecDeque<bool>,
-    last_error: Option<String>,
-    last_checked_at: Option<Instant>,
-    last_ip: Option<String>,
-    last_location: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DnsStatusResponse {
-    active: String,
-    candidates: Vec<String>,
-    interval_ms: u64,
-    fail_threshold: u32,
-    cooldown_ms: u64,
-    health: HashMap<String, DnsHealthPublic>,
-    last_check_secs_ago: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct DnsHealthPublic {
-    ok: bool,
-    failures: u32,
-    cooldown_remaining_secs: u64,
-    last_error: Option<String>,
-    last_checked_secs_ago: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct ProxyStatusResponse {
-    enabled: bool,
-    pool: Vec<String>,
-    active: Option<String>,
-    interval_ms: u64,
-    timeout_ms: u64,
-    fail_threshold: u32,
-    window_size: usize,
-    window_fail_rate: f64,
-    pause_ms: u64,
-    paused_remaining_secs: u64,
-    health: HashMap<String, ProxyHealthPublic>,
-    last_check_secs_ago: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct ProxyHealthPublic {
-    ok: bool,
-    consecutive_failures: u32,
-    window_fails: u32,
-    window_size: usize,
-    last_error: Option<String>,
-    last_ip: Option<String>,
-    last_location: Option<String>,
-    last_checked_secs_ago: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct ProxyPoolUpdateRequest {
-    pool: Vec<String>,
-}
-
 #[derive(Deserialize)]
 struct DnsSwitchRequest {
     tag: String,
@@ -8271,113 +8166,6 @@ fn sanitize_dns_active(configured: &str) -> String {
     DEFAULT_DNS_ACTIVE.to_string()
 }
 
-fn doh_candidates_by_tag() -> HashMap<&'static str, DohCandidate> {
-    HashMap::from([
-        (
-            "doh-cf",
-            DohCandidate {
-                host: "dns.cloudflare.com",
-                ip: "1.1.1.1",
-                path: "/dns-query",
-            },
-        ),
-        (
-            "doh-google",
-            DohCandidate {
-                host: "dns.google",
-                ip: "8.8.8.8",
-                path: "/dns-query",
-            },
-        ),
-    ])
-}
-
-fn build_dns_query_bytes(domain: &str) -> Vec<u8> {
-    // Minimal DNS query message for A record.
-    let mut msg: Vec<u8> = Vec::with_capacity(64);
-    msg.extend_from_slice(&0u16.to_be_bytes()); // id
-    msg.extend_from_slice(&0x0100u16.to_be_bytes()); // recursion desired
-    msg.extend_from_slice(&1u16.to_be_bytes()); // qdcount
-    msg.extend_from_slice(&0u16.to_be_bytes()); // ancount
-    msg.extend_from_slice(&0u16.to_be_bytes()); // nscount
-    msg.extend_from_slice(&0u16.to_be_bytes()); // arcount
-    for label in domain.trim_end_matches('.').split('.') {
-        msg.push(label.len().min(63) as u8);
-        msg.extend_from_slice(&label.as_bytes()[..label.len().min(63)]);
-    }
-    msg.push(0); // root
-    msg.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
-    msg.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
-    msg
-}
-
-fn build_dns_query_base64url(domain: &str) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(build_dns_query_bytes(domain))
-}
-
-async fn check_doh(candidate: &DohCandidate, timeout: Duration) -> Result<(), String> {
-    let dns = build_dns_query_base64url("example.com");
-    let url = format!("https://{}{}?dns={}", candidate.host, candidate.path, dns);
-    let socket_addr = format!("{}:443", candidate.ip);
-    let addr = socket_addr
-        .parse()
-        .map_err(|e| format!("invalid socket address {}: {}", socket_addr, e))?;
-
-    let client = reqwest::Client::builder()
-        .resolve(candidate.host, addr)
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("build reqwest client: {}", e))?;
-
-    let resp = client
-        .get(url)
-        .header("accept", "application/dns-message")
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    Ok(())
-}
-
-#[derive(Clone)]
-struct UdpDnsCandidate {
-    ip: &'static str,
-    port: u16,
-}
-
-fn udp_dns_candidates_by_tag() -> HashMap<&'static str, UdpDnsCandidate> {
-    HashMap::from([
-        // Keep tags stable with sing-box template in get_config_template().
-        ("dns-direct", UdpDnsCandidate { ip: "223.5.5.5", port: 53 }),
-    ])
-}
-
-async fn check_udp_dns(candidate: &UdpDnsCandidate, timeout: Duration) -> Result<(), String> {
-    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|e| format!("bind UDP socket failed: {}", e))?;
-
-    let msg = build_dns_query_bytes("example.com");
-    tokio::time::timeout(timeout, sock.send_to(&msg, (candidate.ip, candidate.port)))
-        .await
-        .map_err(|_| "UDP send timeout".to_string())?
-        .map_err(|e| format!("UDP send failed: {}", e))?;
-
-    let mut buf = [0u8; 512];
-    let (n, _) = tokio::time::timeout(timeout, sock.recv_from(&mut buf))
-        .await
-        .map_err(|_| "UDP recv timeout".to_string())?
-        .map_err(|e| format!("UDP recv failed: {}", e))?;
-
-    if n < 12 {
-        return Err("short DNS response".to_string());
-    }
-    Ok(())
-}
-
 async fn is_sing_running() -> bool {
     let mut lock = SING_PROCESS.lock().await;
     if let Some(proc) = lock.as_mut() {
@@ -8385,81 +8173,6 @@ async fn is_sing_running() -> bool {
     } else {
         false
     }
-}
-
-async fn run_dns_checks(
-    state: &Arc<AppState>,
-    candidates: &[String],
-    fail_threshold: u32,
-    cooldown_ms: u64,
-    timeout: Duration,
-) -> HashMap<String, bool> {
-    let candidate_map = doh_candidates_by_tag();
-    let udp_candidate_map = udp_dns_candidates_by_tag();
-    let now = Instant::now();
-
-    let mut healthy: HashMap<String, bool> = HashMap::new();
-    let mut monitor = state.dns_monitor.lock().await;
-    monitor.last_check_at = Some(now);
-
-    for tag in candidates.iter() {
-        let entry = monitor.health.entry(tag.clone()).or_default();
-        entry.last_checked_at = Some(now);
-
-        if let Some(until) = entry.cooldown_until {
-            if until > now {
-                entry.ok = false;
-                healthy.insert(tag.clone(), false);
-                continue;
-            }
-        }
-
-        if let Some(c) = candidate_map.get(tag.as_str()) {
-            match check_doh(c, timeout).await {
-                Ok(()) => {
-                    entry.ok = true;
-                    entry.failures = 0;
-                    entry.cooldown_until = None;
-                    entry.last_error = None;
-                    healthy.insert(tag.clone(), true);
-                }
-                Err(e) => {
-                    entry.ok = false;
-                    entry.failures = entry.failures.saturating_add(1);
-                    entry.last_error = Some(e);
-                    if entry.failures >= fail_threshold {
-                        entry.cooldown_until = Some(Instant::now() + Duration::from_millis(cooldown_ms));
-                    }
-                    healthy.insert(tag.clone(), false);
-                }
-            }
-        } else if let Some(c) = udp_candidate_map.get(tag.as_str()) {
-            match check_udp_dns(c, timeout).await {
-                Ok(()) => {
-                    entry.ok = true;
-                    entry.failures = 0;
-                    entry.cooldown_until = None;
-                    entry.last_error = None;
-                    healthy.insert(tag.clone(), true);
-                }
-                Err(e) => {
-                    entry.ok = false;
-                    entry.failures = entry.failures.saturating_add(1);
-                    entry.last_error = Some(e);
-                    if entry.failures >= fail_threshold {
-                        entry.cooldown_until = Some(Instant::now() + Duration::from_millis(cooldown_ms));
-                    }
-                    healthy.insert(tag.clone(), false);
-                }
-            }
-        } else {
-            entry.ok = false;
-            entry.last_error = Some("Unknown DNS candidate".to_string());
-            healthy.insert(tag.clone(), false);
-        }
-    }
-
-    healthy
 }
 
 fn normalize_dns_candidates(raw: Vec<String>) -> Vec<String> {
@@ -8485,236 +8198,8 @@ fn normalize_dns_candidates(raw: Vec<String>) -> Vec<String> {
     out
 }
 
-async fn dns_health_monitor(state: Arc<AppState>) {
-    loop {
-        let (raw_candidates, interval_ms, fail_threshold, cooldown_ms) = {
-            let config = state.config.lock().await;
-            (
-                config
-                    .dns_candidates
-                    .clone()
-                    .unwrap_or_else(default_dns_candidates),
-                config.dns_check_interval_ms.unwrap_or(180_000),
-                config.dns_fail_threshold.unwrap_or(3),
-                config.dns_cooldown_ms.unwrap_or(300_000),
-            )
-        };
-
-        let candidates = normalize_dns_candidates(raw_candidates);
-        let _ = run_dns_checks(
-            &state,
-            &candidates,
-            fail_threshold,
-            cooldown_ms,
-            Duration::from_millis(2_500),
-        )
-        .await;
-
-        sleep(Duration::from_millis(interval_ms)).await;
-    }
-}
-
-async fn check_proxy_health_via_3030(timeout: Duration) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("build reqwest client: {}", e))?;
-
-    let resp = client
-        .get("https://3.0.3.0/ips")
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {}", e))?;
-
-    if resp.status() != StatusCode::OK {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    Ok(())
-}
-
-fn proxy_should_failover(
-    entry: &ProxyHealthEntry,
-    fail_threshold: u32,
-    window_size: usize,
-    window_fail_rate: f64,
-) -> bool {
-    if entry.consecutive_failures >= fail_threshold {
-        return true;
-    }
-    if window_size > 0 && entry.window.len() >= window_size {
-        let fails = entry.window.iter().filter(|v| !**v).count() as f64;
-        let rate = fails / (entry.window.len() as f64);
-        return rate >= window_fail_rate;
-    }
-    false
-}
-
-async fn record_proxy_check_result(
-    state: &Arc<AppState>,
-    node: &str,
-    now: Instant,
-    ok: bool,
-    ip: Option<String>,
-    location: Option<String>,
-    error: Option<String>,
-    window_size: usize,
-) {
-    let mut monitor = state.proxy_monitor.lock().await;
-    monitor.last_check_at = Some(now);
-    let entry = monitor.health.entry(node.to_string()).or_default();
-    entry.last_checked_at = Some(now);
-    entry.ok = ok;
-    entry.last_ip = ip;
-    entry.last_location = location;
-    entry.last_error = error;
-    if ok {
-        entry.consecutive_failures = 0;
-    } else {
-        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-    }
-    entry.window.push_back(ok);
-    while window_size > 0 && entry.window.len() > window_size {
-        entry.window.pop_front();
-    }
-}
-
-async fn proxy_health_monitor(state: Arc<AppState>) {
-    loop {
-        let (enabled, pool, interval_ms, timeout_ms, fail_threshold, window_size, window_fail_rate, pause_ms) = {
-            let config = state.config.lock().await;
-            let raw_pool = config.proxy_pool.clone().unwrap_or_default();
-            (
-                config.proxy_monitor_enabled.unwrap_or(true),
-                normalize_pool(&raw_pool, 64),
-                config.proxy_check_interval_ms.unwrap_or(180_000),
-                config.proxy_check_timeout_ms.unwrap_or(3_000),
-                config.proxy_fail_threshold.unwrap_or(3),
-                config.proxy_window_size.unwrap_or(10),
-                config.proxy_window_fail_rate.unwrap_or(0.6),
-                config.proxy_pause_ms.unwrap_or(60_000),
-            )
-        };
-
-        if !enabled || pool.len() < 2 || !is_sing_running().await {
-            sleep(Duration::from_millis(interval_ms)).await;
-            continue;
-        }
-
-        let now = Instant::now();
-        {
-            let mut monitor = state.proxy_monitor.lock().await;
-            if let Some(until) = monitor.paused_until {
-                if until > now {
-                    sleep(Duration::from_millis(interval_ms)).await;
-                    continue;
-                }
-                monitor.paused_until = None;
-            }
-        }
-
-        // Best-effort: prune pool by current selector choices (e.g. subscription changed)
-        let pool = {
-            let client = reqwest::Client::new();
-            if let Ok(choices) = clash_get_selector_choices(&client, "proxy").await {
-                let choices_set: HashSet<String> = choices.into_iter().collect();
-                let pruned: Vec<String> = pool
-                    .iter()
-                    .cloned()
-                    .filter(|n| choices_set.contains(n))
-                    .collect();
-                if pruned.len() >= 2 { pruned } else { pool }
-            } else {
-                pool
-            }
-        };
-
-        let active = { state.config.lock().await.selections.get("proxy").cloned() };
-        let active = match active {
-            Some(a) if pool.iter().any(|n| n == &a) => a,
-            _ => {
-                let desired = pool[0].clone();
-                if let Err(e) = switch_selector_and_save(&state, "proxy", &desired).await {
-                    log_error!("Proxy monitor: failed to set initial active proxy: {}", e);
-                    sleep(Duration::from_millis(interval_ms)).await;
-                    continue;
-                }
-                desired
-            }
-        };
-
-        let timeout = Duration::from_millis(timeout_ms);
-        let check_now = Instant::now();
-        let (ok, ip, location, err) = match check_proxy_health_via_3030(timeout).await {
-            Ok(()) => (true, None, None, None),
-            Err(e) => (false, None, None, Some(e)),
-        };
-        record_proxy_check_result(&state, &active, check_now, ok, ip, location, err, window_size).await;
-
-        let should_failover = {
-            let monitor = state.proxy_monitor.lock().await;
-            let entry = monitor.health.get(&active).cloned().unwrap_or_default();
-            proxy_should_failover(&entry, fail_threshold, window_size, window_fail_rate)
-        };
-
-        if !should_failover {
-            sleep(Duration::from_millis(interval_ms)).await;
-            continue;
-        }
-
-        let start_idx = pool.iter().position(|n| n == &active).unwrap_or(0);
-        let mut switched_ok = false;
-        for offset in 1..pool.len() {
-            let idx = (start_idx + offset) % pool.len();
-            let candidate = pool[idx].clone();
-
-            if let Err(e) = switch_selector_and_save(&state, "proxy", &candidate).await {
-                record_proxy_check_result(
-                    &state,
-                    &candidate,
-                    Instant::now(),
-                    false,
-                    None,
-                    None,
-                    Some(format!("switch failed: {}", e)),
-                    window_size,
-                )
-                .await;
-                continue;
-            }
-
-            sleep(Duration::from_millis(500)).await;
-
-            let check_now = Instant::now();
-            let (ok, ip, location, err) = match check_proxy_health_via_3030(timeout).await {
-                Ok(()) => (true, None, None, None),
-                Err(e) => (false, None, None, Some(e)),
-            };
-            record_proxy_check_result(&state, &candidate, check_now, ok, ip, location, err, window_size).await;
-
-            if ok {
-                switched_ok = true;
-                break;
-            }
-        }
-
-        if !switched_ok {
-            log_error!("Proxy monitor: all candidates failed; pausing");
-            let mut monitor = state.proxy_monitor.lock().await;
-            monitor.paused_until = Some(Instant::now() + Duration::from_millis(pause_ms));
-        }
-
-        sleep(Duration::from_millis(interval_ms)).await;
-    }
-}
-
 async fn apply_saved_selections(config: &Config) -> Result<(), String> {
-    let proxy_selection = config
-        .selections
-        .get("proxy")
-        .cloned()
-        .or_else(|| config.proxy_pool.as_ref().and_then(|p| p.first().cloned()));
-    let has_any = !config.selections.is_empty() || proxy_selection.is_some();
-    if !has_any {
+    if config.selections.is_empty() {
         return Ok(());
     }
 
@@ -8728,11 +8213,8 @@ async fn apply_saved_selections(config: &Config) -> Result<(), String> {
         .cloned()
         .unwrap_or_else(|| "proxy".to_string());
 
-    if proxy_selection.is_some() || config.selections.contains_key("_dns") {
+    if config.selections.contains_key("_dns") {
         ordered.push(("_dns".to_string(), desired_dns_selection));
-    }
-    if let Some(proxy) = proxy_selection {
-        ordered.push(("proxy".to_string(), proxy));
     }
     for (group, name) in config.selections.iter() {
         if group == "proxy" || group == "_dns" {
@@ -8887,18 +8369,13 @@ async fn load_subscriptions_and_update_state(
     loaded
 }
 
-/// Extract embedded sing-box binary to current working directory
-fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+/// Check if sing-box binary exists in current working directory
+fn check_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let current_dir = std::env::current_dir()?;
     let sing_box_path = current_dir.join("sing-box");
-    let force_marker = current_dir.join(".force_extract_sing_box");
 
-    if force_marker.exists() || !sing_box_path.exists() {
-        log_info!("Extracting embedded sing-box binary to {:?}", sing_box_path);
-        fs::write(&sing_box_path, SING_BOX_BINARY)?;
-        fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755))?;
-        log_info!("sing-box binary extracted successfully");
-        let _ = fs::remove_file(&force_marker);
+    if !sing_box_path.exists() {
+        return Err("sing-box binary not found".into());
     }
 
     let dashboard_dir = current_dir.join("dashboard");
@@ -8909,18 +8386,13 @@ fn extract_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync
     Ok(current_dir)
 }
 
-/// Extract embedded gotty binary to current working directory
-fn extract_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+/// Check if gotty binary exists in current working directory
+fn check_gotty() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let current_dir = std::env::current_dir()?;
     let gotty_path = current_dir.join("gotty");
-    let force_marker = current_dir.join(".force_extract_gotty");
 
-    if force_marker.exists() || !gotty_path.exists() {
-        log_info!("Extracting embedded gotty binary to {:?}", gotty_path);
-        fs::write(&gotty_path, GOTTY_BINARY)?;
-        fs::set_permissions(&gotty_path, fs::Permissions::from_mode(0o755))?;
-        log_info!("gotty binary extracted successfully");
-        let _ = fs::remove_file(&force_marker);
+    if !gotty_path.exists() {
+        return Err("gotty binary not found".into());
     }
 
     Ok(gotty_path)
@@ -9150,7 +8622,7 @@ async fn start_terminal_internal(
         lock.remove(id);
     }
 
-    let gotty_path = extract_gotty()?;
+    let gotty_path = check_gotty()?;
     log_info!("Starting gotty from: {:?}", gotty_path);
 
     let mut command = tokio::process::Command::new(&gotty_path);
@@ -10415,17 +9887,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 nodes: vec![],
                 dns_active: None,
                 dns_candidates: None,
-                dns_check_interval_ms: None,
-                dns_fail_threshold: None,
-                dns_cooldown_ms: None,
-                proxy_pool: None,
-                proxy_monitor_enabled: None,
-                proxy_check_interval_ms: None,
-                proxy_check_timeout_ms: None,
-                proxy_fail_threshold: None,
-                proxy_window_size: None,
-                proxy_window_fail_rate: None,
-                proxy_pause_ms: None,
                 tcp_tunnels: vec![],
                 tcp_tunnel_sets: vec![],
                 subscriptions: vec![],
@@ -10459,11 +9920,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let port = config.port.unwrap_or(DEFAULT_PORT);
 
-    // Extract embedded sing-box binary and determine working directory
+    // Check sing-box binary and determine working directory
     let sing_box_home = if let Some(custom_home) = &config.sing_box_home {
         custom_home.clone()
     } else {
-        extract_sing_box()?.to_string_lossy().to_string()
+        match check_sing_box() {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(_) => {
+                // sing-box not found, use current directory as home
+                std::env::current_dir()?.to_string_lossy().to_string()
+            }
+        }
     };
 
     log_info!("Loading subscriptions from: {}", subscriptions_root.display());
@@ -10540,8 +10007,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         subscriptions_root: subscriptions_root.clone(),
         subscription_status: Mutex::new(subscription_status),
         node_type_by_tag: Mutex::new(node_type_by_tag),
-        dns_monitor: Mutex::new(DnsMonitorState::default()),
-        proxy_monitor: Mutex::new(ProxyMonitorState::default()),
         setup_required: AtomicBool::new(setup_required),
         tcp_tunnel: tcp_tunnel::TunnelManager::new(),
         full_tunnel: full_tunnel::FullTunnelManager::new(),
@@ -10559,18 +10024,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .sync_from_config(app_state.clone(), cfg.tcp_tunnel_sets.clone())
             .await;
         app_state.sync_manager.apply_config(&cfg.syncs).await;
-    }
-
-    // DNS health monitor (best-effort). It updates config.dns_active and restarts sing-box when needed.
-    {
-        let state_clone = app_state.clone();
-        tokio::spawn(async move { dns_health_monitor(state_clone).await });
-    }
-
-    // Proxy health monitor (best-effort). It periodically checks current proxy via 3.0.3.0 and fails over within proxy_pool.
-    {
-        let state_clone = app_state.clone();
-        tokio::spawn(async move { proxy_health_monitor(state_clone).await });
     }
 
     {
@@ -10598,9 +10051,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let protected_routes = Router::new()
         // Status and service control
         .route("/api/status", get(get_status))
+        .route("/api/binaries/status", get(get_binaries_status))
+        .route("/api/binaries/install/sing-box", post(install_sing_box))
+        .route("/api/binaries/install/gotty", post(install_gotty))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/status", get(get_system_status))
         .route("/api/system/metrics", get(get_system_metrics))
+        .route("/api/system/tools", get(get_tools_status))
         .route("/api/password", post(update_password))
         .route("/api/service/start", post(start_service))
         .route("/api/service/stop", post(stop_service))
@@ -10635,8 +10092,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/clash/proxies/{node}/delay", get(clash_test_delay))
         .route("/api/clash/proxies/delay", post(clash_test_batch_delay))
         .route("/api/selections", get(get_selections))
-        .route("/api/proxy/status", get(get_proxy_status))
-        .route("/api/proxy/pool", put(update_proxy_pool))
         // Subscription file management
         .route("/api/sub-files", get(get_sub_files))
         .route("/api/sub-files/reload", post(reload_sub_files))
@@ -10652,8 +10107,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Use a standalone endpoint to avoid colliding with node tags (e.g. tag == "test")
         .route("/api/node-test", post(test_node))
         .route("/api/nodes/{tag}", get(get_node).put(update_node))
-        .route("/api/dns/status", get(get_dns_status))
-        .route("/api/dns/check", post(check_dns_now))
         .route("/api/dns/switch", post(switch_dns_active))
         // TCP reverse tunnels (SSH -R)
         .route("/api/tcp-tunnels", get(get_tcp_tunnels))

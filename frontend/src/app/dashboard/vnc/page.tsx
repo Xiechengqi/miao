@@ -6,7 +6,7 @@ import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
 import { VncSession } from "@/types/api";
 import { formatUptime } from "@/lib/utils";
-import { Monitor, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil } from "lucide-react";
+import { Monitor, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, AlertTriangle } from "lucide-react";
 
 const defaultForm = {
   name: "",
@@ -31,10 +31,21 @@ export default function VncPage() {
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultForm);
+  const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
     loadSessions();
+    checkToolsStatus();
   }, []);
+
+  const checkToolsStatus = async () => {
+    try {
+      const tools = await api.getToolsStatus();
+      setVncAvailable(tools.vnc);
+    } catch (error) {
+      console.error("Failed to check tools status:", error);
+    }
+  };
 
   const loadSessions = async () => {
     try {
@@ -180,6 +191,21 @@ export default function VncPage() {
 
   return (
     <div className="space-y-6">
+      {/* VNC Not Available Warning */}
+      {vncAvailable === false && (
+        <Card className="p-4 bg-amber-50 border-amber-200">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-800">VNC 服务不可用</p>
+              <p className="text-sm text-amber-700 mt-1">
+                当前环境未安装 vncserver 或 vncpasswd，请先安装 KasmVNC 或 TigerVNC 后再使用此功能。
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>

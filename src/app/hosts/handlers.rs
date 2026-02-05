@@ -123,7 +123,6 @@ pub async fn get_hosts(
                 .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
             last_connected_at: h.last_connected_at.map(|ts| chrono::DateTime::from_timestamp(ts, 0)
                 .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
-            last_test_result: None,
         }
     }).collect();
 
@@ -183,7 +182,6 @@ pub async fn get_host(
                 .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
             last_connected_at: host.last_connected_at.map(|ts| chrono::DateTime::from_timestamp(ts, 0)
                 .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
-            last_test_result: None,
         },
         system_info: None,
     };
@@ -309,7 +307,6 @@ pub async fn create_host(
         updated_at: host.updated_at.map(|ts| chrono::DateTime::from_timestamp(ts, 0)
             .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
         last_connected_at: None,
-        last_test_result: None,
     };
 
     Ok(Json(json!({"success": true, "message": "Host created", "data": response})))
@@ -438,7 +435,6 @@ pub async fn update_host(
             .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
         last_connected_at: updated.last_connected_at.map(|ts| chrono::DateTime::from_timestamp(ts, 0)
             .map(|dt| dt.to_rfc3339()).unwrap_or_default()),
-        last_test_result: None,
     };
 
     Ok(Json(json!({"success": true, "message": "Host updated", "data": response})))
@@ -463,12 +459,12 @@ pub async fn delete_host(
     Ok((StatusCode::NO_CONTENT, Json(json!({"success": true, "message": "Host deleted"}))))
 }
 
-/// 测试主机连接
-pub async fn test_host(
+/// 测试 SSH 连接
+pub async fn test_ssh(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    use crate::{test_host_connection, ping_host};
+    use crate::test_ssh_connection;
 
     let host = {
         let config = state.config.lock().await;
@@ -477,67 +473,106 @@ pub async fn test_host(
             .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?
     };
 
-    // 实际执行 SSH 连接测试
-    let (ssh_ok, ssh_error) = match test_host_connection(&host).await {
-        Ok(()) => (true, None),
-        Err(e) => (false, Some(e)),
+    // 执行 SSH 连接测试
+    match test_ssh_connection(&host).await {
+        Ok(latency_ms) => {
+            let response = SSHTestResponse {
+                id: host.id.clone(),
+                host: host.host.clone(),
+                success: true,
+                latency_ms: Some(latency_ms),
+                error: None,
+                timestamp: Utc::now().to_rfc3339(),
+            };
+            Ok(Json(json!({"success": true, "data": response})))
+        }
+        Err(e) => {
+            let response = SSHTestResponse {
+                id: host.id.clone(),
+                host: host.host.clone(),
+                success: false,
+                latency_ms: None,
+                error: Some(e),
+                timestamp: Utc::now().to_rfc3339(),
+            };
+            Ok(Json(json!({"success": true, "data": response})))
+        }
+    }
+}
+
+/// 测试 Ping 延迟
+pub async fn test_ping(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use crate::ping_host;
+
+    let host = {
+        let config = state.config.lock().await;
+        config.hosts.iter().find(|h| h.id == id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?
     };
 
-    // 实际执行 ping 测试
-    let ping_avg_ms = ping_host(&host.host).await;
+    // 执行 ping 测试
+    let (avg_latency_ms, packet_loss_percent) = match ping_host(&host.host).await {
+        Some(latency) => (Some(latency), Some(0.0)),
+        None => (None, Some(100.0)),
+    };
 
-    let response = HostTestResponse {
+    let response = PingTestResponse {
         id: host.id.clone(),
         host: host.host.clone(),
-        ssh_ok,
-        ssh_error,
-        ping_avg_ms,
+        success: avg_latency_ms.is_some(),
+        avg_latency_ms,
+        packet_loss_percent,
+        error: if avg_latency_ms.is_none() { Some("Ping failed".to_string()) } else { None },
         timestamp: Utc::now().to_rfc3339(),
     };
 
-    Ok(Json(json!({"success": true, "message": "Test completed", "data": response})))
+    Ok(Json(json!({"success": true, "data": response})))
 }
 
-/// 测试主机配置（不需要已保存的主机）
-pub async fn test_host_config(
-    Json(req): Json<HostTestConfigRequest>,
+/// 测试带宽
+pub async fn test_bandwidth(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    use crate::{HostConfig, HostAuth, test_host_connection};
+    use crate::test_bandwidth;
 
-    let port = req.port.unwrap_or(22);
-
-    let auth = match req.auth_type.as_str() {
-        "password" => HostAuth::Password {
-            password: req.password,
-        },
-        _ => HostAuth::PrivateKeyPath {
-            path: req.private_key_path.unwrap_or_default(),
-            passphrase: req.private_key_passphrase,
-        },
+    let host = {
+        let config = state.config.lock().await;
+        config.hosts.iter().find(|h| h.id == id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?
     };
 
-    let cfg = HostConfig {
-        id: String::new(),
-        name: None,
-        host: req.host.clone(),
-        port,
-        username: req.username,
-        auth,
-        group_id: None,
-        tags: vec![],
-        description: None,
-        enabled: true,
-        connection_timeout_ms: 10000,
-        keepalive_interval_ms: 30000,
-        created_at: None,
-        updated_at: None,
-        last_connected_at: None,
-        last_test_result: None,
-    };
-
-    match test_host_connection(&cfg).await {
-        Ok(()) => Ok(Json(json!({"success": true, "message": "Connection successful"}))),
-        Err(e) => Err((StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": e})))),
+    // 执行带宽测试
+    match test_bandwidth(&host).await {
+        Ok((upload_mbps, download_mbps)) => {
+            let response = BandwidthTestResponse {
+                id: host.id.clone(),
+                host: host.host.clone(),
+                success: true,
+                upload_mbps: Some(upload_mbps),
+                download_mbps: Some(download_mbps),
+                error: None,
+                timestamp: Utc::now().to_rfc3339(),
+            };
+            Ok(Json(json!({"success": true, "data": response})))
+        }
+        Err(e) => {
+            let response = BandwidthTestResponse {
+                id: host.id.clone(),
+                host: host.host.clone(),
+                success: false,
+                upload_mbps: None,
+                download_mbps: None,
+                error: Some(e),
+                timestamp: Utc::now().to_rfc3339(),
+            };
+            Ok(Json(json!({"success": true, "data": response})))
+        }
     }
 }
 

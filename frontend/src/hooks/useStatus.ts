@@ -16,7 +16,7 @@ export function useStatus() {
     }
   }, [setStatus]);
 
-  const refreshDnsStatus = useCallback(async () => {
+  const checkDnsNow = useCallback(async () => {
     try {
       const data = await api.getDnsStatus();
       setDnsStatus(data);
@@ -61,30 +61,10 @@ export function useStatus() {
     }
   }, [status.running, setLoading, addToast, refreshStatus]);
 
-  const checkDnsNow = useCallback(async () => {
-    setLoading(true, "dns-check");
-    try {
-      await api.checkDns();
-      await refreshDnsStatus();
-      addToast({
-        type: "success",
-        message: "DNS 检测完成",
-      });
-    } catch (error) {
-      addToast({
-        type: "error",
-        message: error instanceof Error ? error.message : "DNS 检测失败",
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [refreshDnsStatus, setLoading, addToast]);
-
   const switchDnsActive = useCallback(async (name: string) => {
     setLoading(true, "dns-switch");
     try {
       await api.switchDns(name);
-      await refreshDnsStatus();
       addToast({
         type: "success",
         message: `已切换 DNS 到 ${name}`,
@@ -97,7 +77,7 @@ export function useStatus() {
     } finally {
       setLoading(false);
     }
-  }, [setLoading, addToast, refreshDnsStatus]);
+  }, [setLoading, addToast]);
 
   return {
     status,
@@ -105,9 +85,8 @@ export function useStatus() {
     loading,
     loadingAction,
     refreshStatus,
-    refreshDnsStatus,
     toggleService,
-    checkDnsNow,
     switchDnsActive,
+    checkDnsNow,
   };
 }

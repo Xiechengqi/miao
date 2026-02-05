@@ -19,11 +19,36 @@ const defaultHostForm = {
   private_key_passphrase: "",
 };
 
-const HOST_TEST_STORAGE_KEY = "miao_host_test_results";
+const HOST_TEST_STORAGE_KEY = "miao_host_test_results_v2";
 
-type HostTestResult = {
+interface SSHResult {
   success: boolean;
-};
+  latency_ms?: number;
+  error?: string | null;
+  timestamp?: number;
+}
+
+interface PingResult {
+  success: boolean;
+  avg_latency_ms?: number;
+  packet_loss_percent?: number;
+  error?: string | null;
+  timestamp?: number;
+}
+
+interface BandwidthResult {
+  success: boolean;
+  upload_mbps?: number;
+  download_mbps?: number;
+  error?: string | null;
+  timestamp?: number;
+}
+
+interface HostTestResults {
+  ssh?: SSHResult;
+  ping?: PingResult;
+  bandwidth?: BandwidthResult;
+}
 
 export default function HostsPage() {
   const { setLoading, loading, addToast } = useStore();
@@ -31,10 +56,12 @@ export default function HostsPage() {
 
   const [hosts, setHosts] = useState<Host[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
-  const [testingHostId, setTestingHostId] = useState<string | null>(null);
+  const [testingSshId, setTestingSshId] = useState<string | null>(null);
+  const [testingPingId, setTestingPingId] = useState<string | null>(null);
+  const [testingBandwidthId, setTestingBandwidthId] = useState<string | null>(null);
   const [deletingHostId, setDeletingHostId] = useState<string | null>(null);
   const [pendingDeleteHost, setPendingDeleteHost] = useState<Host | null>(null);
-  const [hostTestResults, setHostTestResults] = useState<Record<string, HostTestResult>>({});
+  const [hostTestResults, setHostTestResults] = useState<Record<string, HostTestResults>>({});
   const [defaultPrivateKeyPath, setDefaultPrivateKeyPath] = useState<string | null>(null);
   const [autoFilledKeyPath, setAutoFilledKeyPath] = useState(false);
   const [defaultKeyPathLoaded, setDefaultKeyPathLoaded] = useState(false);
@@ -42,7 +69,6 @@ export default function HostsPage() {
   const [showModal, setShowModal] = useState(false);
   const [editingHostId, setEditingHostId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultHostForm);
-  const [testingForm, setTestingForm] = useState(false);
 
   const canSubmit = useMemo(() => {
     if (!formData.host.trim() || !formData.username.trim()) return false;
@@ -82,7 +108,7 @@ export default function HostsPage() {
   }, []);
 
   useEffect(() => {
-    const savedResults = safeGetItem<Record<string, HostTestResult>>(HOST_TEST_STORAGE_KEY, {});
+    const savedResults = safeGetItem<Record<string, HostTestResults>>(HOST_TEST_STORAGE_KEY, {});
     if (Object.keys(savedResults).length > 0) {
       setHostTestResults(savedResults);
     }
@@ -118,8 +144,8 @@ export default function HostsPage() {
         return;
       }
       localStorage.setItem(HOST_TEST_STORAGE_KEY, JSON.stringify(hostTestResults));
-    } catch (error) {
-      console.warn("Failed to save host test results:", error);
+    } catch {
+      console.warn("Failed to save host test results");
     }
   }, [hostTestResults]);
 
@@ -201,9 +227,21 @@ export default function HostsPage() {
       if (editingHostId) {
         await api.updateHost(editingHostId, payload);
         addToast({ type: "success", message: "主机已更新" });
+        // 自动测试更新的主机
+        const hostToTest = hosts.find(h => h.id === editingHostId);
+        if (hostToTest) {
+          void handleSSHTest(hostToTest);
+          void handlePingTest(hostToTest);
+          void handleBandwidthTest(hostToTest);
+        }
       } else {
-        await api.createHost(payload as Omit<Host, "id">);
+        const created = await api.createHost(payload as Omit<Host, "id">);
         addToast({ type: "success", message: "主机已添加" });
+        // 自动测试新创建的主机
+        const hostToTest = { ...created };
+        void handleSSHTest(hostToTest);
+        void handlePingTest(hostToTest);
+        void handleBandwidthTest(hostToTest);
       }
       closeModal();
       loadHosts();
@@ -217,39 +255,113 @@ export default function HostsPage() {
     }
   };
 
-  const handleTest = async (host: Host) => {
-    setTestingHostId(host.id);
+  const handleSSHTest = async (host: Host) => {
+    setTestingSshId(host.id);
     try {
-      await api.testHost(host.id);
-      setHostTestResults((prev) => ({ ...prev, [host.id]: { success: true } }));
-      addToast({ type: "success", message: "连接测试成功" });
+      const result = await api.testSSHConnection(host.id);
+      setHostTestResults((prev) => ({
+        ...prev,
+        [host.id]: {
+          ...prev[host.id],
+          ssh: {
+            success: result.success,
+            latency_ms: result.latency_ms,
+            error: result.error,
+            timestamp: Date.now(),
+          },
+        },
+      }));
+      if (result.success) {
+        addToast({ type: "success", message: `SSH 连接成功 (${result.latency_ms?.toFixed(0) ?? 0}ms)` });
+      } else {
+        addToast({ type: "error", message: `SSH 连接失败: ${result.error}` });
+      }
     } catch (error) {
-      setHostTestResults((prev) => ({ ...prev, [host.id]: { success: false } }));
-      addToast({ type: "error", message: error instanceof Error ? error.message : "连接测试失败" });
+      setHostTestResults((prev) => ({
+        ...prev,
+        [host.id]: {
+          ...prev[host.id],
+          ssh: { success: false, error: error instanceof Error ? error.message : "未知错误", timestamp: Date.now() },
+        },
+      }));
+      addToast({ type: "error", message: error instanceof Error ? error.message : "SSH 测试失败" });
     } finally {
-      setTestingHostId(null);
+      setTestingSshId(null);
     }
   };
 
-  const handleFormTest = async () => {
-    if (!canSubmit) return;
-    setTestingForm(true);
+  const handlePingTest = async (host: Host) => {
+    setTestingPingId(host.id);
     try {
-      await api.testHostConfig({
-        name: formData.name.trim() || null,
-        host: formData.host.trim(),
-        port: Number(formData.port) || 22,
-        username: formData.username.trim(),
-        auth_type: formData.auth_type,
-        password: formData.auth_type === "password" ? formData.password.trim() : undefined,
-        private_key_path: formData.auth_type === "private_key_path" ? formData.private_key_path.trim() : undefined,
-        private_key_passphrase: formData.auth_type === "private_key_path" ? formData.private_key_passphrase.trim() : undefined,
-      });
-      addToast({ type: "success", message: "连接测试成功" });
+      const result = await api.testPing(host.id);
+      setHostTestResults((prev) => ({
+        ...prev,
+        [host.id]: {
+          ...prev[host.id],
+          ping: {
+            success: result.success,
+            avg_latency_ms: result.avg_latency_ms,
+            packet_loss_percent: result.packet_loss_percent,
+            error: result.error,
+            timestamp: Date.now(),
+          },
+        },
+      }));
+      if (result.success) {
+        addToast({ type: "success", message: `延迟: ${result.avg_latency_ms?.toFixed(0) ?? 0}ms` });
+      } else {
+        addToast({ type: "error", message: `Ping 失败: ${result.error}` });
+      }
     } catch (error) {
-      addToast({ type: "error", message: error instanceof Error ? error.message : "连接测试失败" });
+      setHostTestResults((prev) => ({
+        ...prev,
+        [host.id]: {
+          ...prev[host.id],
+          ping: { success: false, error: error instanceof Error ? error.message : "未知错误", timestamp: Date.now() },
+        },
+      }));
+      addToast({ type: "error", message: error instanceof Error ? error.message : "Ping 测试失败" });
     } finally {
-      setTestingForm(false);
+      setTestingPingId(null);
+    }
+  };
+
+  const handleBandwidthTest = async (host: Host) => {
+    setTestingBandwidthId(host.id);
+    try {
+      const result = await api.testBandwidth(host.id);
+      setHostTestResults((prev) => ({
+        ...prev,
+        [host.id]: {
+          ...prev[host.id],
+          bandwidth: {
+            success: result.success,
+            upload_mbps: result.upload_mbps,
+            download_mbps: result.download_mbps,
+            error: result.error,
+            timestamp: Date.now(),
+          },
+        },
+      }));
+      if (result.success) {
+        addToast({
+          type: "success",
+          message: `上传: ${result.upload_mbps?.toFixed(1) ?? 0}Mbps / 下载: ${result.download_mbps?.toFixed(1) ?? 0}Mbps`,
+        });
+      } else {
+        addToast({ type: "error", message: `带宽测试失败: ${result.error}` });
+      }
+    } catch (error) {
+      setHostTestResults((prev) => ({
+        ...prev,
+        [host.id]: {
+          ...prev[host.id],
+          bandwidth: { success: false, error: error instanceof Error ? error.message : "未知错误", timestamp: Date.now() },
+        },
+      }));
+      addToast({ type: "error", message: error instanceof Error ? error.message : "带宽测试失败" });
+    } finally {
+      setTestingBandwidthId(null);
     }
   };
 
@@ -326,25 +438,65 @@ export default function HostsPage() {
                         {host.name || host.host}
                       </span>
                       <Badge variant="info">{getAuthTypeLabel(host.auth_type)}</Badge>
-                      {hostTestResults[host.id] && (
-                        <Badge variant={hostTestResults[host.id].success ? "success" : "error"}>
-                          {hostTestResults[host.id].success ? "测试成功" : "测试失败"}
-                        </Badge>
-                      )}
                     </div>
                     <div className="text-sm text-slate-500 mt-1">
                       {host.username}@{host.host}:{host.port}
+                    </div>
+                    {/* 测试结果显示 */}
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      {/* SSH 结果 */}
+                      {hostTestResults[host.id]?.ssh && (
+                        <Badge variant={hostTestResults[host.id]!.ssh!.success ? "success" : "error"}>
+                          {hostTestResults[host.id]!.ssh!.success
+                            ? `SSH ${hostTestResults[host.id]!.ssh!.latency_ms?.toFixed(0) ?? 0}ms`
+                            : `SSH ${hostTestResults[host.id]!.ssh!.error ?? "失败"}`}
+                        </Badge>
+                      )}
+                      {/* Ping 结果 */}
+                      {hostTestResults[host.id]?.ping && (
+                        <Badge variant={hostTestResults[host.id]!.ping!.success ? "success" : "error"}>
+                          {hostTestResults[host.id]!.ping!.success
+                            ? `延迟 ${hostTestResults[host.id]!.ping!.avg_latency_ms?.toFixed(0) ?? 0}ms`
+                            : `延迟 ${hostTestResults[host.id]!.ping!.error ?? "失败"}`}
+                        </Badge>
+                      )}
+                      {/* 带宽结果 */}
+                      {hostTestResults[host.id]?.bandwidth && (
+                        <Badge variant={hostTestResults[host.id]!.bandwidth!.success ? "success" : "error"}>
+                          {hostTestResults[host.id]!.bandwidth!.success
+                            ? `↑${hostTestResults[host.id]!.bandwidth!.upload_mbps?.toFixed(1) ?? 0} ↓${hostTestResults[host.id]!.bandwidth!.download_mbps?.toFixed(1) ?? 0} Mbps`
+                            : `带宽 ${hostTestResults[host.id]!.bandwidth!.error ?? "失败"}`}
+                        </Badge>
+                      )}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => handleTest(host)}
-                      loading={testingHostId === host.id}
+                      onClick={() => handleSSHTest(host)}
+                      loading={testingSshId === host.id}
                     >
                       <Zap className="w-4 h-4" />
-                      测试
+                      测试SSH
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => handlePingTest(host)}
+                      loading={testingPingId === host.id}
+                    >
+                      <Zap className="w-4 h-4" />
+                      测延迟
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => handleBandwidthTest(host)}
+                      loading={testingBandwidthId === host.id}
+                    >
+                      <Zap className="w-4 h-4" />
+                      测带宽
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => void openModal(host)}>
                       <Pencil className="w-4 h-4" />
@@ -459,9 +611,6 @@ export default function HostsPage() {
           )}
 
           <div className="flex flex-wrap justify-end gap-3 pt-2">
-            <Button variant="secondary" onClick={handleFormTest} loading={testingForm} disabled={!canSubmit}>
-              测试连接
-            </Button>
             <Button variant="secondary" onClick={closeModal}>
               取消
             </Button>

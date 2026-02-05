@@ -107,16 +107,9 @@ export interface VersionInfo {
   commit_date?: string | null;
 }
 
-export interface DnsCandidate {
-  name: string;
-  health: "ok" | "bad" | "cooldown";
-}
-
 export interface DnsStatus {
   active?: string;
-  candidates?: Array<string | DnsCandidate>;
-  health?: Record<string, "ok" | "bad" | "cooldown">;
-  last_check_secs_ago?: number;
+  candidates?: string[];
 }
 
 // Node Types
@@ -348,10 +341,33 @@ export interface Host {
   updated_at?: number;
 }
 
-export interface HostTestResult {
-  ssh_ok: boolean;
-  ssh_error?: string | null;
-  ping_avg_ms?: number | null;
+export interface SSHTestResult {
+  id: string;
+  host: string;
+  success: boolean;
+  latency_ms?: number;
+  error?: string | null;
+  timestamp: string;
+}
+
+export interface PingTestResult {
+  id: string;
+  host: string;
+  success: boolean;
+  avg_latency_ms?: number;
+  packet_loss_percent?: number;
+  error?: string | null;
+  timestamp: string;
+}
+
+export interface BandwidthTestResult {
+  id: string;
+  host: string;
+  success: boolean;
+  upload_mbps?: number;
+  download_mbps?: number;
+  error?: string | null;
+  timestamp: string;
 }
 
 // Toast Types
@@ -359,4 +375,11 @@ export interface ToastMessage {
   id: string;
   type: "success" | "error" | "info" | "warning";
   message: string;
+}
+
+// Tools Status Types
+export interface ToolsStatus {
+  vnc: boolean;
+  tar: boolean;
+  zstd: boolean;
 }

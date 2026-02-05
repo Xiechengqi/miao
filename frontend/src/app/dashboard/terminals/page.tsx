@@ -36,9 +36,25 @@ export default function TerminalsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultForm);
 
+  // Gotty 安装状态
+  const [gottyInstalled, setGottyInstalled] = useState<boolean | null>(null);
+  const [installingGotty, setInstallingGotty] = useState(false);
+
   useEffect(() => {
-    loadTerminals();
+    checkGottyAndLoad();
   }, []);
+
+  const checkGottyAndLoad = async () => {
+    try {
+      const binStatus = await api.getBinariesStatus();
+      setGottyInstalled(binStatus.gotty.installed);
+      if (binStatus.gotty.installed) {
+        await loadTerminals();
+      }
+    } catch (error) {
+      console.error("Failed to check gotty status:", error);
+    }
+  };
 
   const loadTerminals = async () => {
     try {
@@ -190,6 +206,61 @@ export default function TerminalsPage() {
       setLoading(false);
     }
   };
+
+  const handleInstallGotty = async () => {
+    setInstallingGotty(true);
+    try {
+      await api.installGotty();
+      setGottyInstalled(true);
+      addToast({ type: "success", message: "gotty 安装成功" });
+      await loadTerminals();
+    } catch (error) {
+      addToast({
+        type: "error",
+        message: error instanceof Error ? error.message : "安装失败",
+      });
+    } finally {
+      setInstallingGotty(false);
+    }
+  };
+
+  // gotty 未安装提示
+  if (gottyInstalled === false) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-black">终端</h1>
+          <p className="text-slate-500 mt-1">管理 SSH 终端会话</p>
+        </div>
+        <Card className="p-6">
+          <div className="text-center py-8">
+            <TerminalIcon className="w-16 h-16 mx-auto text-slate-300 mb-4" />
+            <h2 className="text-xl font-bold text-slate-700 mb-2">gotty 未安装</h2>
+            <p className="text-slate-500 mb-6">
+              当前环境没有 gotty 程序，请点击下方按钮安装
+            </p>
+            <Button
+              onClick={handleInstallGotty}
+              disabled={installingGotty}
+              className="px-6"
+            >
+              {installingGotty ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  安装中...
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4 mr-2" />
+                  安装 gotty
+                </>
+              )}
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   if (!terminalsLoaded) {
     return (
