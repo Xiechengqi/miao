@@ -7463,6 +7463,13 @@ async fn start_tcp_tunnel_set(
             return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
         };
         s.enabled = true;
+        for t in config.tcp_tunnels.iter_mut() {
+            if let Some(TcpTunnelManagedBy::FullTunnel { set_id, .. }) = &t.managed_by {
+                if set_id == &id {
+                    t.enabled = true;
+                }
+            }
+        }
         if let Err(e) = save_config(&config).await {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -7470,6 +7477,7 @@ async fn start_tcp_tunnel_set(
             ));
         }
     }
+    apply_tunnels_from_config(&state).await;
     apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set started")))
 }
@@ -7484,6 +7492,13 @@ async fn stop_tcp_tunnel_set(
             return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
         };
         s.enabled = false;
+        for t in config.tcp_tunnels.iter_mut() {
+            if let Some(TcpTunnelManagedBy::FullTunnel { set_id, .. }) = &t.managed_by {
+                if set_id == &id {
+                    t.enabled = false;
+                }
+            }
+        }
         if let Err(e) = save_config(&config).await {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -7491,6 +7506,7 @@ async fn stop_tcp_tunnel_set(
             ));
         }
     }
+    apply_tunnels_from_config(&state).await;
     apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set stopped")))
 }
@@ -7506,6 +7522,13 @@ async fn restart_tcp_tunnel_set(
             return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Set not found"))));
         };
         s.enabled = true;
+        for t in config.tcp_tunnels.iter_mut() {
+            if let Some(TcpTunnelManagedBy::FullTunnel { set_id, .. }) = &t.managed_by {
+                if set_id == &id {
+                    t.enabled = true;
+                }
+            }
+        }
         if let Err(e) = save_config(&config).await {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -7513,6 +7536,7 @@ async fn restart_tcp_tunnel_set(
             ));
         }
     }
+    apply_tunnels_from_config(&state).await;
     apply_full_tunnel_sets_from_config(&state).await;
     Ok(Json(ApiResponse::success_no_data("Set restarted")))
 }

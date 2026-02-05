@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
-import { Plus, Play, Square, Trash2, RefreshCw, Activity, Copy, Pencil } from "lucide-react";
+import { Plus, Play, Square, Trash2, RefreshCw, Activity, Copy, Pencil, Eye } from "lucide-react";
 import { TcpTunnel, Host } from "@/types/api";
 
 const TUNNEL_TEST_STORAGE_KEY = "miao_tunnel_test_results";
@@ -60,6 +60,10 @@ export default function TunnelsPage() {
   const [testingTunnelId, setTestingTunnelId] = useState<string | null>(null);
   const [loadErrors, setLoadErrors] = useState<{ single?: string; full?: string }>({});
   const [tunnelTestResults, setTunnelTestResults] = useState<Record<string, TunnelTestResult>>({});
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [detailsTunnel, setDetailsTunnel] = useState<TcpTunnel | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsTunnels, setDetailsTunnels] = useState<TcpTunnel[]>([]);
   const availableHosts = useMemo(
     () => hosts,
     [hosts]
@@ -357,6 +361,22 @@ export default function TunnelsPage() {
     }
   };
 
+  const handleViewDetails = async (tunnel: TcpTunnel) => {
+    if (tunnel.mode !== "full") return;
+    setDetailsTunnel(tunnel);
+    setDetailsLoading(true);
+    setShowDetailsModal(true);
+    try {
+      const res = await api.getTcpTunnelSetTunnels(tunnel.id);
+      setDetailsTunnels(res.items);
+    } catch (error) {
+      addToast({ type: "error", message: error instanceof Error ? error.message : "加载详情失败" });
+      setDetailsTunnels([]);
+    } finally {
+      setDetailsLoading(false);
+    }
+  };
+
   const handleDelete = async (id: string) => {
     if (!confirm("确定要删除此隧道吗？")) return;
 
@@ -569,6 +589,12 @@ export default function TunnelsPage() {
                 </div>
 
                 <div className="flex gap-2">
+                  {tunnel.mode === "full" && (
+                    <Button variant="secondary" size="sm" onClick={() => handleViewDetails(tunnel)}>
+                      <Eye className="w-4 h-4" />
+                      查看
+                    </Button>
+                  )}
                   <Button variant="secondary" size="sm" onClick={() => handleRestart(tunnel)}>
                     <RefreshCw className="w-4 h-4" />
                     重启
@@ -847,6 +873,68 @@ export default function TunnelsPage() {
               保存
             </Button>
           </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showDetailsModal}
+        onClose={() => {
+          setShowDetailsModal(false);
+          setDetailsTunnel(null);
+          setDetailsTunnels([]);
+        }}
+        title={`全穿透详情${detailsTunnel?.name ? ` - ${detailsTunnel.name}` : ""}`}
+        size="lg"
+      >
+        <div className="space-y-3">
+          {detailsLoading ? (
+            <div className="text-center py-6 text-slate-500">
+              <div className="w-6 h-6 border-2 border-indigo-600/30 border-t-indigo-600 rounded-full animate-spin mx-auto" />
+              <p className="mt-2 text-sm">加载中...</p>
+            </div>
+          ) : detailsTunnels.length === 0 ? (
+            <div className="text-center py-6 text-slate-500">
+              暂无穿透端口
+            </div>
+          ) : (
+            <div className="overflow-auto rounded-lg border border-slate-100">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="text-left px-3 py-2">端口</th>
+                    <th className="text-left px-3 py-2">远程绑定</th>
+                    <th className="text-left px-3 py-2">状态</th>
+                    <th className="text-left px-3 py-2">连接</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {detailsTunnels.map((t) => (
+                    <tr key={t.id}>
+                      <td className="px-3 py-2 font-mono">{t.remote_port ?? t.local_port}</td>
+                      <td className="px-3 py-2 font-mono">{t.remote_bind_addr}</td>
+                      <td className="px-3 py-2">
+                        <Badge
+                          variant={
+                            t.status.state === "forwarding" ? "success" :
+                            t.status.state === "connecting" ? "warning" :
+                            t.status.state === "error" ? "error" : "default"
+                          }
+                        >
+                          {t.status.state}
+                        </Badge>
+                        {t.status.last_error && (
+                          <span className="ml-2 text-xs text-red-500">
+                            {t.status.last_error.code}: {t.status.last_error.message}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">{t.status.active_conns}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </Modal>
     </div>

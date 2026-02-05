@@ -702,6 +702,70 @@ class ApiClient {
     });
   }
 
+  async getTcpTunnelSetTunnels(id: string): Promise<{ supported: boolean; items: TcpTunnel[] }> {
+    const res = await this.fetch<{
+      data: {
+        supported: boolean;
+        items: Array<{
+          id: string;
+          name?: string | null;
+          enabled: boolean;
+          local_addr: string;
+          local_port: number;
+          remote_bind_addr: string;
+          remote_port: number;
+          ssh_host: string;
+          ssh_port: number;
+          username: string;
+          auth:
+            | { type: "password"; password?: string }
+            | { type: "private_key_path"; path: string };
+          strict_host_key_checking: boolean;
+          host_key_fingerprint: string;
+          allow_public_bind: boolean;
+          connect_timeout_ms: number;
+          keepalive_interval_ms: number;
+          reconnect_backoff_ms: { base_ms: number; max_ms: number };
+          status: TcpTunnel["status"];
+        }>;
+      };
+    }>(`/api/tcp-tunnel-sets/${id}/tunnels`);
+
+    const items = res.data.items.map((item) => {
+      const authType = item.auth?.type ?? "password";
+      const password = item.auth?.type === "password" ? item.auth.password : undefined;
+      const privateKeyPath = item.auth?.type === "private_key_path" ? item.auth.path : undefined;
+
+      return {
+        id: item.id,
+        name: item.name ?? undefined,
+        mode: "single" as const,
+        enabled: item.enabled,
+        local_addr: item.local_addr,
+        local_port: item.local_port,
+        remote_bind_addr: item.remote_bind_addr,
+        remote_port: item.remote_port,
+        ssh_host: item.ssh_host,
+        ssh_port: item.ssh_port,
+        username: item.username,
+        auth_type: authType,
+        password,
+        private_key_path: privateKeyPath,
+        strict_host_key_checking: item.strict_host_key_checking,
+        host_key_fingerprint: item.host_key_fingerprint,
+        allow_public_bind: item.allow_public_bind,
+        connect_timeout_ms: item.connect_timeout_ms,
+        keepalive_interval_ms: item.keepalive_interval_ms,
+        backoff_base_ms: item.reconnect_backoff_ms?.base_ms,
+        backoff_max_ms: item.reconnect_backoff_ms?.max_ms,
+        status: item.status,
+      };
+    });
+
+    const supported = res.data.supported ?? true;
+    return { supported, items };
+  }
+
   // Terminals
   async getTerminals(): Promise<Terminal[]> {
     const res = await this.fetch<{ data: { items: Terminal[] } }>("/api/terminals");
