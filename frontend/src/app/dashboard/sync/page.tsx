@@ -232,8 +232,10 @@ export default function SyncPage() {
     try {
       const data = await api.getSyncs();
       setSyncs(data);
+      return data;
     } catch (error) {
       addToast({ type: "error", message: "获取备份配置失败" });
+      return null;
     } finally {
       setSyncsLoaded(true);
     }
@@ -422,9 +424,8 @@ export default function SyncPage() {
       const pollIntervalRef = { current: null as NodeJS.Timeout | null };
 
       const poll = async () => {
-        await loadSyncs();
-        // Check if still running
-        const updatedSync = syncs.find((s) => s.id === sync.id);
+        const data = await loadSyncs();
+        const updatedSync = data?.find((s) => s.id === sync.id);
         if (updatedSync?.status?.state !== "running") {
           if (pollIntervalRef.current) {
             clearInterval(pollIntervalRef.current);
