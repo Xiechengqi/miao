@@ -2247,6 +2247,209 @@ async fn install_gotty() -> Json<ApiResponse<serde_json::Value>> {
     })))
 }
 
+/// WebSocket endpoint for sing-box upgrade with progress
+async fn upgrade_sing_box_ws(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(handle_sing_box_upgrade_websocket))
+}
+
+async fn handle_sing_box_upgrade_websocket(mut socket: WebSocket) {
+    use tokio::sync::mpsc;
+
+    let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
+
+    let mut upgrade_handle = tokio::spawn(async move {
+        perform_sing_box_upgrade(log_tx).await
+    });
+
+    loop {
+        tokio::select! {
+            Some(entry) = log_rx.recv() => {
+                let json = serde_json::to_string(&entry).unwrap_or_default();
+                if socket.send(axum::extract::ws::Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = &mut upgrade_handle => {
+                break;
+            }
+        }
+    }
+
+    while let Ok(entry) = log_rx.try_recv() {
+        let json = serde_json::to_string(&entry).unwrap_or_default();
+        let _ = socket.send(axum::extract::ws::Message::Text(json.into())).await;
+    }
+
+    let _ = socket.close().await;
+}
+
+async fn perform_sing_box_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    use futures_util::StreamExt;
+
+    let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
+        let entry = UpgradeLogEntry {
+            step,
+            total_steps: 5,
+            message: message.to_string(),
+            level: level.to_string(),
+            progress,
+        };
+        let tx = log_tx.clone();
+        async move { let _ = tx.send(entry).await; }
+    };
+
+    // Step 1: Get latest release info
+    send_log(1, "获取最新版本信息...", "info", None).await;
+
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let client = reqwest::Client::new();
+    let release_url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+
+    let (download_url, version) = match client
+        .get(release_url)
+        .header("User-Agent", "miao-rust")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(release) = resp.json::<serde_json::Value>().await {
+                let tag = release["tag_name"].as_str().unwrap_or("latest");
+                let ver = tag.trim_start_matches('v').to_string();
+                let url = format!(
+                    "https://github.com/SagerNet/sing-box/releases/download/{}/sing-box-{}-linux-{}.tar.gz",
+                    tag, ver, arch
+                );
+                (url, ver)
+            } else {
+                send_log(1, "解析版本信息失败", "error", None).await;
+                return;
+            }
+        }
+        Err(e) => {
+            send_log(1, &format!("获取版本信息失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    send_log(1, &format!("最新版本: {}", version), "success", None).await;
+
+    // Step 2: Download
+    send_log(2, "下载 sing-box...", "info", None).await;
+
+    let response = match client.get(&download_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            send_log(2, &format!("下载失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    if !response.status().is_success() {
+        send_log(2, &format!("下载失败: HTTP {}", response.status()), "error", None).await;
+        return;
+    }
+
+    let total_size = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(data) => {
+                downloaded += data.len() as u64;
+                bytes.extend_from_slice(&data);
+                if total_size > 0 {
+                    let progress = ((downloaded * 100) / total_size) as u8;
+                    send_log(2, "下载中...", "progress", Some(progress)).await;
+                }
+            }
+            Err(e) => {
+                send_log(2, &format!("下载失败: {}", e), "error", None).await;
+                return;
+            }
+        }
+    }
+
+    send_log(2, "下载完成", "success", None).await;
+
+    // Step 3: Extract
+    send_log(3, "解压文件...", "info", None).await;
+
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            send_log(3, &format!("获取目录失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
+    let mut archive = tar::Archive::new(decoder);
+
+    let temp_dir = current_dir.join(".sing-box-upgrade-temp");
+    let _ = fs::remove_dir_all(&temp_dir);
+    if let Err(e) = fs::create_dir_all(&temp_dir) {
+        send_log(3, &format!("创建临时目录失败: {}", e), "error", None).await;
+        return;
+    }
+
+    if let Err(e) = archive.unpack(&temp_dir) {
+        let _ = fs::remove_dir_all(&temp_dir);
+        send_log(3, &format!("解压失败: {}", e), "error", None).await;
+        return;
+    }
+
+    send_log(3, "解压完成", "success", None).await;
+
+    // Step 4: Replace binary
+    send_log(4, "替换 sing-box...", "info", None).await;
+
+    let sing_box_path = current_dir.join("sing-box");
+    let mut found = false;
+
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let binary_path = path.join("sing-box");
+                if binary_path.exists() {
+                    if let Err(e) = fs::copy(&binary_path, &sing_box_path) {
+                        let _ = fs::remove_dir_all(&temp_dir);
+                        send_log(4, &format!("替换失败: {}", e), "error", None).await;
+                        return;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    if !found {
+        send_log(4, "未找到 sing-box 文件", "error", None).await;
+        return;
+    }
+
+    if let Err(e) = fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755)) {
+        send_log(4, &format!("设置权限失败: {}", e), "error", None).await;
+        return;
+    }
+
+    send_log(4, "替换完成", "success", None).await;
+
+    // Step 5: Done
+    send_log(5, &format!("sing-box 已更新到 v{}", version), "success", None).await;
+}
+
 async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
     let mut machine = state.system_monitor.machine.lock().await;
     let mut info = machine.system_info();
@@ -10083,6 +10286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/binaries/status", get(get_binaries_status))
         .route("/api/binaries/install/sing-box", post(install_sing_box))
         .route("/api/binaries/install/gotty", post(install_gotty))
+        .route("/api/binaries/upgrade/sing-box/ws", get(upgrade_sing_box_ws))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/status", get(get_system_status))
         .route("/api/system/metrics", get(get_system_metrics))

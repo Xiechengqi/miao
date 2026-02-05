@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Card, CardHeader, CardContent, Button, Badge, TogglePower, Skeleton, SkeletonCard, ConfirmModal } from "@/components/ui";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Card, CardHeader, CardContent, Button, Badge, TogglePower, Skeleton, SkeletonCard, ConfirmModal, Modal } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { useProxies, useStatus, useTraffic } from "@/hooks";
 import { api } from "@/lib/api";
-import { formatUptime, formatSpeed } from "@/lib/utils";
-import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check } from "lucide-react";
+import { formatUptime, formatSpeed, cn } from "@/lib/utils";
+import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check, Download } from "lucide-react";
 import { Host, ManualNode } from "@/types/api";
 
 const CONNECTIVITY_SITES = [
@@ -38,6 +38,15 @@ type SSHHostTestResult = {
 
 type HostTestCache = {
   results: Record<string, SSHHostTestResult>;
+};
+
+// 升级日志类型
+type UpgradeLogEntry = {
+  step: number;
+  total_steps: number;
+  message: string;
+  level: string;
+  progress?: number;
 };
 
 // 默认 DNS 候选列表
@@ -83,6 +92,14 @@ export default function ProxiesPage() {
   // Binary 安装状态
   const [singBoxInstalled, setSingBoxInstalled] = useState<boolean | null>(null);
   const [installingSingBox, setInstallingSingBox] = useState(false);
+
+  // sing-box 升级状态
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
+  const [upgradeLogs, setUpgradeLogs] = useState<UpgradeLogEntry[]>([]);
+  const [upgradeProgress, setUpgradeProgress] = useState(0);
+  const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
+  const upgradeLogsRef = useRef<HTMLDivElement>(null);
 
   // 当前选中的代理节点
   const currentNode = useMemo(() => {
@@ -431,6 +448,63 @@ export default function ProxiesPage() {
     }
   };
 
+  // 升级 sing-box
+  const handleUpgradeSingBox = () => {
+    if (upgrading) return;
+
+    setUpgrading(true);
+    setShowUpgradeModal(true);
+    setUpgradeLogs([]);
+    setUpgradeProgress(0);
+    setUpgradeStatus("running");
+
+    const token = localStorage.getItem("miao_token");
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/binaries/upgrade/sing-box/ws?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const entry: UpgradeLogEntry = JSON.parse(event.data);
+        setUpgradeLogs((prev) => [...prev, entry]);
+        setUpgradeProgress(Math.round((entry.step / entry.total_steps) * 100));
+
+        if (entry.level === "error") {
+          setUpgradeStatus("error");
+        }
+
+        setTimeout(() => {
+          if (upgradeLogsRef.current) {
+            upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
+          }
+        }, 50);
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    ws.onclose = () => {
+      setUpgradeLogs((prev) => {
+        const hasError = prev.some((log) => log.level === "error");
+        if (!hasError && prev.length > 0) {
+          setUpgradeStatus("success");
+        }
+        return prev;
+      });
+      setUpgrading(false);
+    };
+
+    ws.onerror = () => {
+      setUpgradeStatus("error");
+      setUpgradeLogs((prev) => [
+        ...prev,
+        { step: 0, total_steps: 5, message: "WebSocket 连接失败", level: "error" },
+      ]);
+      setUpgrading(false);
+    };
+  };
+
   // sing-box 未安装提示
   if (singBoxInstalled === false) {
     return (
@@ -494,7 +568,12 @@ export default function ProxiesPage() {
             </span>
           )}
         </div>
-        <p className="text-slate-500 mt-1 sm:hidden">管理SSH节点代理</p>
+        {singBoxInstalled && (
+          <Button variant="secondary" onClick={handleUpgradeSingBox} disabled={upgrading}>
+            <Download className="w-4 h-4" />
+            {upgrading ? "更新中..." : "更新 sing-box"}
+          </Button>
+        )}
       </div>
 
       <Card className="p-4">
@@ -741,6 +820,69 @@ export default function ProxiesPage() {
         variant="warning"
         loading={loadingAction === "dns-switch"}
       />
+
+      {/* sing-box 升级弹框 */}
+      <Modal
+        isOpen={showUpgradeModal}
+        onClose={() => {
+          if (upgradeStatus !== "running") {
+            setShowUpgradeModal(false);
+          }
+        }}
+        title="更新 sing-box"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-slate-600">
+              <span>更新进度</span>
+              <span>{upgradeProgress}%</span>
+            </div>
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  "h-full transition-all duration-300 rounded-full",
+                  upgradeStatus === "error" ? "bg-red-500" :
+                  upgradeStatus === "success" ? "bg-emerald-500" : "bg-indigo-500"
+                )}
+                style={{ width: `${upgradeProgress}%` }}
+              />
+            </div>
+          </div>
+
+          <div
+            ref={upgradeLogsRef}
+            className="h-64 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+          >
+            {upgradeLogs.map((log, index) => (
+              <div
+                key={index}
+                className={cn(
+                  "py-0.5",
+                  log.level === "error" && "text-red-400",
+                  log.level === "success" && "text-emerald-400",
+                  log.level === "info" && "text-slate-300",
+                  log.level === "progress" && "text-sky-400"
+                )}
+              >
+                <span className="text-slate-500">[{log.step}/{log.total_steps}]</span>{" "}
+                {log.message}
+                {log.level === "progress" && log.progress != null && (
+                  <span className="text-slate-500"> ({log.progress}%)</span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {upgradeStatus !== "running" && (
+            <div className="flex justify-end">
+              <Button onClick={() => setShowUpgradeModal(false)}>
+                关闭
+              </Button>
+            </div>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }
