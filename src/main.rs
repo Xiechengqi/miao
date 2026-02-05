@@ -5985,6 +5985,25 @@ async fn test_node(
     }
 }
 
+/// GET /api/dns/status - Get current DNS status
+async fn get_dns_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let config = state.config.lock().await;
+    let raw_candidates = config
+        .dns_candidates
+        .clone()
+        .unwrap_or_else(default_dns_candidates);
+    let candidates = normalize_dns_candidates(raw_candidates);
+    let configured = config.dns_active.as_deref().unwrap_or(DEFAULT_DNS_ACTIVE);
+    let active = sanitize_dns_active(configured);
+
+    Json(ApiResponse::success("ok", json!({
+        "active": active,
+        "candidates": candidates
+    })))
+}
+
 async fn switch_dns_active(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DnsSwitchRequest>,
@@ -9267,7 +9286,7 @@ fn get_config_template() -> serde_json::Value {
         ],
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
-            {"type": "selector", "tag": "_dns", "outbounds": ["proxy", "direct"]},
+            {"type": "selector", "tag": "_dns", "outbounds": ["direct", "proxy"]},
             {"type": "direct", "tag": "direct"}
         ],
         "route": {
@@ -10107,6 +10126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Use a standalone endpoint to avoid colliding with node tags (e.g. tag == "test")
         .route("/api/node-test", post(test_node))
         .route("/api/nodes/{tag}", get(get_node).put(update_node))
+        .route("/api/dns/status", get(get_dns_status))
         .route("/api/dns/switch", post(switch_dns_active))
         // TCP reverse tunnels (SSH -R)
         .route("/api/tcp-tunnels", get(get_tcp_tunnels))
