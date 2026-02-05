@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Power } from "lucide-react";
+import { Power, RotateCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 interface TogglePowerProps {
@@ -10,6 +10,7 @@ interface TogglePowerProps {
   onToggle: () => void;
   size?: "md" | "lg";
   className?: string;
+  mode?: "start-stop" | "restart";
 }
 
 const sizeStyles = {
@@ -17,18 +18,26 @@ const sizeStyles = {
   lg: "w-16 h-16 text-2xl",
 };
 
-export function TogglePower({ running, loading, onToggle, size = "md", className }: TogglePowerProps) {
+export function TogglePower({
+  running,
+  loading,
+  onToggle,
+  size = "md",
+  className,
+  mode = "start-stop",
+}: TogglePowerProps) {
   const [pulsing, setPulsing] = useState(false);
+  const isRestart = mode === "restart";
 
   useEffect(() => {
-    if (running) {
+    if (running && !isRestart) {
       const interval = setInterval(() => {
         setPulsing(true);
         setTimeout(() => setPulsing(false), 200);
       }, 2000);
       return () => clearInterval(interval);
     }
-  }, [running]);
+  }, [running, isRestart]);
 
   return (
     <button
@@ -39,7 +48,9 @@ export function TogglePower({ running, loading, onToggle, size = "md", className
         "border-2 border-transparent",
         "transition-all duration-300 ease-bezier(0.4, 0, 0.2, 1)",
         "relative overflow-hidden",
-        running
+        isRestart
+          ? "bg-gradient-to-br from-amber-500 to-amber-600 shadow-lg shadow-amber-500/50 hover:from-amber-400 hover:to-amber-500"
+          : running
           ? "bg-gradient-to-br from-red-500 to-red-600 shadow-lg shadow-red-500/50 hover:from-red-400 hover:to-red-500"
           : "bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg shadow-emerald-500/50 hover:from-emerald-400 hover:to-emerald-500",
         sizeStyles[size],
@@ -47,15 +58,19 @@ export function TogglePower({ running, loading, onToggle, size = "md", className
         !loading && "hover:scale-108 cursor-pointer",
         className
       )}
-      title={running ? "点击停止服务" : "点击启动服务"}
+      title={isRestart ? "点击重启服务" : running ? "点击停止服务" : "点击启动服务"}
     >
-      <Power
-        className={cn(
-          "transition-transform duration-200",
-          pulsing && "scale-110"
-        )}
-      />
-      {running && (
+      {isRestart ? (
+        <RotateCw className={cn("transition-transform duration-200", loading && "animate-spin")} />
+      ) : (
+        <Power
+          className={cn(
+            "transition-transform duration-200",
+            pulsing && "scale-110"
+          )}
+        />
+      )}
+      {running && !isRestart && (
         <span className="absolute inset-0 rounded-full animate-ping bg-red-500/30" />
       )}
       {loading && (

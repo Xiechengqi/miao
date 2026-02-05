@@ -947,6 +947,7 @@ const KASMVNC_BASE_HOME: &str = "/app/kasmvnc";
 
 // JWT 密钥（生产环境应使用环境变量）
 const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
+const SUBSCRIPTIONS_ENABLED: bool = false;
 
 // JWT Claims 结构
 #[derive(Debug, Serialize, Deserialize)]
@@ -1347,6 +1348,7 @@ pub struct AppState {
     subscription_status: Mutex<HashMap<String, SubscriptionRuntime>>,
     node_type_by_tag: Mutex<HashMap<String, String>>,
     setup_required: AtomicBool,
+    sing_box_pending_restart: AtomicBool,
     tcp_tunnel: tcp_tunnel::TunnelManager,
     full_tunnel: full_tunnel::FullTunnelManager,
     sync_manager: sync::SyncManager,
@@ -1482,6 +1484,7 @@ struct StatusData {
     pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     uptime_secs: Option<u64>,
+    pending_restart: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -2079,7 +2082,9 @@ async fn update_password(
 }
 
 /// GET /api/status - Get sing-box running status
-async fn get_status() -> Json<ApiResponse<StatusData>> {
+async fn get_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<StatusData>> {
     let mut lock = SING_PROCESS.lock().await;
 
     let (running, pid, uptime_secs) = if let Some(ref mut proc) = *lock {
@@ -2098,12 +2103,14 @@ async fn get_status() -> Json<ApiResponse<StatusData>> {
         (false, None, None)
     };
 
+    let pending_restart = state.sing_box_pending_restart.load(Ordering::Relaxed);
     Json(ApiResponse::success(
         if running { "running" } else { "stopped" },
         StatusData {
             running,
             pid,
             uptime_secs,
+            pending_restart,
         },
     ))
 }
@@ -3860,6 +3867,7 @@ async fn start_service(
 
     match start_sing_internal(&state.sing_box_home).await {
         Ok(_) => {
+            state.sing_box_pending_restart.store(false, Ordering::Relaxed);
             let config = state.config.lock().await;
             let _ = apply_saved_selections(&config).await;
             Ok(Json(ApiResponse::success_no_data(
@@ -3874,8 +3882,11 @@ async fn start_service(
 }
 
 /// POST /api/service/stop - Stop sing-box
-async fn stop_service() -> Json<ApiResponse<()>> {
+async fn stop_service(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<()>> {
     stop_sing_internal().await;
+    state.sing_box_pending_restart.store(false, Ordering::Relaxed);
     Json(ApiResponse::success_no_data("sing-box stopped"))
 }
 
@@ -3889,9 +3900,10 @@ async fn restart_service(
             Json(ApiResponse::error("sing-box is not running")),
         ));
     }
-    regenerate_and_restart(state)
+    regenerate_and_restart(state.clone())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(e))))?;
+    state.sing_box_pending_restart.store(false, Ordering::Relaxed);
     Ok(Json(ApiResponse::success_no_data("sing-box restarted")))
 }
 
@@ -5631,6 +5643,9 @@ async fn try_restart_systemd(unit: &str) -> Result<(), String> {
 
 /// GET /api/sub-files - Get all loaded subscription files
 async fn get_sub_files(State(state): State<Arc<AppState>>) -> Json<ApiResponse<SubFilesResponse>> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Json(ApiResponse::error("订阅功能已停用"));
+    }
     let status = state.subscription_status.lock().await;
     let files = status
         .values()
@@ -5652,6 +5667,12 @@ async fn get_sub_files(State(state): State<Arc<AppState>>) -> Json<ApiResponse<S
 async fn reload_sub_files(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("订阅功能已停用")),
+        ));
+    }
     match regenerate_and_restart(state).await {
         Ok(_) => Ok(Json(ApiResponse::success_no_data(
             "Subscription files reloaded and sing-box restarted",
@@ -5736,6 +5757,9 @@ fn validate_subscription_source(input: &SubscriptionSourceInput) -> Result<Subsc
 async fn list_subscriptions(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<SubscriptionListResponse>> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Json(ApiResponse::error("订阅功能已停用"));
+    }
     let config = state.config.lock().await;
     let status = state.subscription_status.lock().await;
     let root = state.subscriptions_root.clone();
@@ -5754,6 +5778,12 @@ async fn create_subscription(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubscriptionUpsertRequest>,
 ) -> Result<Json<ApiResponse<SubscriptionSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("订阅功能已停用")),
+        ));
+    }
     let source = validate_subscription_source(&req.source)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
     let cfg = SubscriptionConfig {
@@ -5794,6 +5824,12 @@ async fn update_subscription(
     Path(id): Path<String>,
     Json(req): Json<SubscriptionUpsertRequest>,
 ) -> Result<Json<ApiResponse<SubscriptionSaveResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("订阅功能已停用")),
+        ));
+    }
     let source = validate_subscription_source(&req.source)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
 
@@ -5843,6 +5879,12 @@ async fn delete_subscription(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("订阅功能已停用")),
+        ));
+    }
     let removed = {
         let mut config = state.config.lock().await;
         let Some(pos) = config.subscriptions.iter().position(|s| s.id == id) else {
@@ -5876,6 +5918,12 @@ async fn reload_subscription(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("订阅功能已停用")),
+        ));
+    }
     let exists = {
         let config = state.config.lock().await;
         config.subscriptions.iter().any(|s| s.id == id)
@@ -5897,6 +5945,12 @@ async fn reload_subscription(
 async fn reload_subscriptions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    if !SUBSCRIPTIONS_ENABLED {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("订阅功能已停用")),
+        ));
+    }
     match regenerate_and_restart(state).await {
         Ok(_) => Ok(Json(ApiResponse::success_no_data(
             "Subscriptions reloaded and sing-box restarted",
@@ -6139,19 +6193,24 @@ async fn add_node(
     }
 
     let running = sing_box_running().await;
+    if running {
+        state
+            .sing_box_pending_restart
+            .store(true, Ordering::Relaxed);
+    } else {
+        state
+            .sing_box_pending_restart
+            .store(false, Ordering::Relaxed);
+    }
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if running {
-            if let Err(e) = regenerate_and_restart(state_clone).await {
-                log_error!("Background regenerate failed: {}", e);
-            }
-        } else if let Err(e) = regenerate_config(state_clone).await {
+        if let Err(e) = regenerate_config(state_clone).await {
             log_error!("Background regenerate failed: {}", e);
         }
     });
 
     Ok(Json(ApiResponse::success_no_data(if running {
-        "Node added, restarting..."
+        "Node added, restart required"
     } else {
         "Node added, pending apply"
     })))
@@ -6343,19 +6402,24 @@ async fn update_node(
     }
 
     let running = sing_box_running().await;
+    if running {
+        state
+            .sing_box_pending_restart
+            .store(true, Ordering::Relaxed);
+    } else {
+        state
+            .sing_box_pending_restart
+            .store(false, Ordering::Relaxed);
+    }
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if running {
-            if let Err(e) = regenerate_and_restart(state_clone).await {
-                log_error!("Background regenerate failed: {}", e);
-            }
-        } else if let Err(e) = regenerate_config(state_clone).await {
+        if let Err(e) = regenerate_config(state_clone).await {
             log_error!("Background regenerate failed: {}", e);
         }
     });
 
     Ok(Json(ApiResponse::success_no_data(if running {
-        "Node updated, restarting..."
+        "Node updated, restart required"
     } else {
         "Node updated, pending apply"
     })))
@@ -6394,19 +6458,24 @@ async fn delete_node(
     }
 
     let running = sing_box_running().await;
+    if running {
+        state
+            .sing_box_pending_restart
+            .store(true, Ordering::Relaxed);
+    } else {
+        state
+            .sing_box_pending_restart
+            .store(false, Ordering::Relaxed);
+    }
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if running {
-            if let Err(e) = regenerate_and_restart(state_clone).await {
-                log_error!("Background regenerate failed: {}", e);
-            }
-        } else if let Err(e) = regenerate_config(state_clone).await {
+        if let Err(e) = regenerate_config(state_clone).await {
             log_error!("Background regenerate failed: {}", e);
         }
     });
 
     Ok(Json(ApiResponse::success_no_data(if running {
-        "Node deleted, restarting..."
+        "Node deleted, restart required"
     } else {
         "Node deleted, pending apply"
     })))
@@ -8590,6 +8659,13 @@ async fn switch_selector_and_save(
         }
     }
 
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = regenerate_config(state_clone).await {
+            log_error!("Background regenerate failed: {}", e);
+        }
+    });
+
     Ok(())
 }
 
@@ -8842,6 +8918,16 @@ async fn load_subscriptions_and_update_state(
     state: &Arc<AppState>,
     config: &Config,
 ) -> LoadedSubscriptions {
+    if !SUBSCRIPTIONS_ENABLED {
+        let mut guard = state.subscription_status.lock().await;
+        guard.clear();
+        return LoadedSubscriptions {
+            files: vec![],
+            outbounds: vec![],
+            node_names: vec![],
+            dir_error: None,
+        };
+    }
     let (loaded, status_map) = load_subscriptions(config, &state.subscriptions_root).await;
     {
         let mut guard = state.subscription_status.lock().await;
@@ -8857,11 +8943,6 @@ fn check_sing_box() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>>
 
     if !sing_box_path.exists() {
         return Err("sing-box binary not found".into());
-    }
-
-    let dashboard_dir = current_dir.join("dashboard");
-    if !dashboard_dir.exists() {
-        fs::create_dir_all(&dashboard_dir)?;
     }
 
     Ok(current_dir)
@@ -9582,62 +9663,10 @@ async fn stop_app_internal(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Generate SSH outbounds from hosts configuration
-fn generate_ssh_outbounds_from_hosts(
-    hosts: &[HostConfig],
-    existing_tags: &std::collections::HashSet<String>,
-) -> (Vec<String>, Vec<serde_json::Value>) {
-    let mut names = Vec::new();
-    let mut outbounds = Vec::new();
-
-    for host in hosts {
-        // Use format "name (host)" to avoid conflicts with built-in tags like "proxy"
-        let tag = match &host.name {
-            Some(name) => format!("{} ({})", name, host.host),
-            None => format!("ssh-{}", host.host),
-        };
-
-        // Skip if this tag already exists in nodes
-        if existing_tags.contains(&tag) {
-            continue;
-        }
-
-        names.push(tag.clone());
-
-        let mut outbound = serde_json::json!({
-            "type": "ssh",
-            "tag": tag,
-            "server": host.host,
-            "server_port": host.port,
-            "user": host.username,
-        });
-
-        match &host.auth {
-            HostAuth::Password { password } => {
-                if let Some(pwd) = password {
-                    outbound["password"] = serde_json::Value::String(pwd.clone());
-                }
-            }
-            HostAuth::PrivateKeyPath { path, passphrase } => {
-                if let Ok(resolved_path) = resolve_private_key_path(path) {
-                    outbound["private_key_path"] = serde_json::Value::String(resolved_path);
-                }
-                if let Some(pp) = passphrase {
-                    outbound["private_key_passphrase"] = serde_json::Value::String(pp.clone());
-                }
-            }
-        }
-
-        outbounds.push(outbound);
-    }
-
-    (names, outbounds)
-}
-
 async fn gen_config(
     config: &Config,
     sing_box_home: &str,
-    subs: &LoadedSubscriptions,
+    _subs: &LoadedSubscriptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let my_outbounds: Vec<serde_json::Value> = config
         .nodes
@@ -9649,27 +9678,10 @@ async fn gen_config(
         .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
         .collect();
 
-    // Collect existing tags to avoid duplicates
-    let mut existing_tags: std::collections::HashSet<String> = my_names.iter().cloned().collect();
-    existing_tags.extend(subs.node_names.iter().cloned());
-
-    // Generate SSH outbounds from hosts, excluding those already in nodes
-    let (host_names, host_outbounds) = generate_ssh_outbounds_from_hosts(&config.hosts, &existing_tags);
-
-    let mut final_outbounds: Vec<serde_json::Value> = vec![];
-    let mut final_node_names: Vec<String> = vec![];
-
-    final_node_names.extend(subs.node_names.iter().cloned());
-    final_outbounds.extend(subs.outbounds.iter().cloned());
-
-    // Add host SSH outbounds (already filtered for duplicates)
-    final_node_names.extend(host_names);
-    final_outbounds.extend(host_outbounds);
-
-    let total_nodes = my_outbounds.len() + final_outbounds.len();
+    let total_nodes = my_outbounds.len();
     if total_nodes == 0 {
         return Err(
-            "No nodes available: all subscriptions failed and no manual nodes configured".into(),
+            "No nodes available: no manual nodes configured".into(),
         );
     }
 
@@ -9684,13 +9696,39 @@ async fn gen_config(
             arr.extend(
                 my_names
                     .into_iter()
-                    .chain(final_node_names.into_iter())
                     .map(serde_json::Value::String),
             );
         }
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
-        arr.extend(my_outbounds.into_iter().chain(final_outbounds.into_iter()));
+        arr.extend(my_outbounds.into_iter());
+    }
+
+    // Apply default selection for proxy group if present and valid
+    if let Some(desired) = config.selections.get("proxy") {
+        if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
+            for outbound in arr.iter_mut() {
+                let is_proxy_selector = outbound
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "selector")
+                    .unwrap_or(false)
+                    && outbound
+                        .get("tag")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v == "proxy")
+                        .unwrap_or(false);
+                if !is_proxy_selector {
+                    continue;
+                }
+                let Some(outbounds) = outbound.get("outbounds").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                if outbounds.iter().any(|v| v.as_str() == Some(desired)) {
+                    outbound["default"] = serde_json::Value::String(desired.clone());
+                }
+            }
+        }
     }
     let config_output_loc = format!("{}/config.json", sing_box_home);
     tokio::fs::write(
@@ -10381,22 +10419,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     migrate_terminals(&mut config);
-    let mut subscriptions_changed = normalize_subscriptions(&mut config);
-    if config.subscriptions.is_empty()
-        && tokio::fs::metadata(&subscriptions_root).await.is_ok()
-    {
-        config.subscriptions.push(SubscriptionConfig {
-            id: generate_subscription_id(),
-            name: Some("本地订阅".to_string()),
-            enabled: true,
-            source: SubscriptionSource::Path {
-                path: subscriptions_root.display().to_string(),
-            },
-        });
-        subscriptions_changed = true;
-    }
-    if subscriptions_changed && !setup_required {
-        let _ = save_config(&config).await;
+    if SUBSCRIPTIONS_ENABLED {
+        let mut subscriptions_changed = normalize_subscriptions(&mut config);
+        if config.subscriptions.is_empty()
+            && tokio::fs::metadata(&subscriptions_root).await.is_ok()
+        {
+            config.subscriptions.push(SubscriptionConfig {
+                id: generate_subscription_id(),
+                name: Some("本地订阅".to_string()),
+                enabled: true,
+                source: SubscriptionSource::Path {
+                    path: subscriptions_root.display().to_string(),
+                },
+            });
+            subscriptions_changed = true;
+        }
+        if subscriptions_changed && !setup_required {
+            let _ = save_config(&config).await;
+        }
     }
 
     let port = config.port.unwrap_or(DEFAULT_PORT);
@@ -10414,8 +10454,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    log_info!("Loading subscriptions from: {}", subscriptions_root.display());
-    let (loaded_subs, subscription_status) = load_subscriptions(&config, &subscriptions_root).await;
+    let (loaded_subs, subscription_status) = if SUBSCRIPTIONS_ENABLED {
+        log_info!("Loading subscriptions from: {}", subscriptions_root.display());
+        load_subscriptions(&config, &subscriptions_root).await
+    } else {
+        log_info!("Subscriptions disabled");
+        (
+            LoadedSubscriptions {
+                files: vec![],
+                outbounds: vec![],
+                node_names: vec![],
+                dir_error: None,
+            },
+            HashMap::new(),
+        )
+    };
     let node_type_by_tag = build_node_type_map(&config, &loaded_subs);
 
     if !setup_required {
@@ -10489,6 +10542,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         subscription_status: Mutex::new(subscription_status),
         node_type_by_tag: Mutex::new(node_type_by_tag),
         setup_required: AtomicBool::new(setup_required),
+        sing_box_pending_restart: AtomicBool::new(false),
         tcp_tunnel: tcp_tunnel::TunnelManager::new(),
         full_tunnel: full_tunnel::FullTunnelManager::new(),
         sync_manager: sync::SyncManager::new(),

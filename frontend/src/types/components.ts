@@ -45,6 +45,7 @@ export interface TogglePowerProps {
   loading?: boolean;
   onToggle: () => void;
   size?: "md" | "lg";
+  mode?: "start-stop" | "restart";
 }
 
 export interface ModalProps {

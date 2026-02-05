@@ -88,6 +88,7 @@ export default function ProxiesPage() {
   const [pendingDns, setPendingDns] = useState<string>("");
   const dnsCandidates = useMemo(() => dnsStatus?.candidates || DEFAULT_DNS_CANDIDATES, [dnsStatus]);
   const activeDns = useMemo(() => dnsStatus?.active || dnsCandidates[0] || "", [dnsStatus, dnsCandidates]);
+  const needsRestart = !!status.running && !!status.pending_restart;
 
   // Binary 安装状态
   const [singBoxInstalled, setSingBoxInstalled] = useState<boolean | null>(null);
@@ -278,7 +279,7 @@ export default function ProxiesPage() {
       addToast({
         type: "success",
         message: status.running
-          ? `SSH 节点 ${tag} 已添加`
+          ? `SSH 节点 ${tag} 已添加（重启后生效）`
           : `SSH 节点 ${tag} 已添加（启动后生效）`,
       });
       const nodesData = await api.getNodes().catch(() => [] as ManualNode[]);
@@ -286,6 +287,10 @@ export default function ProxiesPage() {
       if (status.running) {
         // 服务运行中可同步代理信息
         fetchProxies(true);
+        const latestStatus = await api.getStatus().catch(() => null);
+        if (latestStatus) {
+          setStatus(latestStatus);
+        }
       }
       // 更新已存在节点标签
       setExistingNodeTags(prev => new Set(prev).add(tag));
@@ -341,7 +346,7 @@ export default function ProxiesPage() {
       await api.deleteNode(tag);
       addToast({
         type: "success",
-        message: status.running ? "节点已删除" : "节点已删除（启动后生效）",
+        message: status.running ? "节点已删除（重启后生效）" : "节点已删除（启动后生效）",
       });
       // 并行刷新：fetchProxies 返回 nodes 数据，直接使用
       const updateTags = async () => {
@@ -354,7 +359,14 @@ export default function ProxiesPage() {
         } catch { /* 忽略错误 */ }
       };
       if (status.running) {
-        await Promise.all([fetchProxies(true), updateTags()]);
+        const [latestStatus] = await Promise.all([
+          api.getStatus().catch(() => null),
+          fetchProxies(true),
+          updateTags(),
+        ]);
+        if (latestStatus) {
+          setStatus(latestStatus);
+        }
       } else {
         await updateTags();
       }
@@ -595,9 +607,10 @@ export default function ProxiesPage() {
             )}
             <TogglePower
               running={status.running}
-              loading={loading && (loadingAction === "start" || loadingAction === "stop")}
+              loading={loading && (loadingAction === "start" || loadingAction === "stop" || loadingAction === "restart")}
               onToggle={toggleService}
               size="md"
+              mode={needsRestart ? "restart" : "start-stop"}
             />
           </div>
         </CardHeader>
@@ -607,6 +620,14 @@ export default function ProxiesPage() {
             <Badge variant={status.running ? "success" : "error"} dot>
               {status.running ? "运行中" : "已停止"}
             </Badge>
+            {needsRestart && (
+              <Badge variant="warning">
+                需重启生效
+              </Badge>
+            )}
+            {needsRestart && (
+              <span className="text-xs text-amber-600">之前操作需要重启生效</span>
+            )}
 
             {status.running && (
               <>

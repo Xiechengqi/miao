@@ -26,11 +26,14 @@ export function useStatus() {
   }, [setDnsStatus]);
 
   const toggleService = useCallback(async () => {
-    const action = status.running ? "stop" : "start";
+    const needsRestart = status.running && !!status.pending_restart;
+    const action = needsRestart ? "restart" : status.running ? "stop" : "start";
     setLoading(true, action);
 
     try {
-      if (status.running) {
+      if (needsRestart) {
+        await api.restartService();
+      } else if (status.running) {
         await api.stopService();
       } else {
         await api.startService();
@@ -38,7 +41,9 @@ export function useStatus() {
       await refreshStatus();
       addToast({
         type: "success",
-        message: `服务${status.running ? "已停止" : "已启动"}`,
+        message: needsRestart
+          ? "服务已重启，配置已生效"
+          : `服务${status.running ? "已停止" : "已启动"}`,
       });
     } catch (error) {
       let errorMessage = "操作失败";
@@ -59,7 +64,7 @@ export function useStatus() {
     } finally {
       setLoading(false);
     }
-  }, [status.running, setLoading, addToast, refreshStatus]);
+  }, [status.running, status.pending_restart, setLoading, addToast, refreshStatus]);
 
   const switchDnsActive = useCallback(async (name: string) => {
     setLoading(true, "dns-switch");

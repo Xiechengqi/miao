@@ -10,6 +10,7 @@ export interface Status {
   running: boolean;
   pid?: number;
   uptime_secs?: number;
+  pending_restart?: boolean;
 }
 
 export interface SystemProcessor {

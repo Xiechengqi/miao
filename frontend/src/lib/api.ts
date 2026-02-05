@@ -235,6 +235,12 @@ class ApiClient {
     });
   }
 
+  async restartService(): Promise<void> {
+    await this.fetch("/api/service/restart", {
+      method: "POST",
+    });
+  }
+
   // DNS
   async switchDns(name: string): Promise<void> {
     await this.fetch("/api/dns/switch", {
