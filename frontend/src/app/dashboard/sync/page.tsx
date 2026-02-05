@@ -23,6 +23,7 @@ function LogModal({
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
   const isUnmountedRef = useRef(false);
 
   const formatTime = (timestamp: number) => {
@@ -57,7 +58,7 @@ function LogModal({
       if (isUnmountedRef.current) return;
       try {
         const entry = JSON.parse(event.data) as SyncLogEntry;
-        setLogs((prev) => [...prev.slice(-99), entry]);
+        setLogs((prev) => [entry, ...prev].slice(0, 100));
       } catch (e) {
         console.error("Failed to parse log:", e);
       }
@@ -97,9 +98,11 @@ function LogModal({
     };
   }, [isOpen, loadLogs, connectWs, disconnectWs]);
 
-  // Auto-scroll to bottom when new logs arrive
+  // Auto-scroll to top when new logs arrive
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = 0;
+    }
   }, [logs]);
 
   return (
@@ -118,7 +121,10 @@ function LogModal({
           </Button>
         </div>
 
-        <div className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm">
+        <div
+          ref={logsContainerRef}
+          className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+        >
           {logs.length === 0 ? (
             <div className="text-slate-500 text-center py-8">暂无日志</div>
           ) : (

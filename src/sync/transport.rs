@@ -249,56 +249,55 @@ impl SshTransport {
                 stderr: format!("exec: {e:?}"),
             })?;
 
-        // Stream stdin data
-        let mut buf = vec![0u8; BUFFER_SIZE];
-        loop {
-            let n = stdin_data
-                .read(&mut buf)
-                .await
-                .map_err(|e| SyncError::IoError(format!("read stdin: {e}")))?;
+        let (mut read_half, write_half) = channel.split();
+        let reader = tokio::spawn(async move {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit_code = 0i32;
 
-            if n == 0 {
-                break;
+            loop {
+                match read_half.wait().await {
+                    Some(ChannelMsg::Data { data }) => {
+                        stdout.extend_from_slice(&data);
+                    }
+                    Some(ChannelMsg::ExtendedData { data, ext }) => {
+                        if ext == 1 {
+                            stderr.extend_from_slice(&data);
+                        }
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        exit_code = exit_status as i32;
+                    }
+                    Some(ChannelMsg::Eof) | None => break,
+                    _ => {}
+                }
             }
 
-            channel
-                .data(&buf[..n])
-                .await
-                .map_err(|e| SyncError::SshExecError {
-                    command: command.to_string(),
-                    exit_code: -1,
-                    stderr: format!("send data: {e:?}"),
-                })?;
-        }
+            (stdout, stderr, exit_code)
+        });
 
-        channel.eof().await.map_err(|e| SyncError::SshExecError {
+        write_half
+            .data(&mut stdin_data)
+            .await
+            .map_err(|e| SyncError::SshExecError {
+                command: command.to_string(),
+                exit_code: -1,
+                stderr: format!("send data: {e:?}"),
+            })?;
+
+        write_half.eof().await.map_err(|e| SyncError::SshExecError {
             command: command.to_string(),
             exit_code: -1,
             stderr: format!("send eof: {e:?}"),
         })?;
 
-        // Collect output
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_code = 0i32;
-
-        loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Data { data }) => {
-                    stdout.extend_from_slice(&data);
-                }
-                Some(ChannelMsg::ExtendedData { data, ext }) => {
-                    if ext == 1 {
-                        stderr.extend_from_slice(&data);
-                    }
-                }
-                Some(ChannelMsg::ExitStatus { exit_status }) => {
-                    exit_code = exit_status as i32;
-                }
-                Some(ChannelMsg::Eof) | None => break,
-                _ => {}
-            }
-        }
+        let (stdout, stderr, exit_code) = reader
+            .await
+            .map_err(|e| SyncError::SshExecError {
+                command: command.to_string(),
+                exit_code: -1,
+                stderr: format!("join reader: {e:?}"),
+            })?;
 
         Ok(ExecResult {
             exit_code,
