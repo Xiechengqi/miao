@@ -9296,7 +9296,7 @@ fn get_config_template() -> serde_json::Value {
         ],
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
-            {"type": "selector", "tag": "_dns", "outbounds": ["direct", "proxy"]},
+            {"type": "selector", "tag": "_dns", "outbounds": ["proxy", "direct"]},
             {"type": "direct", "tag": "direct"}
         ],
         "route": {
