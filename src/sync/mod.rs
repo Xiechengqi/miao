@@ -277,26 +277,6 @@ impl SyncManager {
         }
     }
 
-    pub async fn test_sync(&self, cfg: &SyncConfig) -> Result<(), String> {
-        use transport::SshTransport;
-
-        let mut transport = SshTransport::connect(&cfg.ssh)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Check remote tools
-        let result = transport.exec("command -v zstd && command -v tar")
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if result.exit_code != 0 {
-            return Err("Remote missing zstd or tar".to_string());
-        }
-
-        transport.disconnect().await;
-        Ok(())
-    }
-
     async fn apply_schedules(&self, configs: &[SyncConfig]) {
         let desired: HashMap<String, (String, String)> = configs
             .iter()

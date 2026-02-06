@@ -5,7 +5,7 @@ import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
 import { SyncConfig, Host, SyncLogEntry } from "@/types/api";
-import { Plus, Trash2, Pencil, Zap, Play, FileText, Clock, RefreshCw, AlertTriangle } from "lucide-react";
+import { Plus, Trash2, Pencil, Play, FileText, Clock, RefreshCw, AlertTriangle } from "lucide-react";
 
 function LogModal({
   isOpen,
@@ -386,19 +386,6 @@ export default function SyncPage() {
     }
   };
 
-  const handleTestSync = async (sync: SyncConfig) => {
-    setLoading(true, "sync-test");
-    try {
-      await api.testSync(sync.id);
-      addToast({ type: "success", message: "连接测试成功" });
-      loadSyncs();
-    } catch (error) {
-      addToast({ type: "error", message: error instanceof Error ? error.message : "测试失败" });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleDeleteSync = async (sync: SyncConfig) => {
     if (!confirm(`确定要删除 ${sync.name || sync.id} 吗？`)) return;
     setLoading(true, "sync-delete");
@@ -567,15 +554,6 @@ export default function SyncPage() {
                     )}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => handleTestSync(sync)}
-                      loading={loading}
-                    >
-                      <Zap className="w-4 h-4" />
-                      测试
-                    </Button>
                     <Button
                       variant="secondary"
                       size="sm"

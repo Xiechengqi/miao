@@ -106,6 +106,15 @@ export default function TunnelsPage() {
     loadHosts();
   }, []);
 
+  useEffect(() => {
+    if (!tcpTunnelsLoaded || viewMode !== "single") return;
+    const hasSingle = tcpTunnels.some((tunnel) => tunnel.mode === "single");
+    const hasFull = tcpTunnels.some((tunnel) => tunnel.mode === "full");
+    if (!hasSingle && hasFull) {
+      setViewMode("full");
+    }
+  }, [tcpTunnelsLoaded, tcpTunnels, viewMode]);
+
   const loadHosts = async () => {
     try {
       const data = await api.getHosts();

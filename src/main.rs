@@ -1287,10 +1287,6 @@ struct SyncSaveResponse {
 }
 
 #[derive(Serialize)]
-struct SyncTestResponse {
-    ok: bool,
-}
-
 #[derive(Deserialize)]
 struct SyncUpsertRequest {
     #[serde(default)]
@@ -1539,6 +1535,13 @@ struct TerminalItem {
     auth_password: Option<String>,
     extra_args: Vec<String>,
     status: TerminalRuntimeStatus,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct TerminalLogEntry {
+    time: String,
+    level: String,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -8383,26 +8386,6 @@ async fn stop_sync(
     Ok(Json(ApiResponse::success_no_data("Sync stopped")))
 }
 
-async fn test_sync(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<SyncTestResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let cfg = {
-        let config = state.config.lock().await;
-        let Some(sync) = config.syncs.iter().find(|s| s.id == id) else {
-            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Sync not found"))));
-        };
-        sync.clone()
-    };
-    if let Err(e) = state.sync_manager.test_sync(&cfg).await {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
-    }
-    Ok(Json(ApiResponse::success(
-        "Sync test ok",
-        SyncTestResponse { ok: true },
-    )))
-}
-
 // Run sync once (without modifying enabled state)
 async fn run_sync(
     State(state): State<Arc<AppState>>,
@@ -8483,6 +8466,43 @@ async fn get_sync_logs(
     Ok(Json(ApiResponse::success("Logs retrieved", logs)))
 }
 
+async fn get_terminal_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<TerminalLogsQuery>,
+) -> Result<Json<ApiResponse<Vec<TerminalLogEntry>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let config = state.config.lock().await;
+        if !config.terminals.iter().any(|t| t.id == id) {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        }
+    }
+
+    let tag = format!("[gotty-{}]", id);
+    let mut logs: Vec<TerminalLogEntry> = {
+        let buffer = LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer
+            .iter()
+            .filter_map(|msg| serde_json::from_str::<TerminalLogEntry>(msg).ok())
+            .filter(|entry| entry.message.contains(&tag))
+            .map(|mut entry| {
+                if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                    entry.message = stripped.trim_start().to_string();
+                }
+                entry
+            })
+            .collect()
+    };
+
+    if let Some(limit) = q.limit {
+        if logs.len() > limit {
+            logs = logs.split_off(logs.len() - limit);
+        }
+    }
+
+    Ok(Json(ApiResponse::success("Logs retrieved", logs)))
+}
+
 // WebSocket handler for sync logs
 async fn sync_ws_logs(
     State(state): State<Arc<AppState>>,
@@ -8503,6 +8523,25 @@ async fn sync_ws_logs(
     };
 
     Ok(ws.on_upgrade(move |socket| handle_sync_logs_websocket(socket, rx)))
+}
+
+async fn terminal_ws_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    {
+        let config = state.config.lock().await;
+        if !config.terminals.iter().any(|t| t.id == id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_terminal_logs_websocket(socket, id)))
 }
 
 async fn handle_sync_logs_websocket(mut socket: WebSocket, mut rx: broadcast::Receiver<sync::SyncLogEntry>) {
@@ -8546,9 +8585,85 @@ async fn handle_sync_logs_websocket(mut socket: WebSocket, mut rx: broadcast::Re
     }
 }
 
+async fn handle_terminal_logs_websocket(mut socket: WebSocket, terminal_id: String) {
+    let mut rx = LOG_BROADCAST.subscribe();
+    let tag = format!("[gotty-{}]", terminal_id);
+
+    let history: Vec<String> = {
+        let buffer = LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    };
+    for msg in history {
+        let mut entry = match serde_json::from_str::<TerminalLogEntry>(&msg) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.message.contains(&tag) {
+            continue;
+        }
+        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+            entry.message = stripped.trim_start().to_string();
+        }
+        let payload = serde_json::to_string(&entry).unwrap_or_default();
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        let mut entry = match serde_json::from_str::<TerminalLogEntry>(&msg) {
+                            Ok(entry) => entry,
+                            Err(_) => continue,
+                        };
+                        if !entry.message.contains(&tag) {
+                            continue;
+                        }
+                        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                            entry.message = stripped.trim_start().to_string();
+                        }
+                        let payload = serde_json::to_string(&entry).unwrap_or_default();
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warning = serde_json::json!({
+                            "time": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            "level": "warning",
+                            "message": format!("Dropped {} log messages", n)
+                        });
+                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 // Query struct for logs API
 #[derive(Deserialize)]
 struct SyncLogsQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TerminalLogsQuery {
     limit: Option<usize>,
 }
 
@@ -10726,7 +10841,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}/schedule", post(toggle_schedule_sync))
         .route("/api/syncs/{id}/logs", get(get_sync_logs))
         .route("/api/syncs/{id}/ws/logs", get(sync_ws_logs))
-        .route("/api/syncs/{id}/test", post(test_sync))
+        .route("/api/terminals/{id}/logs", get(get_terminal_logs))
+        .route("/api/terminals/{id}/ws/logs", get(terminal_ws_logs))
         // Host management (新 API v1)
         .merge(app::hosts::routes())
         // Host Groups

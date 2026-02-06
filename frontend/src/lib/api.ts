@@ -8,6 +8,7 @@ import {
   ProxyGroup,
   SyncConfig,
   SyncLogEntry,
+  TerminalLogEntry,
   TcpTunnel,
   Terminal,
   VncSession,
@@ -425,16 +426,19 @@ class ApiClient {
     });
   }
 
-  async testSync(id: string): Promise<void> {
-    await this.fetch(`/api/syncs/${id}/test`, {
-      method: "POST",
-    });
-  }
-
   async runSync(id: string): Promise<void> {
     await this.fetch(`/api/syncs/${id}/run`, {
       method: "POST",
     });
+  }
+
+  async getTerminalLogs(id: string, limit?: number): Promise<TerminalLogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: TerminalLogEntry[] }>(
+      `/api/terminals/${id}/logs?${params.toString()}`
+    );
+    return res.data;
   }
 
   async toggleScheduleSync(id: string): Promise<{ enabled: boolean }> {

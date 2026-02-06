@@ -259,6 +259,12 @@ export interface Terminal {
   };
 }
 
+export interface TerminalLogEntry {
+  time: string;
+  level: string;
+  message: string;
+}
+
 // VNC Types
 export interface VncSession {
   id: string;

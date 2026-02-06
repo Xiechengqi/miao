@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
-import { Terminal as TerminalIcon, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, Download } from "lucide-react";
+import { Terminal as TerminalIcon, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, Download, FileText } from "lucide-react";
 import { formatUptime, cn } from "@/lib/utils";
+import { TerminalLogEntry } from "@/types/api";
 
 // 升级日志类型
 type UpgradeLogEntry = {
@@ -15,6 +16,146 @@ type UpgradeLogEntry = {
   level: string;
   progress?: number;
 };
+
+function TerminalLogModal({
+  isOpen,
+  onClose,
+  terminalId,
+  terminalName,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  terminalId: string;
+  terminalName: string;
+}) {
+  const [logs, setLogs] = useState<TerminalLogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const isUnmountedRef = useRef(false);
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getTerminalLogs(terminalId, 200);
+      setLogs(data);
+    } catch (error) {
+      console.error("Failed to load terminal logs:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [terminalId]);
+
+  const connectWs = useCallback(() => {
+    const token = localStorage.getItem("miao_token");
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${protocol}://${window.location.host}/api/terminals/${terminalId}/ws/logs?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(true);
+      }
+    };
+    ws.onmessage = (event) => {
+      if (isUnmountedRef.current) return;
+      try {
+        const entry = JSON.parse(event.data) as TerminalLogEntry;
+        setLogs((prev) => [entry, ...prev].slice(0, 200));
+      } catch (e) {
+        console.error("Failed to parse terminal log:", e);
+      }
+    };
+    ws.onclose = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    ws.onerror = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    wsRef.current = ws;
+  }, [terminalId]);
+
+  const disconnectWs = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setWsConnected(false);
+  }, []);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    if (isOpen) {
+      loadLogs();
+      connectWs();
+    } else {
+      disconnectWs();
+    }
+    return () => {
+      isUnmountedRef.current = true;
+      disconnectWs();
+    };
+  }, [isOpen, loadLogs, connectWs, disconnectWs]);
+
+  useEffect(() => {
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = 0;
+    }
+  }, [logs]);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`日志 - ${terminalName}`} size="lg">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
+            <span className="text-sm text-slate-500">
+              {wsConnected ? "实时连接中" : "连接已断开"}
+            </span>
+          </div>
+          <Button variant="secondary" size="sm" onClick={loadLogs} loading={loading}>
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </Button>
+        </div>
+
+        <div
+          ref={logsContainerRef}
+          className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+        >
+          {logs.length === 0 ? (
+            <div className="text-slate-500 text-center py-8">暂无日志</div>
+          ) : (
+            <div className="space-y-1">
+              {logs.map((log, index) => (
+                <div key={index} className="flex gap-2">
+                  <span className="text-slate-400 shrink-0">{log.time}</span>
+                  <span
+                    className={`shrink-0 ${
+                      log.level === "error"
+                        ? "text-red-400"
+                        : log.level === "warning"
+                          ? "text-yellow-400"
+                          : "text-green-400"
+                    }`}
+                  >
+                    [{log.level.toUpperCase()}]
+                  </span>
+                  <span className="text-slate-200">{log.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 const defaultForm = {
   name: "",
@@ -44,8 +185,10 @@ export default function TerminalsPage() {
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultForm);
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [selectedTerminalForLog, setSelectedTerminalForLog] = useState<{ id: string; name: string } | null>(null);
 
-  // Gotty 安装状态
+  // gotty 安装状态
   const [gottyInstalled, setGottyInstalled] = useState<boolean | null>(null);
   const [installingGotty, setInstallingGotty] = useState(false);
 
@@ -212,6 +355,11 @@ export default function TerminalsPage() {
     setShowModal(true);
   };
 
+  const openLogModal = (terminal: typeof terminals[number]) => {
+    setSelectedTerminalForLog({ id: terminal.id, name: terminal.name || terminal.id });
+    setShowLogModal(true);
+  };
+
   const handleUpgradeGotty = () => {
     if (upgrading) return;
 
@@ -349,7 +497,7 @@ export default function TerminalsPage() {
         <div className="flex gap-2">
           <Button variant="secondary" onClick={handleUpgradeGotty} disabled={upgrading}>
             <Download className="w-4 h-4" />
-            {upgrading ? "更新中..." : "更新 Gotty"}
+            {upgrading ? "更新中..." : "更新gotty"}
           </Button>
           <Button onClick={() => openModal()}>
             <Plus className="w-4 h-4" />
@@ -423,6 +571,20 @@ export default function TerminalsPage() {
                     </>
                   )}
                 </Button>
+                <span
+                  className="inline-flex"
+                  title={terminal.status.running ? "查看运行日志" : "终端未运行，无法查看日志"}
+                >
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => openLogModal(terminal)}
+                    disabled={!terminal.status.running}
+                  >
+                    <FileText className="w-4 h-4" />
+                    日志
+                  </Button>
+                </span>
                 <Button variant="ghost" size="sm" onClick={() => openModal(terminal)}>
                   <Pencil className="w-4 h-4" />
                   编辑
@@ -548,7 +710,7 @@ export default function TerminalsPage() {
             setShowUpgradeModal(false);
           }
         }}
-        title="更新 Gotty"
+        title="更新gotty"
         size="lg"
       >
         <div className="space-y-4">
@@ -602,6 +764,18 @@ export default function TerminalsPage() {
           )}
         </div>
       </Modal>
+
+      {selectedTerminalForLog && (
+        <TerminalLogModal
+          isOpen={showLogModal}
+          onClose={() => {
+            setShowLogModal(false);
+            setSelectedTerminalForLog(null);
+          }}
+          terminalId={selectedTerminalForLog.id}
+          terminalName={selectedTerminalForLog.name}
+        />
+      )}
     </div>
   );
 }
