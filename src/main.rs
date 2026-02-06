@@ -1881,6 +1881,21 @@ lazy_static! {
         tx
     };
     static ref LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
+    static ref VNC_LOG_BROADCAST: broadcast::Sender<String> = {
+        let (tx, _rx) = broadcast::channel(1000);
+        tx
+    };
+    static ref VNC_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
+    static ref APP_LOG_BROADCAST: broadcast::Sender<String> = {
+        let (tx, _rx) = broadcast::channel(1000);
+        tx
+    };
+    static ref APP_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
+    static ref GOTTY_LOG_BROADCAST: broadcast::Sender<String> = {
+        let (tx, _rx) = broadcast::channel(1000);
+        tx
+    };
+    static ref GOTTY_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
     static ref SING_LOG_BROADCAST: broadcast::Sender<String> = {
         let (tx, _rx) = broadcast::channel(1000);
         tx
@@ -1932,6 +1947,66 @@ fn broadcast_sing_log(level: &str, message: &str) {
     let _ = SING_LOG_BROADCAST.send(entry_str);
 }
 
+fn broadcast_gotty_log(level: &str, message: &str) {
+    use chrono::FixedOffset;
+    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+    let entry = serde_json::json!({
+        "time": time_str,
+        "level": level,
+        "message": message
+    });
+    let entry_str = entry.to_string();
+    {
+        let mut buffer = GOTTY_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.push_back(entry_str.clone());
+        if buffer.len() > 1000 {
+            buffer.pop_front();
+        }
+    }
+    let _ = GOTTY_LOG_BROADCAST.send(entry_str);
+}
+
+fn broadcast_vnc_log(level: &str, message: &str) {
+    use chrono::FixedOffset;
+    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+    let entry = serde_json::json!({
+        "time": time_str,
+        "level": level,
+        "message": message
+    });
+    let entry_str = entry.to_string();
+    {
+        let mut buffer = VNC_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.push_back(entry_str.clone());
+        if buffer.len() > 1000 {
+            buffer.pop_front();
+        }
+    }
+    let _ = VNC_LOG_BROADCAST.send(entry_str);
+}
+
+fn broadcast_app_log(level: &str, message: &str) {
+    use chrono::FixedOffset;
+    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+    let entry = serde_json::json!({
+        "time": time_str,
+        "level": level,
+        "message": message
+    });
+    let entry_str = entry.to_string();
+    {
+        let mut buffer = APP_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.push_back(entry_str.clone());
+        if buffer.len() > 1000 {
+            buffer.pop_front();
+        }
+    }
+    let _ = APP_LOG_BROADCAST.send(entry_str);
+}
+
 macro_rules! log_info {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
@@ -1977,7 +2052,6 @@ fn spawn_with_log_capture(
             while let Ok(Some(line)) = lines.next_line().await {
                 println!("[{}] {}", name, line);
                 let _ = std::io::stdout().flush();
-                broadcast_log("info", &format!("[{}] {}", name, line));
             }
         });
     }
@@ -1991,7 +2065,6 @@ fn spawn_with_log_capture(
             while let Ok(Some(line)) = lines.next_line().await {
                 eprintln!("[{}] {}", name, line);
                 let _ = std::io::stderr().flush();
-                broadcast_log("error", &format!("[{}] {}", name, line));
             }
         });
     }
@@ -2031,6 +2104,123 @@ fn spawn_with_sing_log_capture(
                 eprintln!("[{}] {}", name, line);
                 let _ = std::io::stderr().flush();
                 broadcast_sing_log("error", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    Ok(child)
+}
+
+fn spawn_with_gotty_log_capture(
+    command: &mut tokio::process::Command,
+    process_name: String,
+) -> Result<tokio::process::Child, std::io::Error> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let name = process_name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[{}] {}", name, line);
+                let _ = std::io::stdout().flush();
+                broadcast_gotty_log("info", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let name = process_name;
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[{}] {}", name, line);
+                let _ = std::io::stderr().flush();
+                broadcast_gotty_log("error", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    Ok(child)
+}
+
+fn spawn_with_vnc_log_capture(
+    command: &mut tokio::process::Command,
+    process_name: String,
+) -> Result<tokio::process::Child, std::io::Error> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let name = process_name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[{}] {}", name, line);
+                let _ = std::io::stdout().flush();
+                broadcast_vnc_log("info", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let name = process_name;
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[{}] {}", name, line);
+                let _ = std::io::stderr().flush();
+                broadcast_vnc_log("error", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    Ok(child)
+}
+
+fn spawn_with_app_log_capture(
+    command: &mut tokio::process::Command,
+    process_name: String,
+) -> Result<tokio::process::Child, std::io::Error> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let name = process_name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[{}] {}", name, line);
+                let _ = std::io::stdout().flush();
+                broadcast_app_log("info", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let name = process_name;
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[{}] {}", name, line);
+                let _ = std::io::stderr().flush();
+                broadcast_app_log("error", &format!("[{}] {}", name, line));
             }
         });
     }
@@ -8552,6 +8742,80 @@ async fn get_sing_box_logs(
     Json(ApiResponse::success("Logs retrieved", logs))
 }
 
+async fn get_vnc_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<VncLogsQuery>,
+) -> Result<Json<ApiResponse<Vec<LogEntry>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let config = state.config.lock().await;
+        if !config.vnc_sessions.iter().any(|s| s.id == id) {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("VNC session not found"))));
+        }
+    }
+
+    let tag = format!("[vnc-{}]", id);
+    let mut logs: Vec<LogEntry> = {
+        let buffer = VNC_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer
+            .iter()
+            .filter_map(|msg| serde_json::from_str::<LogEntry>(msg).ok())
+            .filter(|entry| entry.message.contains(&tag))
+            .map(|mut entry| {
+                if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                    entry.message = stripped.trim_start().to_string();
+                }
+                entry
+            })
+            .collect()
+    };
+
+    if let Some(limit) = q.limit {
+        if logs.len() > limit {
+            logs = logs.split_off(logs.len() - limit);
+        }
+    }
+
+    Ok(Json(ApiResponse::success("Logs retrieved", logs)))
+}
+
+async fn get_app_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<AppLogsQuery>,
+) -> Result<Json<ApiResponse<Vec<LogEntry>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let config = state.config.lock().await;
+        if !config.apps.iter().any(|s| s.id == id) {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
+        }
+    }
+
+    let tag = format!("[app-{}]", id);
+    let mut logs: Vec<LogEntry> = {
+        let buffer = APP_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer
+            .iter()
+            .filter_map(|msg| serde_json::from_str::<LogEntry>(msg).ok())
+            .filter(|entry| entry.message.contains(&tag))
+            .map(|mut entry| {
+                if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                    entry.message = stripped.trim_start().to_string();
+                }
+                entry
+            })
+            .collect()
+    };
+
+    if let Some(limit) = q.limit {
+        if logs.len() > limit {
+            logs = logs.split_off(logs.len() - limit);
+        }
+    }
+
+    Ok(Json(ApiResponse::success("Logs retrieved", logs)))
+}
+
 async fn get_terminal_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -8566,7 +8830,7 @@ async fn get_terminal_logs(
 
     let tag = format!("[gotty-{}]", id);
     let mut logs: Vec<TerminalLogEntry> = {
-        let buffer = LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        let buffer = GOTTY_LOG_BUFFER.lock().expect("log buffer lock poisoned");
         buffer
             .iter()
             .filter_map(|msg| serde_json::from_str::<TerminalLogEntry>(msg).ok())
@@ -8638,6 +8902,42 @@ async fn sing_box_ws_logs(
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(ws.on_upgrade(handle_sing_box_logs_websocket))
+}
+
+async fn vnc_ws_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    {
+        let config = state.config.lock().await;
+        if !config.vnc_sessions.iter().any(|s| s.id == id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+    Ok(ws.on_upgrade(move |socket| handle_vnc_logs_websocket(socket, id)))
+}
+
+async fn app_ws_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    {
+        let config = state.config.lock().await;
+        if !config.apps.iter().any(|s| s.id == id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+    Ok(ws.on_upgrade(move |socket| handle_app_logs_websocket(socket, id)))
 }
 
 async fn handle_sync_logs_websocket(mut socket: WebSocket, mut rx: broadcast::Receiver<sync::SyncLogEntry>) {
@@ -8729,12 +9029,154 @@ async fn handle_sing_box_logs_websocket(mut socket: WebSocket) {
     }
 }
 
+async fn handle_vnc_logs_websocket(mut socket: WebSocket, vnc_id: String) {
+    let mut rx = VNC_LOG_BROADCAST.subscribe();
+    let tag = format!("[vnc-{}]", vnc_id);
+
+    let history: Vec<String> = {
+        let buffer = VNC_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    };
+    for msg in history {
+        let mut entry = match serde_json::from_str::<LogEntry>(&msg) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.message.contains(&tag) {
+            continue;
+        }
+        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+            entry.message = stripped.trim_start().to_string();
+        }
+        let payload = serde_json::to_string(&entry).unwrap_or_default();
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        let mut entry = match serde_json::from_str::<LogEntry>(&msg) {
+                            Ok(entry) => entry,
+                            Err(_) => continue,
+                        };
+                        if !entry.message.contains(&tag) {
+                            continue;
+                        }
+                        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                            entry.message = stripped.trim_start().to_string();
+                        }
+                        let payload = serde_json::to_string(&entry).unwrap_or_default();
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warning = serde_json::json!({
+                            "time": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            "level": "warning",
+                            "message": format!("Dropped {} log messages", n)
+                        });
+                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn handle_app_logs_websocket(mut socket: WebSocket, app_id: String) {
+    let mut rx = APP_LOG_BROADCAST.subscribe();
+    let tag = format!("[app-{}]", app_id);
+
+    let history: Vec<String> = {
+        let buffer = APP_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    };
+    for msg in history {
+        let mut entry = match serde_json::from_str::<LogEntry>(&msg) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.message.contains(&tag) {
+            continue;
+        }
+        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+            entry.message = stripped.trim_start().to_string();
+        }
+        let payload = serde_json::to_string(&entry).unwrap_or_default();
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        let mut entry = match serde_json::from_str::<LogEntry>(&msg) {
+                            Ok(entry) => entry,
+                            Err(_) => continue,
+                        };
+                        if !entry.message.contains(&tag) {
+                            continue;
+                        }
+                        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                            entry.message = stripped.trim_start().to_string();
+                        }
+                        let payload = serde_json::to_string(&entry).unwrap_or_default();
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warning = serde_json::json!({
+                            "time": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            "level": "warning",
+                            "message": format!("Dropped {} log messages", n)
+                        });
+                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 async fn handle_terminal_logs_websocket(mut socket: WebSocket, terminal_id: String) {
-    let mut rx = LOG_BROADCAST.subscribe();
+    let mut rx = GOTTY_LOG_BROADCAST.subscribe();
     let tag = format!("[gotty-{}]", terminal_id);
 
     let history: Vec<String> = {
-        let buffer = LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        let buffer = GOTTY_LOG_BUFFER.lock().expect("log buffer lock poisoned");
         buffer.iter().cloned().collect()
     };
     for msg in history {
@@ -8813,6 +9255,16 @@ struct TerminalLogsQuery {
 
 #[derive(Deserialize)]
 struct SingBoxLogsQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct VncLogsQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct AppLogsQuery {
     limit: Option<usize>,
 }
 
@@ -9521,7 +9973,7 @@ async fn start_terminal_internal(
         command.arg(arg);
     }
 
-    let mut child = spawn_with_log_capture(&mut command, format!("gotty-{}", id))?;
+    let mut child = spawn_with_gotty_log_capture(&mut command, format!("gotty-{}", id))?;
     let pid = child.id();
     log_info!("gotty process spawned with PID: {:?}", pid);
 
@@ -9829,7 +10281,7 @@ network:
         .env("HOME", &home_dir)
         .current_dir(&home_dir);
 
-    let mut child = spawn_with_log_capture(&mut command, format!("vnc-{}", id))?;
+    let mut child = spawn_with_vnc_log_capture(&mut command, format!("vnc-{}", id))?;
     let pid = child.id();
     log_info!("kasmvnc process spawned with PID: {:?}", pid);
 
@@ -9931,7 +10383,7 @@ async fn start_app_internal(
         command.env(k, v);
     }
 
-    let mut child = spawn_with_log_capture(&mut command, format!("app-{}", app.id))?;
+    let mut child = spawn_with_app_log_capture(&mut command, format!("app-{}", app.id))?;
     let pid = child.id();
     log_info!("app process spawned with PID: {:?}", pid);
 
@@ -10992,6 +11444,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}/ws/logs", get(sync_ws_logs))
         .route("/api/sing-box/logs", get(get_sing_box_logs))
         .route("/api/sing-box/ws/logs", get(sing_box_ws_logs))
+        .route("/api/vnc-sessions/{id}/logs", get(get_vnc_logs))
+        .route("/api/vnc-sessions/{id}/ws/logs", get(vnc_ws_logs))
+        .route("/api/apps/{id}/logs", get(get_app_logs))
+        .route("/api/apps/{id}/ws/logs", get(app_ws_logs))
         .route("/api/terminals/{id}/logs", get(get_terminal_logs))
         .route("/api/terminals/{id}/ws/logs", get(terminal_ws_logs))
         // Host management (新 API v1)

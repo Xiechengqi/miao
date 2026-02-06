@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
-import { api } from "@/lib/api";
-import { App, AppTemplate, VncSession } from "@/types/api";
+import { api, getAppLogsWsUrl } from "@/lib/api";
+import { App, AppTemplate, VncSession, LogEntry } from "@/types/api";
 import { formatUptime } from "@/lib/utils";
-import { AppWindow, Plus, RefreshCw, Play, Square, Trash2, Pencil } from "lucide-react";
+import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
+import { AppWindow, Plus, RefreshCw, Play, Square, Trash2, Pencil, FileText } from "lucide-react";
 
 const defaultForm = {
   name: "",
@@ -15,6 +16,141 @@ const defaultForm = {
   display: "",
   command: "",
 };
+
+function AppLogModal({
+  isOpen,
+  onClose,
+  appId,
+  appName,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  appId: string;
+  appName: string;
+}) {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const isUnmountedRef = useRef(false);
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getAppLogs(appId, 200);
+      setLogs(data);
+    } catch (error) {
+      console.error("Failed to load app logs:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [appId]);
+
+  const connectWs = useCallback(() => {
+    let wsUrl: string;
+    try {
+      wsUrl = getAppLogsWsUrl(appId);
+    } catch (error) {
+      console.warn("Cannot connect to app logs WebSocket:", error);
+      setWsConnected(false);
+      return;
+    }
+
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(true);
+      }
+    };
+    ws.onmessage = (event) => {
+      if (isUnmountedRef.current) return;
+      try {
+        const entry = JSON.parse(event.data) as LogEntry;
+        setLogs((prev) => [entry, ...prev].slice(0, 200));
+      } catch (e) {
+        console.error("Failed to parse app log:", e);
+      }
+    };
+    ws.onclose = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    ws.onerror = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    wsRef.current = ws;
+  }, [appId]);
+
+  const disconnectWs = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setWsConnected(false);
+  }, []);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    if (isOpen) {
+      loadLogs();
+      connectWs();
+    } else {
+      disconnectWs();
+    }
+    return () => {
+      isUnmountedRef.current = true;
+      disconnectWs();
+    };
+  }, [isOpen, loadLogs, connectWs, disconnectWs]);
+
+  useEffect(() => {
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = 0;
+    }
+  }, [logs]);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`日志 - ${appName}`} size="lg">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
+            <span className="text-sm text-slate-500">
+              {wsConnected ? "实时连接中" : "连接已断开"}
+            </span>
+          </div>
+          <Button variant="secondary" size="sm" onClick={loadLogs} loading={loading}>
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </Button>
+        </div>
+
+        <div
+          ref={logsContainerRef}
+          className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+        >
+          {logs.length === 0 ? (
+            <div className="text-slate-500 text-center py-8">暂无日志</div>
+          ) : (
+            <div className="space-y-1">
+              {logs.map((log, index) => (
+                <div
+                  key={index}
+                  className="whitespace-pre-wrap break-all text-slate-200"
+                  dangerouslySetInnerHTML={{ __html: ansiToHtml(stripLogPrefix(log.message)) }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 export default function AppsPage() {
   const { setLoading, loading, addToast } = useStore();
@@ -29,6 +165,8 @@ export default function AppsPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [templates, setTemplates] = useState<AppTemplate[]>([]);
   const [vncSessions, setVncSessions] = useState<VncSession[]>([]);
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [selectedAppForLog, setSelectedAppForLog] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     loadApps();
@@ -163,6 +301,11 @@ export default function AppsPage() {
       setSelectedTemplateId("");
     }
     setShowModal(true);
+  };
+
+  const openLogModal = (app: App) => {
+    setSelectedAppForLog({ id: app.id, name: app.name || app.id });
+    setShowLogModal(true);
   };
 
   const handleSubmit = async () => {
@@ -334,6 +477,10 @@ export default function AppsPage() {
                       </>
                     )}
                   </Button>
+                  <Button variant="secondary" size="sm" onClick={() => openLogModal(app)}>
+                    <FileText className="w-4 h-4" />
+                    日志
+                  </Button>
                   <Button variant="ghost" size="sm" onClick={() => openModal(app)}>
                     <Pencil className="w-4 h-4" />
                     编辑
@@ -478,6 +625,18 @@ export default function AppsPage() {
           </div>
         </div>
       </Modal>
+
+      {selectedAppForLog && (
+        <AppLogModal
+          isOpen={showLogModal}
+          onClose={() => {
+            setShowLogModal(false);
+            setSelectedAppForLog(null);
+          }}
+          appId={selectedAppForLog.id}
+          appName={selectedAppForLog.name}
+        />
+      )}
     </div>
   );
 }

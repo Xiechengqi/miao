@@ -451,6 +451,24 @@ class ApiClient {
     return res.data;
   }
 
+  async getVncLogs(id: string, limit?: number): Promise<LogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: LogEntry[] }>(
+      `/api/vnc-sessions/${id}/logs?${params.toString()}`
+    );
+    return res.data;
+  }
+
+  async getAppLogs(id: string, limit?: number): Promise<LogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: LogEntry[] }>(
+      `/api/apps/${id}/logs?${params.toString()}`
+    );
+    return res.data;
+  }
+
   async toggleScheduleSync(id: string): Promise<{ enabled: boolean }> {
     const res = await this.fetch<{ data: { enabled: boolean } }>(`/api/syncs/${id}/schedule`, {
       method: "POST",
@@ -1049,4 +1067,22 @@ export function getSingBoxLogsWsUrl(): string {
   }
   const wsBase = getWsBase();
   return `${wsBase}/api/sing-box/ws/logs?token=${token}`;
+}
+
+export function getVncLogsWsUrl(id: string): string {
+  const token = localStorage.getItem("miao_token");
+  if (!token) {
+    throw new Error("No authentication token found. Please login first.");
+  }
+  const wsBase = getWsBase();
+  return `${wsBase}/api/vnc-sessions/${id}/ws/logs?token=${token}`;
+}
+
+export function getAppLogsWsUrl(id: string): string {
+  const token = localStorage.getItem("miao_token");
+  if (!token) {
+    throw new Error("No authentication token found. Please login first.");
+  }
+  const wsBase = getWsBase();
+  return `${wsBase}/api/apps/${id}/ws/logs?token=${token}`;
 }

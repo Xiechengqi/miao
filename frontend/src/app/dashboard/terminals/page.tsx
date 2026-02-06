@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { Terminal as TerminalIcon, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, Download, FileText } from "lucide-react";
 import { formatUptime, cn } from "@/lib/utils";
 import { TerminalLogEntry } from "@/types/api";
+import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
 
 // 升级日志类型
 type UpgradeLogEntry = {
@@ -133,21 +134,11 @@ function TerminalLogModal({
           ) : (
             <div className="space-y-1">
               {logs.map((log, index) => (
-                <div key={index} className="flex gap-2">
-                  <span className="text-slate-400 shrink-0">{log.time}</span>
-                  <span
-                    className={`shrink-0 ${
-                      log.level === "error"
-                        ? "text-red-400"
-                        : log.level === "warning"
-                          ? "text-yellow-400"
-                          : "text-green-400"
-                    }`}
-                  >
-                    [{log.level.toUpperCase()}]
-                  </span>
-                  <span className="text-slate-200">{log.message}</span>
-                </div>
+                <div
+                  key={index}
+                  className="whitespace-pre-wrap break-all text-slate-200"
+                  dangerouslySetInnerHTML={{ __html: ansiToHtml(stripLogPrefix(log.message)) }}
+                />
               ))}
             </div>
           )}

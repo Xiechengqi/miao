@@ -111,7 +111,24 @@ export function PerformanceTrendChart({
       seen.add(label);
       ticks.push({ index, label });
     });
-    return ticks;
+    if (ticks.length <= 1) return ticks;
+
+    const minGapPx = 48;
+    const kept: Array<{ index: number; label: string }> = [];
+    let lastPosPx = -Infinity;
+    ticks.forEach((tick) => {
+      const posPx = (tick.index / (seriesLength - 1)) * width;
+      if (posPx - lastPosPx >= minGapPx) {
+        kept.push(tick);
+        lastPosPx = posPx;
+      }
+    });
+
+    const lastTick = ticks[ticks.length - 1];
+    if (!kept.some((tick) => tick.index === lastTick.index)) {
+      kept.push(lastTick);
+    }
+    return kept;
   })();
 
   const hoverMemoryPercent =

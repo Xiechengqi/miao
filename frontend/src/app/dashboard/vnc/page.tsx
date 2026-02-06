@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
-import { api } from "@/lib/api";
-import { VncSession } from "@/types/api";
+import { api, getVncLogsWsUrl } from "@/lib/api";
+import { VncSession, LogEntry } from "@/types/api";
 import { formatUptime } from "@/lib/utils";
-import { Monitor, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, AlertTriangle } from "lucide-react";
+import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
+import { Monitor, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, AlertTriangle, FileText } from "lucide-react";
 
 const defaultForm = {
   name: "",
@@ -23,6 +24,141 @@ const defaultForm = {
   clear_password: false,
 };
 
+function VncLogModal({
+  isOpen,
+  onClose,
+  sessionId,
+  sessionName,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  sessionId: string;
+  sessionName: string;
+}) {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const isUnmountedRef = useRef(false);
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getVncLogs(sessionId, 200);
+      setLogs(data);
+    } catch (error) {
+      console.error("Failed to load VNC logs:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+
+  const connectWs = useCallback(() => {
+    let wsUrl: string;
+    try {
+      wsUrl = getVncLogsWsUrl(sessionId);
+    } catch (error) {
+      console.warn("Cannot connect to VNC logs WebSocket:", error);
+      setWsConnected(false);
+      return;
+    }
+
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(true);
+      }
+    };
+    ws.onmessage = (event) => {
+      if (isUnmountedRef.current) return;
+      try {
+        const entry = JSON.parse(event.data) as LogEntry;
+        setLogs((prev) => [entry, ...prev].slice(0, 200));
+      } catch (e) {
+        console.error("Failed to parse VNC log:", e);
+      }
+    };
+    ws.onclose = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    ws.onerror = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    wsRef.current = ws;
+  }, [sessionId]);
+
+  const disconnectWs = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setWsConnected(false);
+  }, []);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    if (isOpen) {
+      loadLogs();
+      connectWs();
+    } else {
+      disconnectWs();
+    }
+    return () => {
+      isUnmountedRef.current = true;
+      disconnectWs();
+    };
+  }, [isOpen, loadLogs, connectWs, disconnectWs]);
+
+  useEffect(() => {
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = 0;
+    }
+  }, [logs]);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`日志 - ${sessionName}`} size="lg">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
+            <span className="text-sm text-slate-500">
+              {wsConnected ? "实时连接中" : "连接已断开"}
+            </span>
+          </div>
+          <Button variant="secondary" size="sm" onClick={loadLogs} loading={loading}>
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </Button>
+        </div>
+
+        <div
+          ref={logsContainerRef}
+          className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+        >
+          {logs.length === 0 ? (
+            <div className="text-slate-500 text-center py-8">暂无日志</div>
+          ) : (
+            <div className="space-y-1">
+              {logs.map((log, index) => (
+                <div
+                  key={index}
+                  className="whitespace-pre-wrap break-all text-slate-200"
+                  dangerouslySetInnerHTML={{ __html: ansiToHtml(stripLogPrefix(log.message)) }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function VncPage() {
   const { setLoading, loading, addToast } = useStore();
 
@@ -32,6 +168,8 @@ export default function VncPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultForm);
   const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [selectedSessionForLog, setSelectedSessionForLog] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     loadSessions();
@@ -88,6 +226,11 @@ export default function VncPage() {
       setFormData(defaultForm);
     }
     setShowModal(true);
+  };
+
+  const openLogModal = (session: VncSession) => {
+    setSelectedSessionForLog({ id: session.id, name: session.name || session.id });
+    setShowLogModal(true);
   };
 
   const handleSubmit = async () => {
@@ -290,6 +433,10 @@ export default function VncPage() {
                       </>
                     )}
                   </Button>
+                  <Button variant="secondary" size="sm" onClick={() => openLogModal(session)}>
+                    <FileText className="w-4 h-4" />
+                    日志
+                  </Button>
                   <Button variant="ghost" size="sm" onClick={() => openModal(session)}>
                     <Pencil className="w-4 h-4" />
                     编辑
@@ -420,6 +567,18 @@ export default function VncPage() {
           </div>
         </div>
       </Modal>
+
+      {selectedSessionForLog && (
+        <VncLogModal
+          isOpen={showLogModal}
+          onClose={() => {
+            setShowLogModal(false);
+            setSelectedSessionForLog(null);
+          }}
+          sessionId={selectedSessionForLog.id}
+          sessionName={selectedSessionForLog.name}
+        />
+      )}
     </div>
   );
 }
