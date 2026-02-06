@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
+import { UI_TEXT } from "@/lib/ui-text";
 import { Plus, Play, Square, Trash2, RefreshCw, Activity, Copy, Pencil, Eye } from "lucide-react";
 import { TcpTunnel, Host } from "@/types/api";
 
@@ -36,6 +37,8 @@ const defaultForm = {
   backoff_max_ms: "30000",
   scan_interval_ms: "3000",
   debounce_ms: "8000",
+  ports_filter_mode: "exclude" as "exclude" | "include",
+  include_ports_text: "",
   exclude_ports_text: "",
 };
 
@@ -220,7 +223,10 @@ export default function TunnelsPage() {
       } else {
         payload.scan_interval_ms = parseNumber(formData.scan_interval_ms);
         payload.debounce_ms = parseNumber(formData.debounce_ms);
-        payload.exclude_ports = parsePortsText(formData.exclude_ports_text);
+        const isWhitelist = formData.ports_filter_mode === "include";
+        payload.include_ports_enabled = isWhitelist;
+        payload.include_ports = isWhitelist ? parsePortsText(formData.include_ports_text) : [];
+        payload.exclude_ports = isWhitelist ? [] : parsePortsText(formData.exclude_ports_text);
       }
 
       const connectTimeout = parseNumber(formData.connect_timeout_ms);
@@ -257,6 +263,8 @@ export default function TunnelsPage() {
           host_key_fingerprint: payload.host_key_fingerprint,
           scan_interval_ms: payload.scan_interval_ms,
           debounce_ms: payload.debounce_ms,
+          include_ports_enabled: payload.include_ports_enabled,
+          include_ports: payload.include_ports,
           exclude_ports: payload.exclude_ports,
           connect_timeout_ms: payload.connect_timeout_ms,
         };
@@ -428,6 +436,8 @@ export default function TunnelsPage() {
             backoff_max_ms: "",
             scan_interval_ms: detail.scan_interval_ms?.toString() || "",
             debounce_ms: detail.debounce_ms?.toString() || "",
+            ports_filter_mode: detail.include_ports_enabled ? "include" : "exclude",
+            include_ports_text: detail.include_ports?.join(", ") || "",
             exclude_ports_text: detail.exclude_ports?.join(", ") || "",
           });
         } catch (error) {
@@ -460,6 +470,8 @@ export default function TunnelsPage() {
           backoff_max_ms: tunnel.backoff_max_ms?.toString() || "",
           scan_interval_ms: tunnel.scan_interval_ms?.toString() || "",
           debounce_ms: tunnel.debounce_ms?.toString() || "",
+          ports_filter_mode: "exclude",
+          include_ports_text: "",
           exclude_ports_text: tunnel.exclude_ports?.join(", ") || "",
         });
       }
@@ -545,6 +557,7 @@ export default function TunnelsPage() {
       <div className="grid gap-4">
         {displayedTunnels.map((tunnel) => {
           const isEnabled = tunnel.enabled ?? tunnel.status.state === "forwarding";
+          const isRunning = tunnel.status.state === "forwarding";
 
           return (
             <Card key={tunnel.id} className="p-4" hoverEffect>
@@ -616,21 +629,31 @@ export default function TunnelsPage() {
                       </>
                     )}
                   </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleTest(tunnel)}
-                    loading={testingTunnelId === tunnel.id}
-                  >
-                    <Activity className="w-4 h-4" />
-                    测试
-                  </Button>
-                  {tunnelTestResults[tunnel.id] && (
-                    <Badge variant={tunnelTestResults[tunnel.id].ok ? "success" : "error"}>
-                      {tunnelTestResults[tunnel.id].latency_ms != null
-                        ? `${tunnelTestResults[tunnel.id].latency_ms}ms`
-                        : tunnelTestResults[tunnel.id].ok ? "成功" : "失败"}
-                    </Badge>
+                  {tunnel.mode === "single" && (
+                    <>
+                      <span
+                        className="inline-flex"
+                        title={isRunning ? UI_TEXT.tunnels.testTooltip.running : UI_TEXT.tunnels.testTooltip.idle}
+                      >
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => handleTest(tunnel)}
+                          loading={testingTunnelId === tunnel.id}
+                          disabled={isRunning}
+                        >
+                          <Activity className="w-4 h-4" />
+                          测试
+                        </Button>
+                      </span>
+                      {tunnelTestResults[tunnel.id] && (
+                        <Badge variant={tunnelTestResults[tunnel.id].ok ? "success" : "error"}>
+                          {tunnelTestResults[tunnel.id].latency_ms != null
+                            ? `${tunnelTestResults[tunnel.id].latency_ms}ms`
+                            : tunnelTestResults[tunnel.id].ok ? "成功" : "失败"}
+                        </Badge>
+                      )}
+                    </>
                   )}
                   <Button variant="ghost" size="sm" onClick={() => void openModal(tunnel)}>
                     <Pencil className="w-4 h-4" />
@@ -851,17 +874,53 @@ export default function TunnelsPage() {
           </div>
 
           {formData.mode === "full" && (
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-2">
-                不穿透端口黑名单（逗号/空格/换行分隔）
-              </label>
-              <textarea
-                value={formData.exclude_ports_text}
-                onChange={(e) => setFormData({ ...formData, exclude_ports_text: e.target.value })}
-                rows={3}
-                className="w-full px-4 py-3 rounded-lg bg-white border border-slate-200 shadow-sm border-0 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
-                placeholder="例如: 80, 443, 3000"
-              />
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">
+                  端口筛选规则
+                </label>
+                <select
+                  value={formData.ports_filter_mode}
+                  onChange={(e) => setFormData({
+                    ...formData,
+                    ports_filter_mode: e.target.value as "exclude" | "include",
+                  })}
+                  className="w-full h-11 px-3 rounded-lg bg-white border border-slate-200 shadow-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
+                >
+                  <option value="exclude">黑名单（不穿透以下端口）</option>
+                  <option value="include">白名单（仅穿透以下端口）</option>
+                </select>
+              </div>
+              {formData.ports_filter_mode === "include" ? (
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-2">
+                    穿透端口白名单（逗号/空格/换行分隔）
+                  </label>
+                  <textarea
+                    value={formData.include_ports_text}
+                    onChange={(e) => setFormData({ ...formData, include_ports_text: e.target.value })}
+                    rows={3}
+                    className="w-full px-4 py-3 rounded-lg bg-white border border-slate-200 shadow-sm border-0 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
+                    placeholder="例如: 22, 80, 443"
+                  />
+                  {parsePortsText(formData.include_ports_text).length === 0 && (
+                    <p className="text-xs text-amber-600 mt-2">不会穿透任何端口</p>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-2">
+                    不穿透端口黑名单（逗号/空格/换行分隔）
+                  </label>
+                  <textarea
+                    value={formData.exclude_ports_text}
+                    onChange={(e) => setFormData({ ...formData, exclude_ports_text: e.target.value })}
+                    rows={3}
+                    className="w-full px-4 py-3 rounded-lg bg-white border border-slate-200 shadow-sm border-0 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
+                    placeholder="例如: 80, 443, 3000"
+                  />
+                </div>
+              )}
             </div>
           )}
 

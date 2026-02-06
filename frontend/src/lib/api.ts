@@ -530,6 +530,8 @@ class ApiClient {
           username: string;
           scan_interval_ms: number;
           debounce_ms: number;
+          include_ports_enabled: boolean;
+          include_ports: number[];
           exclude_ports: number[];
           connect_timeout_ms: number;
           status: TcpTunnel["status"];
@@ -554,6 +556,8 @@ class ApiClient {
       connect_timeout_ms: item.connect_timeout_ms,
       scan_interval_ms: item.scan_interval_ms,
       debounce_ms: item.debounce_ms,
+      include_ports_enabled: item.include_ports_enabled,
+      include_ports: item.include_ports,
       exclude_ports: item.exclude_ports,
       status: item.status,
     }));
@@ -573,6 +577,8 @@ class ApiClient {
     auth: { type: "password"; password?: string } | { type: "private_key_path"; path: string };
     strict_host_key_checking: boolean;
     host_key_fingerprint: string;
+    include_ports_enabled: boolean;
+    include_ports: number[];
     exclude_ports: number[];
     scan_interval_ms: number;
     debounce_ms: number;
@@ -591,6 +597,8 @@ class ApiClient {
       auth: { type: "password"; password?: string } | { type: "private_key_path"; path: string };
       strict_host_key_checking: boolean;
       host_key_fingerprint: string;
+      include_ports_enabled: boolean;
+      include_ports: number[];
       exclude_ports: number[];
       scan_interval_ms: number;
       debounce_ms: number;

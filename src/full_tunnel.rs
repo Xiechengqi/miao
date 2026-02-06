@@ -135,10 +135,14 @@ async fn run_set_loop(
             }
         };
 
-        let ports_now: HashSet<u16> = ports_now
+        let mut ports_now: HashSet<u16> = ports_now
             .into_iter()
             .filter(|p| !set_cfg.exclude_ports.iter().any(|x| x == p))
             .collect();
+        if set_cfg.include_ports_enabled {
+            let include: HashSet<u16> = set_cfg.include_ports.iter().cloned().collect();
+            ports_now.retain(|p| include.contains(p));
+        }
 
         // Build managed map (port -> tunnel id)
         let (managed_map, all_tunnels) = {

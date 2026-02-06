@@ -54,6 +54,8 @@ export const mockTcpTunnels: TcpTunnel[] = [
     password: "",
     scan_interval_ms: 3000,
     debounce_ms: 8000,
+    include_ports_enabled: false,
+    include_ports: [],
     exclude_ports: [80, 443],
     ssh_host: "forward.example.com",
     ssh_port: 22,

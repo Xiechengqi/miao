@@ -1,8 +1,9 @@
-use crate::TcpTunnelConfig;
+use crate::{TcpTunnelConfig, TcpTunnelManagedBy};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, watch, Mutex};
 use tokio::time::{sleep, Duration};
 
@@ -406,12 +407,27 @@ async fn record_last_error(
 }
 
 fn backoff(cfg: &TcpTunnelConfig, attempt: u32) -> Duration {
+    const MAX_BACKOFF_MS: u64 = 60_000;
     let base_ms = cfg.reconnect_backoff_ms.base_ms;
     let max_ms = cfg.reconnect_backoff_ms.max_ms;
     let shift = attempt.min(16);
     let mul = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
-    let d = base_ms.saturating_mul(mul).min(max_ms);
-    Duration::from_millis(d.max(200))
+    let d = base_ms.saturating_mul(mul).min(max_ms).min(MAX_BACKOFF_MS);
+    jitter_duration(Duration::from_millis(d.max(200)))
+}
+
+fn jitter_duration(duration: Duration) -> Duration {
+    let jitter_permille = 800u64 + (random_u64() % 401);
+    let base_ms = duration.as_millis() as u64;
+    let jittered_ms = base_ms.saturating_mul(jitter_permille) / 1000;
+    Duration::from_millis(jittered_ms.max(1))
+}
+
+fn random_u64() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 async fn run_tunnel(
@@ -507,19 +523,32 @@ async fn connect_and_forward(
         ));
     }
 
+    let retryable_forward_errors = matches!(cfg.managed_by, Some(TcpTunnelManagedBy::FullTunnel { .. }));
+
     tokio::time::timeout(
         connect_timeout,
         session.tcpip_forward(cfg.remote_bind_addr.clone(), cfg.remote_port as u32),
     )
     .await
-    .map_err(|_| ("TCPIP_FORWARD_TIMEOUT".to_string(), "tcpip_forward timeout".to_string(), false))?
+    .map_err(|_| {
+        (
+            "TCPIP_FORWARD_TIMEOUT".to_string(),
+            "tcpip_forward timeout".to_string(),
+            retryable_forward_errors,
+        )
+    })?
     .map_err(|e| match e {
-        russh::Error::RequestDenied => (
-            "REMOTE_PORT_CONFLICT".to_string(),
-            "tcpip_forward denied (port in use or server policy)".to_string(),
-            false,
+        russh::Error::RequestDenied => {
+            let code = "REMOTE_PORT_CONFLICT".to_string();
+            let message = "tcpip_forward denied (port in use or server policy)".to_string();
+            let retryable = retryable_forward_errors;
+            (code, message, retryable)
+        }
+        _ => (
+            "TCPIP_FORWARD_FAILED".to_string(),
+            format!("{e:?}"),
+            retryable_forward_errors,
         ),
-        _ => ("TCPIP_FORWARD_FAILED".to_string(), format!("{e:?}"), false),
     })?;
 
     set_state(status, TunnelState::Forwarding).await;

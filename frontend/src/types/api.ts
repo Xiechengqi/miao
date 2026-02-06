@@ -225,6 +225,8 @@ export interface TcpTunnel {
   backoff_max_ms?: number;
   scan_interval_ms?: number;
   debounce_ms?: number;
+  include_ports_enabled?: boolean;
+  include_ports?: number[];
   exclude_ports?: number[];
   ssh_host: string;
   ssh_port: number;

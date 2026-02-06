@@ -88,11 +88,11 @@ fn default_tunnel_set_connect_timeout_ms() -> u64 {
 }
 
 fn default_tunnel_set_start_batch_size() -> u64 {
-    5
+    2
 }
 
 fn default_tunnel_set_start_batch_interval_ms() -> u64 {
-    500
+    1500
 }
 
 fn default_schedule_timezone() -> String {
@@ -250,6 +250,10 @@ struct TcpTunnelSetConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     host_key_fingerprint: String,
 
+    #[serde(default)]
+    include_ports_enabled: bool,
+    #[serde(default)]
+    include_ports: Vec<u16>,
     #[serde(default)]
     exclude_ports: Vec<u16>,
     #[serde(default)]
@@ -1034,6 +1038,8 @@ struct TcpTunnelSetListItem {
     username: String,
     scan_interval_ms: u64,
     debounce_ms: u64,
+    include_ports_enabled: bool,
+    include_ports: Vec<u16>,
     exclude_ports: Vec<u16>,
     connect_timeout_ms: u64,
     status: tcp_tunnel::TunnelRuntimeStatus,
@@ -1164,6 +1170,10 @@ struct TcpTunnelSetCreateRequest {
     #[serde(default)]
     host_key_fingerprint: Option<String>,
     #[serde(default)]
+    include_ports_enabled: Option<bool>,
+    #[serde(default)]
+    include_ports: Option<Vec<u16>>,
+    #[serde(default)]
     exclude_ports: Option<Vec<u16>>,
     #[serde(default)]
     scan_interval_ms: Option<u64>,
@@ -1189,6 +1199,8 @@ struct TcpTunnelSetDetailResponse {
     auth: TcpTunnelAuthPublic,
     strict_host_key_checking: bool,
     host_key_fingerprint: String,
+    include_ports_enabled: bool,
+    include_ports: Vec<u16>,
     exclude_ports: Vec<u16>,
     scan_interval_ms: u64,
     debounce_ms: u64,
@@ -7363,6 +7375,8 @@ async fn get_tcp_tunnel_sets(
             username: s.username,
             scan_interval_ms: s.scan_interval_ms,
             debounce_ms: s.debounce_ms,
+            include_ports_enabled: s.include_ports_enabled,
+            include_ports: s.include_ports,
             exclude_ports: s.exclude_ports,
             connect_timeout_ms: s.connect_timeout_ms,
             status,
@@ -7403,6 +7417,8 @@ async fn get_tcp_tunnel_set(
             auth: redact_tunnel_auth(&set.auth),
             strict_host_key_checking: set.strict_host_key_checking,
             host_key_fingerprint: set.host_key_fingerprint,
+            include_ports_enabled: set.include_ports_enabled,
+            include_ports: set.include_ports,
             exclude_ports: set.exclude_ports,
             scan_interval_ms: set.scan_interval_ms,
             debounce_ms: set.debounce_ms,
@@ -7651,6 +7667,10 @@ async fn update_tcp_tunnel_set(
         auth: auth.clone(),
         strict_host_key_checking,
         host_key_fingerprint: host_key_fingerprint.clone(),
+        include_ports_enabled: req
+            .include_ports_enabled
+            .unwrap_or(existing.include_ports_enabled),
+        include_ports: req.include_ports.unwrap_or_else(|| existing.include_ports.clone()),
         exclude_ports: req.exclude_ports.unwrap_or_else(|| existing.exclude_ports.clone()),
         scan_interval_ms: req.scan_interval_ms.unwrap_or(existing.scan_interval_ms),
         debounce_ms: req.debounce_ms.unwrap_or(existing.debounce_ms),
@@ -7713,6 +7733,8 @@ async fn create_tcp_tunnel_set(
     let ssh_port = req.ssh_port.unwrap_or_else(default_ssh_port);
     let strict_host_key_checking = req.strict_host_key_checking.unwrap_or(true);
     let host_key_fingerprint = req.host_key_fingerprint.unwrap_or_default();
+    let include_ports_enabled = req.include_ports_enabled.unwrap_or(false);
+    let include_ports = req.include_ports.unwrap_or_default();
     let exclude_ports = req.exclude_ports.unwrap_or_default();
     let scan_interval_ms = req.scan_interval_ms.unwrap_or(3_000);
     let debounce_ms = req.debounce_ms.unwrap_or(8_000);
@@ -7768,6 +7790,8 @@ async fn create_tcp_tunnel_set(
             auth,
             strict_host_key_checking,
             host_key_fingerprint,
+            include_ports_enabled,
+            include_ports,
             exclude_ports,
             scan_interval_ms,
             debounce_ms,
