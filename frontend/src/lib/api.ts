@@ -21,6 +21,7 @@ import {
   BandwidthTestResult,
   ToolsStatus,
   Node,
+  LogEntry,
 } from "@/types/api";
 
 // 重试配置
@@ -437,6 +438,15 @@ class ApiClient {
     if (limit) params.set("limit", limit.toString());
     const res = await this.fetch<{ data: TerminalLogEntry[] }>(
       `/api/terminals/${id}/logs?${params.toString()}`
+    );
+    return res.data;
+  }
+
+  async getSingBoxLogs(limit?: number): Promise<LogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: LogEntry[] }>(
+      `/api/sing-box/logs?${params.toString()}`
     );
     return res.data;
   }
@@ -1030,4 +1040,13 @@ export function getLogsWsUrl(): string {
   }
   const wsBase = getWsBase();
   return `${wsBase}/api/clash/ws/logs?token=${token}`;
+}
+
+export function getSingBoxLogsWsUrl(): string {
+  const token = localStorage.getItem("miao_token");
+  if (!token) {
+    throw new Error("No authentication token found. Please login first.");
+  }
+  const wsBase = getWsBase();
+  return `${wsBase}/api/sing-box/ws/logs?token=${token}`;
 }

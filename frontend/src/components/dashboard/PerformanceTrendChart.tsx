@@ -94,6 +94,26 @@ export function PerformanceTrendChart({
     return `${Math.round(value)}%`;
   };
 
+  const formatDate = (timestamp: number) => {
+    const date = new Date(timestamp * 1000);
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    return `${mm}/${dd}`;
+  };
+
+  const xAxisTicks = (() => {
+    if (!hasData) return [];
+    const ticks: Array<{ index: number; label: string }> = [];
+    const seen = new Set<string>();
+    series.forEach((point, index) => {
+      const label = formatDate(point.timestamp);
+      if (seen.has(label)) return;
+      seen.add(label);
+      ticks.push({ index, label });
+    });
+    return ticks;
+  })();
+
   const hoverMemoryPercent =
     hoverPoint && memoryTotalBytes
       ? Math.min(
@@ -180,57 +200,72 @@ export function PerformanceTrendChart({
           </div>
         )}
         {hasData && (
-          <svg
-            viewBox={`0 0 ${width} ${height}`}
-            className="h-40 w-full"
-            preserveAspectRatio="none"
-          >
-            <polyline
-              fill="none"
-              stroke="#6366F1"
-              strokeWidth="2"
-              points={buildPolyline(cpuValues, width, height)}
-            />
-            <polyline
-              fill="none"
-              stroke="#10B981"
-              strokeWidth="2"
-              points={buildPolyline(memoryValues, width, height)}
-            />
-            <polyline
-              fill="none"
-              stroke="#A855F7"
-              strokeWidth="2"
-              points={buildPolyline(gpuValues, width, height)}
-              style={{ display: hasGpu ? "block" : "none" }}
-            />
-            <polyline
-              fill="none"
-              stroke="#F59E0B"
-              strokeWidth="2"
-              points={buildPolyline(diskValues, width, height)}
-            />
-            {hoverIndex !== null && (
-              <>
-                <line
-                  x1={hoverX}
-                  x2={hoverX}
-                  y1={0}
-                  y2={height}
-                  stroke="#CBD5F5"
-                  strokeWidth="1"
-                />
-                <circle cx={hoverX} cy={hoverCpuY} r="3" fill="#6366F1" />
-                <circle cx={hoverX} cy={hoverMemoryY} r="3" fill="#10B981" />
-                {hoverPoint?.gpuPercent !== undefined && (
-                  <circle cx={hoverX} cy={hoverGpuY} r="3" fill="#A855F7" />
-                )}
-                {hoverDiskPercent !== undefined && (
-                  <circle cx={hoverX} cy={hoverDiskY} r="3" fill="#F59E0B" />
-                )}
-              </>
+          <>
+            <svg
+              viewBox={`0 0 ${width} ${height}`}
+              className="h-40 w-full"
+              preserveAspectRatio="none"
+            >
+              <polyline
+                fill="none"
+                stroke="#6366F1"
+                strokeWidth="2"
+                points={buildPolyline(cpuValues, width, height)}
+              />
+              <polyline
+                fill="none"
+                stroke="#10B981"
+                strokeWidth="2"
+                points={buildPolyline(memoryValues, width, height)}
+              />
+              <polyline
+                fill="none"
+                stroke="#A855F7"
+                strokeWidth="2"
+                points={buildPolyline(gpuValues, width, height)}
+                style={{ display: hasGpu ? "block" : "none" }}
+              />
+              <polyline
+                fill="none"
+                stroke="#F59E0B"
+                strokeWidth="2"
+                points={buildPolyline(diskValues, width, height)}
+              />
+              {hoverIndex !== null && (
+                <>
+                  <line
+                    x1={hoverX}
+                    x2={hoverX}
+                    y1={0}
+                    y2={height}
+                    stroke="#CBD5F5"
+                    strokeWidth="1"
+                  />
+                  <circle cx={hoverX} cy={hoverCpuY} r="3" fill="#6366F1" />
+                  <circle cx={hoverX} cy={hoverMemoryY} r="3" fill="#10B981" />
+                  {hoverPoint?.gpuPercent !== undefined && (
+                    <circle cx={hoverX} cy={hoverGpuY} r="3" fill="#A855F7" />
+                  )}
+                  {hoverDiskPercent !== undefined && (
+                    <circle cx={hoverX} cy={hoverDiskY} r="3" fill="#F59E0B" />
+                  )}
+                </>
+              )}
+            </svg>
+            {xAxisTicks.length > 0 && (
+              <div className="relative mt-2 h-4 text-xs text-slate-400">
+                {xAxisTicks.map((tick) => (
+                  <span
+                    key={`${tick.label}-${tick.index}`}
+                    className="absolute -translate-x-1/2"
+                    style={{ left: `${(tick.index / (seriesLength - 1)) * 100}%` }}
+                  >
+                    {tick.label}
+                  </span>
+                ))}
+              </div>
             )}
-          </svg>
+          </>
         )}
         {hoverPoint && (
           <div

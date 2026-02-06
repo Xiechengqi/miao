@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { Card, CardHeader, CardContent, Button, Badge, TogglePower, Skeleton, SkeletonCard, ConfirmModal, Modal } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { useProxies, useStatus, useTraffic } from "@/hooks";
-import { api } from "@/lib/api";
+import { api, getSingBoxLogsWsUrl } from "@/lib/api";
 import { formatUptime, formatSpeed, cn } from "@/lib/utils";
-import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check, Download } from "lucide-react";
-import { Host, ManualNode } from "@/types/api";
+import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check, Download, FileText } from "lucide-react";
+import { Host, ManualNode, LogEntry } from "@/types/api";
 
 const CONNECTIVITY_SITES = [
   { name: "Google", url: "https://www.google.com" },
@@ -48,6 +48,147 @@ type UpgradeLogEntry = {
   level: string;
   progress?: number;
 };
+
+function SingBoxLogModal({
+  isOpen,
+  onClose,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+}) {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const isUnmountedRef = useRef(false);
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getSingBoxLogs(200);
+      setLogs(data);
+    } catch (error) {
+      console.error("Failed to load sing-box logs:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const connectWs = useCallback(() => {
+    let wsUrl: string;
+    try {
+      wsUrl = getSingBoxLogsWsUrl();
+    } catch (error) {
+      console.warn("Cannot connect to sing-box logs WebSocket:", error);
+      setWsConnected(false);
+      return;
+    }
+
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(true);
+      }
+    };
+    ws.onmessage = (event) => {
+      if (isUnmountedRef.current) return;
+      try {
+        const entry = JSON.parse(event.data) as LogEntry;
+        setLogs((prev) => [entry, ...prev].slice(0, 200));
+      } catch (e) {
+        console.error("Failed to parse sing-box log:", e);
+      }
+    };
+    ws.onclose = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    ws.onerror = () => {
+      if (!isUnmountedRef.current) {
+        setWsConnected(false);
+      }
+    };
+    wsRef.current = ws;
+  }, []);
+
+  const disconnectWs = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setWsConnected(false);
+  }, []);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    if (isOpen) {
+      loadLogs();
+      connectWs();
+    } else {
+      disconnectWs();
+    }
+    return () => {
+      isUnmountedRef.current = true;
+      disconnectWs();
+    };
+  }, [isOpen, loadLogs, connectWs, disconnectWs]);
+
+  useEffect(() => {
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = 0;
+    }
+  }, [logs]);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="sing-box 日志" size="lg">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
+            <span className="text-sm text-slate-500">
+              {wsConnected ? "实时连接中" : "连接已断开"}
+            </span>
+          </div>
+          <Button variant="secondary" size="sm" onClick={loadLogs} loading={loading}>
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </Button>
+        </div>
+
+        <div
+          ref={logsContainerRef}
+          className="max-h-96 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+        >
+          {logs.length === 0 ? (
+            <div className="text-slate-500 text-center py-8">暂无日志</div>
+          ) : (
+            <div className="space-y-1">
+              {logs.map((log, index) => (
+                <div key={index} className="flex gap-2">
+                  <span className="text-slate-400 shrink-0">{log.time}</span>
+                  <span
+                    className={`shrink-0 ${
+                      log.level === "error"
+                        ? "text-red-400"
+                        : log.level === "warning"
+                          ? "text-yellow-400"
+                          : "text-green-400"
+                    }`}
+                  >
+                    [{log.level.toUpperCase()}]
+                  </span>
+                  <span className="text-slate-200">{log.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 // 默认 DNS 候选列表
 const DEFAULT_DNS_CANDIDATES = ["doh-cf", "doh-google"];
@@ -101,6 +242,7 @@ export default function ProxiesPage() {
   const [upgradeProgress, setUpgradeProgress] = useState(0);
   const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
   const upgradeLogsRef = useRef<HTMLDivElement>(null);
+  const [showSingBoxLogModal, setShowSingBoxLogModal] = useState(false);
 
   // 当前选中的代理节点
   const currentNode = useMemo(() => {
@@ -585,10 +727,25 @@ export default function ProxiesPage() {
           )}
         </div>
         {singBoxInstalled && (
-          <Button variant="secondary" onClick={handleUpgradeSingBox} disabled={upgrading}>
-            <Download className="w-4 h-4" />
-            {upgrading ? "更新中..." : "更新 sing-box"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <span
+              className="inline-flex"
+              title={status.running ? "查看 sing-box 运行日志" : "sing-box 未运行，无法查看日志"}
+            >
+              <Button
+                variant="secondary"
+                onClick={() => setShowSingBoxLogModal(true)}
+                disabled={!status.running}
+              >
+                <FileText className="w-4 h-4" />
+                日志
+              </Button>
+            </span>
+            <Button variant="secondary" onClick={handleUpgradeSingBox} disabled={upgrading}>
+              <Download className="w-4 h-4" />
+              {upgrading ? "更新中..." : "更新 sing-box"}
+            </Button>
+          </div>
         )}
       </div>
 
@@ -909,6 +1066,11 @@ export default function ProxiesPage() {
           )}
         </div>
       </Modal>
+
+      <SingBoxLogModal
+        isOpen={showSingBoxLogModal}
+        onClose={() => setShowSingBoxLogModal(false)}
+      />
     </div>
   );
 }
