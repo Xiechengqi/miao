@@ -9,6 +9,8 @@ import { Plus, Play, Square, Trash2, RefreshCw, Activity, Copy, Pencil, Eye } fr
 import { TcpTunnel, Host } from "@/types/api";
 
 const TUNNEL_TEST_STORAGE_KEY = "miao_tunnel_test_results";
+const TUNNEL_VIEWMODE_STORAGE_KEY = "miao_tunnel_view_mode";
+const TUNNEL_DETAILS_REFRESH_INTERVAL_MS = 3000;
 
 type TunnelTestResult = {
   ok: boolean;
@@ -72,6 +74,29 @@ export default function TunnelsPage() {
     [hosts]
   );
 
+  // 初始化加载视图模式
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(TUNNEL_VIEWMODE_STORAGE_KEY);
+      if (saved === "single" || saved === "full") {
+        setViewMode(saved);
+      } else if (saved) {
+        localStorage.removeItem(TUNNEL_VIEWMODE_STORAGE_KEY);
+      }
+    } catch {
+      console.warn("Failed to load tunnel view mode from localStorage");
+    }
+  }, []);
+
+  // 同步视图模式到 localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(TUNNEL_VIEWMODE_STORAGE_KEY, viewMode);
+    } catch (error) {
+      console.warn("Failed to save tunnel view mode:", error);
+    }
+  }, [viewMode]);
+
   // 初始化加载测试结果
   useEffect(() => {
     try {
@@ -105,15 +130,6 @@ export default function TunnelsPage() {
     loadTunnels();
     loadHosts();
   }, []);
-
-  useEffect(() => {
-    if (!tcpTunnelsLoaded || viewMode !== "single") return;
-    const hasSingle = tcpTunnels.some((tunnel) => tunnel.mode === "single");
-    const hasFull = tcpTunnels.some((tunnel) => tunnel.mode === "full");
-    if (!hasSingle && hasFull) {
-      setViewMode("full");
-    }
-  }, [tcpTunnelsLoaded, tcpTunnels, viewMode]);
 
   const loadHosts = async () => {
     try {
@@ -303,17 +319,21 @@ export default function TunnelsPage() {
       if (tunnel.mode === "full") {
         if (isEnabled) {
           await api.stopTcpTunnelSet(tunnel.id);
+          addToast({ type: "success", message: "全穿透已停止" });
         } else {
           await api.startTcpTunnelSet(tunnel.id);
+          addToast({ type: "success", message: "全穿透已启动" });
         }
       } else {
         if (isEnabled) {
           await api.stopTcpTunnel(tunnel.id);
+          addToast({ type: "success", message: "单穿透已停止" });
         } else {
           await api.startTcpTunnel(tunnel.id);
+          addToast({ type: "success", message: "单穿透已启动" });
         }
       }
-      loadTunnels();
+      await loadTunnels();
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "操作失败" });
     } finally {
@@ -378,21 +398,35 @@ export default function TunnelsPage() {
     }
   };
 
+  const fetchDetails = async (tunnelId: string, { silent = false } = {}) => {
+    if (!silent) setDetailsLoading(true);
+    try {
+      const res = await api.getTcpTunnelSetTunnels(tunnelId);
+      setDetailsTunnels(res.items);
+    } catch (error) {
+      if (!silent) {
+        addToast({ type: "error", message: error instanceof Error ? error.message : "加载详情失败" });
+        setDetailsTunnels([]);
+      }
+    } finally {
+      if (!silent) setDetailsLoading(false);
+    }
+  };
+
   const handleViewDetails = async (tunnel: TcpTunnel) => {
     if (tunnel.mode !== "full") return;
     setDetailsTunnel(tunnel);
-    setDetailsLoading(true);
     setShowDetailsModal(true);
-    try {
-      const res = await api.getTcpTunnelSetTunnels(tunnel.id);
-      setDetailsTunnels(res.items);
-    } catch (error) {
-      addToast({ type: "error", message: error instanceof Error ? error.message : "加载详情失败" });
-      setDetailsTunnels([]);
-    } finally {
-      setDetailsLoading(false);
-    }
+    await fetchDetails(tunnel.id);
   };
+
+  useEffect(() => {
+    if (!showDetailsModal || !detailsTunnel) return;
+    const intervalId = window.setInterval(() => {
+      void fetchDetails(detailsTunnel.id, { silent: true });
+    }, TUNNEL_DETAILS_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [showDetailsModal, detailsTunnel]);
 
   const handleDelete = async (id: string) => {
     if (!confirm("确定要删除此隧道吗？")) return;
