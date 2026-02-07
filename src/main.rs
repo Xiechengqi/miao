@@ -3296,17 +3296,30 @@ fn load_metrics_series(
     Ok(points)
 }
 
+fn detect_os_id() -> String {
+    if let Ok(content) = fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("ID=") {
+                return val.trim_matches('"').to_lowercase();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
 async fn get_tools_status() -> Json<ApiResponse<serde_json::Value>> {
     let vnc_available = binary_exists("vncserver") && binary_exists("vncpasswd");
-    let openbox_available = openbox_available();
+    let i3_available = i3_available();
     let tar_available = binary_exists("tar");
     let zstd_available = binary_exists("zstd");
+    let os_id = detect_os_id();
 
     let data = serde_json::json!({
         "vnc": vnc_available,
-        "openbox": openbox_available,
+        "i3": i3_available,
         "tar": tar_available,
         "zstd": zstd_available,
+        "os": os_id,
     });
 
     Json(ApiResponse::success("Tools status", data))
@@ -10143,8 +10156,8 @@ fn binary_exists(cmd: &str) -> bool {
     false
 }
 
-fn openbox_available() -> bool {
-    binary_exists("openbox") || binary_exists("openbox-session")
+fn i3_available() -> bool {
+    binary_exists("i3")
 }
 
 fn ensure_vnc_dependencies() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -10154,8 +10167,8 @@ fn ensure_vnc_dependencies() -> Result<(), Box<dyn std::error::Error + Send + Sy
     if !binary_exists("vncpasswd") {
         return Err("vncpasswd not found in PATH".into());
     }
-    if !openbox_available() {
-        return Err("openbox not found in PATH".into());
+    if !i3_available() {
+        return Err("i3 not found in PATH".into());
     }
     if !PathBuf::from(KASMVNC_HTTPD_DIR).exists() {
         return Err(format!("kasmvnc httpd dir not found: {}", KASMVNC_HTTPD_DIR).into());
@@ -10200,22 +10213,93 @@ fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send 
 fn ensure_vnc_xstartup(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let vnc_dir = home_dir.join(".vnc");
     fs::create_dir_all(&vnc_dir)?;
+
+    // Write i3 config for VNC environment
+    let i3_dir = home_dir.join(".config").join("i3");
+    fs::create_dir_all(&i3_dir)?;
+    let i3_config_path = i3_dir.join("config");
+    if !i3_config_path.exists() {
+        let i3_config = r#"### i3 config for KasmVNC
+set $mod Mod4
+set $terminal xterm
+font pango:monospace 10
+
+### Appearance
+gaps inner 2
+gaps outer 2
+default_border pixel 3
+client.focused          #88c0d0 #88c0d0 #2e3440 #88c0d0 #88c0d0
+client.unfocused        #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
+client.focused_inactive #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
+client.urgent           #bf616a #bf616a #ffffff #bf616a #bf616a
+
+### Basic bindings
+bindsym $mod+Return exec --no-startup-id $terminal
+bindsym $mod+q kill
+bindsym $mod+f fullscreen toggle
+bindsym $mod+Ctrl+r reload
+bindsym Mod1+Tab focus next
+bindsym Mod1+Shift+Tab focus prev
+bindsym Mod1+grave focus next
+bindsym Mod4+Tab workspace next
+bindsym Mod4+Shift+Tab workspace prev
+
+### Workspaces
+set $ws1 "1"
+set $ws2 "2"
+set $ws3 "3"
+set $ws4 "4"
+set $ws5 "5"
+set $ws6 "6"
+set $ws7 "7"
+set $ws8 "8"
+set $ws9 "9"
+set $ws10 "10"
+
+bindsym $mod+1 workspace $ws1
+bindsym $mod+2 workspace $ws2
+bindsym $mod+3 workspace $ws3
+bindsym $mod+4 workspace $ws4
+bindsym $mod+5 workspace $ws5
+bindsym $mod+6 workspace $ws6
+bindsym $mod+7 workspace $ws7
+bindsym $mod+8 workspace $ws8
+bindsym $mod+9 workspace $ws9
+bindsym $mod+0 workspace $ws10
+
+bindsym $mod+Shift+1 move container to workspace $ws1
+bindsym $mod+Shift+2 move container to workspace $ws2
+bindsym $mod+Shift+3 move container to workspace $ws3
+bindsym $mod+Shift+4 move container to workspace $ws4
+bindsym $mod+Shift+5 move container to workspace $ws5
+bindsym $mod+Shift+6 move container to workspace $ws6
+bindsym $mod+Shift+7 move container to workspace $ws7
+bindsym $mod+Shift+8 move container to workspace $ws8
+bindsym $mod+Shift+9 move container to workspace $ws9
+bindsym $mod+Shift+0 move container to workspace $ws10
+"#;
+        fs::write(&i3_config_path, i3_config)?;
+        log_info!("Created i3 config at {:?}", i3_config_path);
+    }
+
     let xstartup_path = vnc_dir.join("xstartup");
     if xstartup_path.exists() {
         return Ok(());
     }
-    let contents = r#"#!/bin/sh
+    let i3_config_str = i3_config_path.to_string_lossy();
+    let contents = format!(
+        r#"#!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 
-if command -v openbox-session >/dev/null 2>&1; then
-  exec openbox-session
-elif command -v openbox >/dev/null 2>&1; then
-  exec openbox
+if command -v i3 >/dev/null 2>&1; then
+  exec i3 -c "{}"
 fi
 
 exec /bin/sh
-"#;
+"#,
+        i3_config_str
+    );
     fs::write(&xstartup_path, contents)?;
     fs::set_permissions(&xstartup_path, fs::Permissions::from_mode(0o755))?;
     log_info!("Created VNC xstartup at {:?}", xstartup_path);

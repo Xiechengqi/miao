@@ -7,7 +7,7 @@ import { api, getVncLogsWsUrl } from "@/lib/api";
 import { VncSession, LogEntry } from "@/types/api";
 import { formatUptime } from "@/lib/utils";
 import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
-import { Monitor, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, AlertTriangle, FileText } from "lucide-react";
+import { Monitor, Plus, ExternalLink, Trash2, RefreshCw, Play, Square, Pencil, AlertTriangle, FileText, BookOpen } from "lucide-react";
 
 const defaultForm = {
   name: "",
@@ -23,6 +23,131 @@ const defaultForm = {
   restart_on_save: true,
   clear_password: false,
 };
+
+function getInstallSteps(osId: string, missingVnc: boolean, missingI3: boolean) {
+  const steps: { title: string; cmd: string }[] = [];
+  const isDebian = ["ubuntu", "debian"].includes(osId);
+  const isFedora = ["fedora", "rhel", "centos", "rocky", "alma"].includes(osId);
+  const isArch = ["arch", "manjaro"].includes(osId);
+
+  if (missingVnc) {
+    if (isDebian) {
+      steps.push({
+        title: "安装 KasmVNC (Ubuntu/Debian amd64)",
+        cmd: `wget https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_jammy_1.4.0_amd64.deb\nsudo dpkg -i kasmvncserver_jammy_1.4.0_amd64.deb\nsudo apt-get install -f -y`,
+      });
+    } else if (isFedora) {
+      steps.push({
+        title: "安装 KasmVNC (Fedora/RHEL)",
+        cmd: `sudo dnf install -y \\\n  https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_fedora_1.4.0_x86_64.rpm`,
+      });
+    } else if (isArch) {
+      steps.push({
+        title: "安装 KasmVNC (Arch — AUR)",
+        cmd: `yay -S kasmvnc`,
+      });
+    } else {
+      steps.push({
+        title: "安装 KasmVNC",
+        cmd: `# 请前往 https://github.com/kasmtech/KasmVNC/releases 下载对应平台的安装包`,
+      });
+    }
+  }
+
+  if (missingI3) {
+    if (isDebian) {
+      steps.push({ title: "安装 i3 (Ubuntu/Debian)", cmd: "sudo apt-get update && sudo apt-get install -y i3" });
+    } else if (isFedora) {
+      steps.push({ title: "安装 i3 (Fedora/RHEL)", cmd: "sudo dnf install -y i3" });
+    } else if (isArch) {
+      steps.push({ title: "安装 i3 (Arch)", cmd: "sudo pacman -S --needed i3-wm" });
+    } else {
+      steps.push({ title: "安装 i3", cmd: "# 请使用系统包管理器安装 i3" });
+    }
+  }
+
+  return steps;
+}
+
+function InstallGuide({ osId, missingVnc, missingI3 }: { osId: string; missingVnc: boolean; missingI3: boolean }) {
+  const steps = getInstallSteps(osId, missingVnc, missingI3);
+  if (steps.length === 0) return null;
+
+  return (
+    <div className="mt-2 space-y-2">
+      <p className="text-xs font-semibold text-amber-800">
+        检测到系统: <code className="px-1 py-0.5 bg-amber-100 rounded">{osId}</code>，安装步骤:
+      </p>
+      {steps.map((step, i) => (
+        <div key={i}>
+          <p className="text-xs font-medium text-amber-800">{i + 1}. {step.title}</p>
+          <pre className="mt-1 p-2 bg-slate-800 text-slate-100 text-xs rounded overflow-x-auto whitespace-pre-wrap">{step.cmd}</pre>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function getAllInstallSteps(osId: string) {
+  return getInstallSteps(osId, true, true);
+}
+
+function InstallDocModal({
+  isOpen,
+  onClose,
+  osId,
+  missingVnc,
+  missingI3,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  osId: string;
+  missingVnc: boolean;
+  missingI3: boolean;
+}) {
+  const allSteps = getAllInstallSteps(osId);
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="VNC 环境安装文档" size="lg">
+      <div className="space-y-4">
+        <div className="flex items-center gap-2 text-sm text-slate-600">
+          <span>当前系统:</span>
+          <code className="px-1.5 py-0.5 bg-slate-100 rounded font-medium">{osId || "未知"}</code>
+          <span className="mx-1">|</span>
+          <span>KasmVNC:</span>
+          {missingVnc
+            ? <span className="text-amber-600 font-medium">未安装</span>
+            : <span className="text-emerald-600 font-medium">已安装</span>}
+          <span className="mx-1">|</span>
+          <span>i3:</span>
+          {missingI3
+            ? <span className="text-amber-600 font-medium">未安装</span>
+            : <span className="text-emerald-600 font-medium">已安装</span>}
+        </div>
+
+        {allSteps.length > 0 ? (
+          <div className="space-y-3">
+            {allSteps.map((step, i) => (
+              <div key={i}>
+                <p className="text-sm font-semibold text-slate-700">
+                  {i + 1}. {step.title}
+                </p>
+                <pre className="mt-1 p-3 bg-slate-800 text-slate-100 text-xs rounded-lg overflow-x-auto whitespace-pre-wrap select-all">{step.cmd}</pre>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">无法识别当前系统，请手动安装 KasmVNC 和 i3。</p>
+        )}
+
+        <div className="pt-2 border-t text-xs text-slate-400 space-y-1">
+          <p>KasmVNC 更多版本: https://github.com/kasmtech/KasmVNC/releases</p>
+          <p>安装完成后刷新页面即可检测到新状态。</p>
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 function VncLogModal({
   isOpen,
@@ -168,7 +293,9 @@ export default function VncPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultForm);
   const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
-  const [openboxAvailable, setOpenboxAvailable] = useState<boolean | null>(null);
+  const [i3Available, setI3Available] = useState<boolean | null>(null);
+  const [osId, setOsId] = useState<string>("");
+  const [showInstallDoc, setShowInstallDoc] = useState(false);
   const [showLogModal, setShowLogModal] = useState(false);
   const [selectedSessionForLog, setSelectedSessionForLog] = useState<{ id: string; name: string } | null>(null);
 
@@ -181,7 +308,8 @@ export default function VncPage() {
     try {
       const tools = await api.getToolsStatus();
       setVncAvailable(tools.vnc);
-      setOpenboxAvailable(tools.openbox);
+      setI3Available(tools.i3);
+      setOsId(tools.os || "");
     } catch (error) {
       console.error("Failed to check tools status:", error);
     }
@@ -336,20 +464,18 @@ export default function VncPage() {
 
   return (
     <div className="space-y-6">
-      {/* VNC/Openbox Not Available Warning */}
-      {(vncAvailable === false || openboxAvailable === false) && (
+      {/* VNC/i3 Not Available Warning */}
+      {(vncAvailable === false || i3Available === false) && (
         <Card className="p-4 bg-amber-50 border-amber-200">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <p className="font-semibold text-amber-800">VNC 服务不可用</p>
-              <p className="text-sm text-amber-700 mt-1">
-                {vncAvailable === false &&
-                  "当前环境未安装 vncserver 或 vncpasswd，请先安装 KasmVNC 或 TigerVNC 后再使用此功能。"}
-                {vncAvailable === false && openboxAvailable === false && " "}
-                {openboxAvailable === false &&
-                  "当前环境未安装 openbox，请先安装后再创建 VNC 桌面。"}
-              </p>
+            <div className="space-y-3 w-full">
+              <p className="font-semibold text-amber-800">VNC 服务不可用 — 缺少依赖</p>
+              <div className="text-sm text-amber-700 space-y-1">
+                {vncAvailable === false && <p>• vncserver / vncpasswd 未安装</p>}
+                {i3Available === false && <p>• i3 窗口管理器未安装</p>}
+              </div>
+              {osId && <InstallGuide osId={osId} missingVnc={vncAvailable === false} missingI3={i3Available === false} />}
             </div>
           </div>
         </Card>
@@ -359,19 +485,28 @@ export default function VncPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="flex items-center gap-3">
           <h1 className="text-3xl font-black">远程桌面</h1>
-          {vncAvailable && openboxAvailable && (
+          {vncAvailable && i3Available && (
             <span className="px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
               VNC 已安装
             </span>
           )}
         </div>
-        <Button
-          onClick={() => openModal()}
-          disabled={vncAvailable === false || openboxAvailable === false}
-        >
-          <Plus className="w-4 h-4" />
-          创建桌面
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={() => setShowInstallDoc(true)}
+            variant="secondary"
+          >
+            <BookOpen className="w-4 h-4" />
+            安装文档
+          </Button>
+          <Button
+            onClick={() => openModal()}
+            disabled={vncAvailable === false || i3Available === false}
+          >
+            <Plus className="w-4 h-4" />
+            创建桌面
+          </Button>
+        </div>
       </div>
 
       {/* Session List */}
@@ -588,6 +723,14 @@ export default function VncPage() {
           sessionName={selectedSessionForLog.name}
         />
       )}
+
+      <InstallDocModal
+        isOpen={showInstallDoc}
+        onClose={() => setShowInstallDoc(false)}
+        osId={osId}
+        missingVnc={vncAvailable === false}
+        missingI3={i3Available === false}
+      />
     </div>
   );
 }

@@ -389,7 +389,8 @@ export interface ToastMessage {
 // Tools Status Types
 export interface ToolsStatus {
   vnc: boolean;
-  openbox: boolean;
+  i3: boolean;
   tar: boolean;
   zstd: boolean;
+  os: string;
 }
