@@ -10218,13 +10218,12 @@ fn ensure_vnc_xstartup(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Err
     let i3_dir = home_dir.join(".config").join("i3");
     fs::create_dir_all(&i3_dir)?;
     let i3_config_path = i3_dir.join("config");
-    if !i3_config_path.exists() {
-        let i3_config = r#"### i3 config for KasmVNC
+    let i3_config = r#"### 基础变量 / Basic Variables
 set $mod Mod4
 set $terminal xterm
 font pango:monospace 10
 
-### Appearance
+### 窗口外观 / Appearance
 gaps inner 2
 gaps outer 2
 default_border pixel 3
@@ -10233,18 +10232,47 @@ client.unfocused        #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
 client.focused_inactive #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
 client.urgent           #bf616a #bf616a #ffffff #bf616a #bf616a
 
-### Basic bindings
+### i3 专用 / i3-specific
+# exec_always --no-startup-id setxkbmap -layout jp
+# Per-output scaling (generated). Run i3/scripts/setup-xrandr-scale.sh
+include ~/.config/TWM/i3/local.conf
+exec_always --no-startup-id xrdb -merge "$HOME/.config/TWM/xterm/Xresources"
+
+# Polybar (default)
+exec_always --no-startup-id "$HOME/.config/TWM/polybar/launch.sh"
+exec --no-startup-id fcitx5 -d
+exec --no-startup-id feh --bg-fill "$HOME/.config/TWM/background.png"
+exec --no-startup-id dunst
+
+### 启动器 / Launcher
+bindsym $mod+d exec --no-startup-id rofi -show drun
+bindsym $mod+a exec --no-startup-id rofi -show window
+
+### 退出提示 / Exit prompt
+bindsym $mod+Ctrl+Alt+Shift+q exec i3-nagbar \
+  -t warning \
+  -m "Are you sure you want to exit i3?" \
+  -b "Exit" "i3-msg exit" \
+  -b "Cancel" ""
+bindsym $mod+Ctrl+Alt+Shift+r exec i3-nagbar \
+  -t warning \
+  -m "Are you sure you want to exit i3?" \
+  -b "Exit" "i3-msg exit" \
+  -b "Cancel" ""
+
+### 基础快捷键 / Basic bindings
 bindsym $mod+Return exec --no-startup-id $terminal
 bindsym $mod+q kill
 bindsym $mod+f fullscreen toggle
 bindsym $mod+Ctrl+r reload
+bindsym $mod+Shift+e exec --no-startup-id i3-msg exit
 bindsym Mod1+Tab focus next
 bindsym Mod1+Shift+Tab focus prev
 bindsym Mod1+grave focus next
 bindsym Mod4+Tab workspace next
 bindsym Mod4+Shift+Tab workspace prev
 
-### Workspaces
+### 工作区 / Workspaces
 set $ws1 "1"
 set $ws2 "2"
 set $ws3 "3"
@@ -10278,14 +10306,10 @@ bindsym $mod+Shift+8 move container to workspace $ws8
 bindsym $mod+Shift+9 move container to workspace $ws9
 bindsym $mod+Shift+0 move container to workspace $ws10
 "#;
-        fs::write(&i3_config_path, i3_config)?;
-        log_info!("Created i3 config at {:?}", i3_config_path);
-    }
+    fs::write(&i3_config_path, i3_config)?;
+    log_info!("Wrote i3 config at {:?}", i3_config_path);
 
     let xstartup_path = vnc_dir.join("xstartup");
-    if xstartup_path.exists() {
-        return Ok(());
-    }
     let i3_config_str = i3_config_path.to_string_lossy();
     let contents = format!(
         r#"#!/bin/sh
