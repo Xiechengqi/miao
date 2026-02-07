@@ -10421,9 +10421,13 @@ network:
 
 async fn stop_vnc_internal(id: &str, display: &str) -> Result<(), String> {
     let display = normalize_display_value(display);
+    // Use the same HOME as start to ensure vncserver can find its pid files.
+    let home_dir = PathBuf::from(KASMVNC_BASE_HOME).join(id);
     let _ = tokio::process::Command::new("vncserver")
         .arg("-kill")
         .arg(&display)
+        .env("HOME", &home_dir)
+        .current_dir(&home_dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
