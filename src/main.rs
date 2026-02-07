@@ -10347,6 +10347,7 @@ async fn start_app_internal(
     drop(lock);
 
     let mut display = app.display.clone();
+    let mut bound_vnc_id: Option<String> = None;
     if let Some(vnc_id) = &app.vnc_session_id {
         let vnc = config
             .vnc_sessions
@@ -10358,6 +10359,7 @@ async fn start_app_internal(
             return Err(err.into());
         }
         display = Some(vnc.display.clone());
+        bound_vnc_id = Some(vnc.id.clone());
         let vnc_status = get_vnc_runtime_status(&vnc.id).await;
         if !vnc_status.running {
             if let Some(err) = vnc_bind_conflict(&vnc.id, &vnc, &config.vnc_sessions) {
@@ -10379,6 +10381,31 @@ async fn start_app_internal(
         command.arg(arg);
     }
     command.env("DISPLAY", &display);
+
+    // Set XAUTHORITY from the VNC session's home directory if bound
+    if let Some(ref vid) = bound_vnc_id {
+        let xauth_path = PathBuf::from(KASMVNC_BASE_HOME)
+            .join(vid)
+            .join(".Xauthority");
+        if xauth_path.exists() {
+            command.env("XAUTHORITY", &xauth_path);
+        }
+    }
+
+    // Set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS for GTK apps
+    let uid = Uid::current();
+    let xdg_runtime = format!("/run/user/{}", uid);
+    if PathBuf::from(&xdg_runtime).exists() {
+        command.env("XDG_RUNTIME_DIR", &xdg_runtime);
+        let dbus_socket = format!("{}/bus", xdg_runtime);
+        if PathBuf::from(&dbus_socket).exists() {
+            command.env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", dbus_socket),
+            );
+        }
+    }
+
     for (k, v) in &app.env {
         command.env(k, v);
     }
