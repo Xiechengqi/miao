@@ -278,14 +278,26 @@ export default function AppsPage() {
     setAppEnvText(formatEnvText(tpl.env));
   };
 
+  useEffect(() => {
+    if (!formData.vnc_session_id) return;
+    const session = vncSessionsMap.get(formData.vnc_session_id);
+    if (!session) return;
+    if (formData.display !== session.display) {
+      setFormData({ ...formData, display: session.display });
+    }
+  }, [formData, vncSessionsMap]);
+
   const openModal = (app?: App) => {
     if (app) {
       setEditingId(app.id);
+      const sessionDisplay = app.vnc_session_id
+        ? vncSessionsMap.get(app.vnc_session_id)?.display || ""
+        : "";
       setFormData({
         name: app.name || "",
         enabled: app.enabled ?? true,
         vnc_session_id: app.vnc_session_id || "",
-        display: app.display || "",
+        display: app.vnc_session_id ? sessionDisplay : app.display || "",
         command: app.command || "",
       });
       setAppArgsText((app.args || []).join(" "));
@@ -309,15 +321,26 @@ export default function AppsPage() {
   };
 
   const handleSubmit = async () => {
+    const vncSessionId = (formData.vnc_session_id || "").trim();
+    const command = formData.command.trim();
+    const display = formData.display.trim();
+    if (!command) {
+      addToast({ type: "error", message: "启动命令不能为空" });
+      return;
+    }
+    if (!vncSessionId && !display) {
+      addToast({ type: "error", message: "未绑定 VNC 时必须填写 DISPLAY" });
+      return;
+    }
+
     setLoading(true, "save");
     try {
-      const vncSessionId = (formData.vnc_session_id || "").trim();
       const payload = {
         name: formData.name.trim() || null,
         enabled: !!formData.enabled,
         vnc_session_id: vncSessionId,
-        display: vncSessionId ? "" : formData.display.trim(),
-        command: formData.command.trim(),
+        display: vncSessionId ? "" : display,
+        command,
         args: splitArgsText(appArgsText),
         env: parseEnvText(appEnvText),
         restart: !!editingId && appRestartOnSave && !!formData.enabled,
