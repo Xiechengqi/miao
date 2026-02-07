@@ -92,6 +92,49 @@ function getAllInstallSteps(osId: string) {
   return getInstallSteps(osId, true, true);
 }
 
+function getDesktopDepsInstall(osId: string) {
+  const isDebian = ["ubuntu", "debian"].includes(osId);
+  const isFedora = ["fedora", "rhel", "centos", "rocky", "alma"].includes(osId);
+  const isArch = ["arch", "manjaro"].includes(osId);
+
+  const requiredPackages = [
+    "polybar",
+    "rofi",
+    "feh",
+    "xterm",
+    "dunst",
+    "fcitx5",
+    "x11-xserver-utils",
+  ];
+  const optionalPackages = [
+    "maim",
+    "xclip",
+    "libnotify-bin",
+    "x11-xkb-utils",
+  ];
+
+  const requiredCmd = isDebian
+    ? `sudo apt-get update && sudo apt-get install -y ${requiredPackages.join(" ")}`
+    : isFedora
+      ? `sudo dnf install -y ${requiredPackages.join(" ")}`
+      : isArch
+        ? `sudo pacman -S --needed ${requiredPackages.join(" ")}`
+        : "# 请使用系统包管理器安装: " + requiredPackages.join(" ");
+
+  const optionalCmd = isDebian
+    ? `sudo apt-get install -y ${optionalPackages.join(" ")}`
+    : isFedora
+      ? `sudo dnf install -y ${optionalPackages.join(" ")}`
+      : isArch
+        ? `sudo pacman -S --needed ${optionalPackages.join(" ")}`
+        : "# 可选安装: " + optionalPackages.join(" ");
+
+  return {
+    requiredCmd,
+    optionalCmd,
+  };
+}
+
 function InstallDocModal({
   isOpen,
   onClose,
@@ -106,6 +149,7 @@ function InstallDocModal({
   missingI3: boolean;
 }) {
   const allSteps = getAllInstallSteps(osId);
+  const desktopDeps = getDesktopDepsInstall(osId);
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="VNC 环境安装文档" size="lg">
@@ -139,6 +183,25 @@ function InstallDocModal({
         ) : (
           <p className="text-sm text-slate-500">无法识别当前系统，请手动安装 KasmVNC 和 i3。</p>
         )}
+
+        <div className="space-y-2">
+          <p className="text-sm font-semibold text-slate-700">桌面组件（i3 可用时建议安装）</p>
+          <p className="text-xs text-slate-500">
+            监测仅检查 i3 是否存在，但以下组件用于显示底部栏、壁纸、通知、启动器与输入法。
+          </p>
+          <p className="text-xs font-medium text-slate-700">必须安装</p>
+          <pre className="mt-1 p-3 bg-slate-800 text-slate-100 text-xs rounded-lg overflow-x-auto whitespace-pre-wrap select-all">
+            {desktopDeps.requiredCmd}
+          </pre>
+          <p className="text-xs font-medium text-slate-700">可选安装</p>
+          <pre className="mt-1 p-3 bg-slate-800 text-slate-100 text-xs rounded-lg overflow-x-auto whitespace-pre-wrap select-all">
+            {desktopDeps.optionalCmd}
+          </pre>
+          <div className="text-xs text-slate-500 space-y-1">
+            <p>必须组件作用: polybar(底部栏) / rofi(启动器) / feh(壁纸) / dunst(通知) / fcitx5(输入法) / xterm(终端) / x11-xserver-utils(xrdb)。</p>
+            <p>可选组件作用: maim+xclip(截图) / libnotify-bin(通知测试) / x11-xkb-utils(键盘布局工具)。</p>
+          </div>
+        </div>
 
         <div className="pt-2 border-t text-xs text-slate-400 space-y-1">
           <p>KasmVNC 更多版本: https://github.com/kasmtech/KasmVNC/releases</p>

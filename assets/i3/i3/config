@@ -1,0 +1,85 @@
+### 基础变量 / Basic Variables
+set $mod Mod4
+set $terminal xterm
+font pango:monospace 10
+
+### 窗口外观 / Appearance
+default_border pixel 3
+client.focused          #88c0d0 #88c0d0 #2e3440 #88c0d0 #88c0d0
+client.unfocused        #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
+client.focused_inactive #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
+client.urgent           #bf616a #bf616a #ffffff #bf616a #bf616a
+
+### i3 专用 / i3-specific
+# exec_always --no-startup-id setxkbmap -layout jp
+# Per-output scaling (generated). Run i3/scripts/setup-xrandr-scale.sh
+include ~/.config/miao/i3/local.conf
+exec_always --no-startup-id xrdb -merge "$HOME/.config/miao/xterm/Xresources"
+
+# Polybar (default)
+exec_always --no-startup-id "$HOME/.config/miao/polybar/launch.sh"
+exec --no-startup-id fcitx5 -d
+exec --no-startup-id feh --bg-fill "$HOME/.config/miao/background.png"
+exec --no-startup-id dunst
+
+### 启动器 / Launcher
+bindsym $mod+d exec --no-startup-id rofi -show drun
+bindsym $mod+a exec --no-startup-id rofi -show window
+
+### 退出提示 / Exit prompt
+bindsym $mod+Ctrl+Mod1+Shift+q exec i3-nagbar \
+  -t warning \
+  -m "Are you sure you want to exit i3?" \
+  -b "Exit" "i3-msg exit" \
+  -b "Cancel" ""
+bindsym $mod+Ctrl+Mod1+Shift+r exec i3-nagbar \
+  -t warning \
+  -m "Are you sure you want to exit i3?" \
+  -b "Exit" "i3-msg exit" \
+  -b "Cancel" ""
+
+### 基础快捷键 / Basic bindings
+bindsym $mod+Return exec --no-startup-id $terminal
+bindsym $mod+q kill
+bindsym $mod+f fullscreen toggle
+bindsym $mod+Ctrl+r reload
+bindsym $mod+Shift+e exec --no-startup-id i3-msg exit
+bindsym Mod1+Tab focus next
+bindsym Mod1+Shift+Tab focus prev
+bindsym Mod1+grave focus next
+bindsym Mod4+Tab workspace next
+bindsym Mod4+Shift+Tab workspace prev
+
+### 工作区 / Workspaces
+set $ws1 "1"
+set $ws2 "2"
+set $ws3 "3"
+set $ws4 "4"
+set $ws5 "5"
+set $ws6 "6"
+set $ws7 "7"
+set $ws8 "8"
+set $ws9 "9"
+set $ws10 "10"
+
+bindsym $mod+1 workspace $ws1
+bindsym $mod+2 workspace $ws2
+bindsym $mod+3 workspace $ws3
+bindsym $mod+4 workspace $ws4
+bindsym $mod+5 workspace $ws5
+bindsym $mod+6 workspace $ws6
+bindsym $mod+7 workspace $ws7
+bindsym $mod+8 workspace $ws8
+bindsym $mod+9 workspace $ws9
+bindsym $mod+0 workspace $ws10
+
+bindsym $mod+Shift+1 move container to workspace $ws1
+bindsym $mod+Shift+2 move container to workspace $ws2
+bindsym $mod+Shift+3 move container to workspace $ws3
+bindsym $mod+Shift+4 move container to workspace $ws4
+bindsym $mod+Shift+5 move container to workspace $ws5
+bindsym $mod+Shift+6 move container to workspace $ws6
+bindsym $mod+Shift+7 move container to workspace $ws7
+bindsym $mod+Shift+8 move container to workspace $ws8
+bindsym $mod+Shift+9 move container to workspace $ws9
+bindsym $mod+Shift+0 move container to workspace $ws10

@@ -948,6 +948,12 @@ const KASMVNC_USER: &str = "user";
 const KASMVNC_HTTPD_DIR: &str = "/usr/share/kasmvnc/www";
 const KASMVNC_DEFAULTS_JS: &str = "/usr/share/kasmvnc/www/kasmvnc-defaults.js";
 const KASMVNC_BASE_HOME: &str = "/app/kasmvnc";
+const I3_CONFIG: &str = include_str!("../assets/i3/i3/config");
+const I3_LOCAL_CONF: &str = include_str!("../assets/i3/i3/local.conf");
+const I3_POLYBAR_LAUNCH: &str = include_str!("../assets/i3/polybar/launch.sh");
+const I3_POLYBAR_CONFIG: &str = include_str!("../assets/i3/polybar/config.ini");
+const I3_XRESOURCES: &str = include_str!("../assets/i3/xterm/Xresources");
+const I3_BACKGROUND_PNG: &[u8] = include_bytes!("../assets/i3/background.png");
 
 // JWT 密钥（生产环境应使用环境变量）
 const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
@@ -10210,101 +10216,37 @@ fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send 
     Ok(())
 }
 
+fn ensure_i3_assets(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let i3_assets_dir = home_dir.join(".config").join("miao");
+    let i3_config_dir = i3_assets_dir.join("i3");
+    let i3_polybar_dir = i3_assets_dir.join("polybar");
+    let i3_xterm_dir = i3_assets_dir.join("xterm");
+
+    fs::create_dir_all(&i3_config_dir)?;
+    fs::create_dir_all(&i3_polybar_dir)?;
+    fs::create_dir_all(&i3_xterm_dir)?;
+
+    fs::write(i3_config_dir.join("local.conf"), I3_LOCAL_CONF)?;
+    fs::write(i3_polybar_dir.join("config.ini"), I3_POLYBAR_CONFIG)?;
+    let launch_path = i3_polybar_dir.join("launch.sh");
+    fs::write(&launch_path, I3_POLYBAR_LAUNCH)?;
+    fs::set_permissions(&launch_path, fs::Permissions::from_mode(0o755))?;
+    fs::write(i3_xterm_dir.join("Xresources"), I3_XRESOURCES)?;
+    fs::write(i3_assets_dir.join("background.png"), I3_BACKGROUND_PNG)?;
+    Ok(())
+}
+
 fn ensure_vnc_xstartup(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let vnc_dir = home_dir.join(".vnc");
     fs::create_dir_all(&vnc_dir)?;
+
+    ensure_i3_assets(home_dir)?;
 
     // Write i3 config for VNC environment
     let i3_dir = home_dir.join(".config").join("i3");
     fs::create_dir_all(&i3_dir)?;
     let i3_config_path = i3_dir.join("config");
-    let i3_config = r#"### 基础变量 / Basic Variables
-set $mod Mod4
-set $terminal xterm
-font pango:monospace 10
-
-### 窗口外观 / Appearance
-default_border pixel 3
-client.focused          #88c0d0 #88c0d0 #2e3440 #88c0d0 #88c0d0
-client.unfocused        #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
-client.focused_inactive #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
-client.urgent           #bf616a #bf616a #ffffff #bf616a #bf616a
-
-### i3 专用 / i3-specific
-# exec_always --no-startup-id setxkbmap -layout jp
-# Per-output scaling (generated). Run i3/scripts/setup-xrandr-scale.sh
-include ~/.config/TWM/i3/local.conf
-exec_always --no-startup-id xrdb -merge "$HOME/.config/TWM/xterm/Xresources"
-
-# Polybar (default)
-exec_always --no-startup-id "$HOME/.config/TWM/polybar/launch.sh"
-exec --no-startup-id fcitx5 -d
-exec --no-startup-id feh --bg-fill "$HOME/.config/TWM/background.png"
-exec --no-startup-id dunst
-
-### 启动器 / Launcher
-bindsym $mod+d exec --no-startup-id rofi -show drun
-bindsym $mod+a exec --no-startup-id rofi -show window
-
-### 退出提示 / Exit prompt
-bindsym $mod+Ctrl+Mod1+Shift+q exec i3-nagbar \
-  -t warning \
-  -m "Are you sure you want to exit i3?" \
-  -b "Exit" "i3-msg exit" \
-  -b "Cancel" ""
-bindsym $mod+Ctrl+Mod1+Shift+r exec i3-nagbar \
-  -t warning \
-  -m "Are you sure you want to exit i3?" \
-  -b "Exit" "i3-msg exit" \
-  -b "Cancel" ""
-
-### 基础快捷键 / Basic bindings
-bindsym $mod+Return exec --no-startup-id $terminal
-bindsym $mod+q kill
-bindsym $mod+f fullscreen toggle
-bindsym $mod+Ctrl+r reload
-bindsym $mod+Shift+e exec --no-startup-id i3-msg exit
-bindsym Mod1+Tab focus next
-bindsym Mod1+Shift+Tab focus prev
-bindsym Mod1+grave focus next
-bindsym Mod4+Tab workspace next
-bindsym Mod4+Shift+Tab workspace prev
-
-### 工作区 / Workspaces
-set $ws1 "1"
-set $ws2 "2"
-set $ws3 "3"
-set $ws4 "4"
-set $ws5 "5"
-set $ws6 "6"
-set $ws7 "7"
-set $ws8 "8"
-set $ws9 "9"
-set $ws10 "10"
-
-bindsym $mod+1 workspace $ws1
-bindsym $mod+2 workspace $ws2
-bindsym $mod+3 workspace $ws3
-bindsym $mod+4 workspace $ws4
-bindsym $mod+5 workspace $ws5
-bindsym $mod+6 workspace $ws6
-bindsym $mod+7 workspace $ws7
-bindsym $mod+8 workspace $ws8
-bindsym $mod+9 workspace $ws9
-bindsym $mod+0 workspace $ws10
-
-bindsym $mod+Shift+1 move container to workspace $ws1
-bindsym $mod+Shift+2 move container to workspace $ws2
-bindsym $mod+Shift+3 move container to workspace $ws3
-bindsym $mod+Shift+4 move container to workspace $ws4
-bindsym $mod+Shift+5 move container to workspace $ws5
-bindsym $mod+Shift+6 move container to workspace $ws6
-bindsym $mod+Shift+7 move container to workspace $ws7
-bindsym $mod+Shift+8 move container to workspace $ws8
-bindsym $mod+Shift+9 move container to workspace $ws9
-bindsym $mod+Shift+0 move container to workspace $ws10
-"#;
-    fs::write(&i3_config_path, i3_config)?;
+    fs::write(&i3_config_path, I3_CONFIG)?;
     log_info!("Wrote i3 config at {:?}", i3_config_path);
 
     let xstartup_path = vnc_dir.join("xstartup");
