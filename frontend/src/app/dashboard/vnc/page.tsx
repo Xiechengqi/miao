@@ -168,6 +168,7 @@ export default function VncPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultForm);
   const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
+  const [openboxAvailable, setOpenboxAvailable] = useState<boolean | null>(null);
   const [showLogModal, setShowLogModal] = useState(false);
   const [selectedSessionForLog, setSelectedSessionForLog] = useState<{ id: string; name: string } | null>(null);
 
@@ -180,6 +181,7 @@ export default function VncPage() {
     try {
       const tools = await api.getToolsStatus();
       setVncAvailable(tools.vnc);
+      setOpenboxAvailable(tools.openbox);
     } catch (error) {
       console.error("Failed to check tools status:", error);
     }
@@ -334,15 +336,19 @@ export default function VncPage() {
 
   return (
     <div className="space-y-6">
-      {/* VNC Not Available Warning */}
-      {vncAvailable === false && (
+      {/* VNC/Openbox Not Available Warning */}
+      {(vncAvailable === false || openboxAvailable === false) && (
         <Card className="p-4 bg-amber-50 border-amber-200">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
             <div>
               <p className="font-semibold text-amber-800">VNC 服务不可用</p>
               <p className="text-sm text-amber-700 mt-1">
-                当前环境未安装 vncserver 或 vncpasswd，请先安装 KasmVNC 或 TigerVNC 后再使用此功能。
+                {vncAvailable === false &&
+                  "当前环境未安装 vncserver 或 vncpasswd，请先安装 KasmVNC 或 TigerVNC 后再使用此功能。"}
+                {vncAvailable === false && openboxAvailable === false && " "}
+                {openboxAvailable === false &&
+                  "当前环境未安装 openbox，请先安装后再创建 VNC 桌面。"}
               </p>
             </div>
           </div>
@@ -353,13 +359,16 @@ export default function VncPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="flex items-center gap-3">
           <h1 className="text-3xl font-black">远程桌面</h1>
-          {vncAvailable && (
+          {vncAvailable && openboxAvailable && (
             <span className="px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
               VNC 已安装
             </span>
           )}
         </div>
-        <Button onClick={() => openModal()}>
+        <Button
+          onClick={() => openModal()}
+          disabled={vncAvailable === false || openboxAvailable === false}
+        >
           <Plus className="w-4 h-4" />
           创建桌面
         </Button>

@@ -3298,11 +3298,13 @@ fn load_metrics_series(
 
 async fn get_tools_status() -> Json<ApiResponse<serde_json::Value>> {
     let vnc_available = binary_exists("vncserver") && binary_exists("vncpasswd");
+    let openbox_available = openbox_available();
     let tar_available = binary_exists("tar");
     let zstd_available = binary_exists("zstd");
 
     let data = serde_json::json!({
         "vnc": vnc_available,
+        "openbox": openbox_available,
         "tar": tar_available,
         "zstd": zstd_available,
     });
@@ -10141,12 +10143,19 @@ fn binary_exists(cmd: &str) -> bool {
     false
 }
 
+fn openbox_available() -> bool {
+    binary_exists("openbox") || binary_exists("openbox-session")
+}
+
 fn ensure_vnc_dependencies() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !binary_exists("vncserver") {
         return Err("vncserver not found in PATH".into());
     }
     if !binary_exists("vncpasswd") {
         return Err("vncpasswd not found in PATH".into());
+    }
+    if !openbox_available() {
+        return Err("openbox not found in PATH".into());
     }
     if !PathBuf::from(KASMVNC_HTTPD_DIR).exists() {
         return Err(format!("kasmvnc httpd dir not found: {}", KASMVNC_HTTPD_DIR).into());
@@ -10188,6 +10197,31 @@ fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send 
     Ok(())
 }
 
+fn ensure_vnc_xstartup(home_dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let vnc_dir = home_dir.join(".vnc");
+    fs::create_dir_all(&vnc_dir)?;
+    let xstartup_path = vnc_dir.join("xstartup");
+    if xstartup_path.exists() {
+        return Ok(());
+    }
+    let contents = r#"#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+if command -v openbox-session >/dev/null 2>&1; then
+  exec openbox-session
+elif command -v openbox >/dev/null 2>&1; then
+  exec openbox
+fi
+
+exec /bin/sh
+"#;
+    fs::write(&xstartup_path, contents)?;
+    fs::set_permissions(&xstartup_path, fs::Permissions::from_mode(0o755))?;
+    log_info!("Created VNC xstartup at {:?}", xstartup_path);
+    Ok(())
+}
+
 async fn start_vnc_internal(
     id: &str,
     config: &VncSessionConfig,
@@ -10208,6 +10242,7 @@ async fn start_vnc_internal(
     let vnc_dir = home_dir.join(".vnc");
     fs::create_dir_all(&vnc_dir)?;
     fs::write(vnc_dir.join(".de-was-selected"), "")?;
+    ensure_vnc_xstartup(&home_dir)?;
 
     let kasmvnc_yaml = r#"logging:
   log_writer_name: all
@@ -10265,7 +10300,6 @@ network:
     command
         .arg(&display)
         .arg("-fg")
-        .arg("-noxstartup")
         .arg("-ac")
         .arg("-depth")
         .arg(config.depth.to_string())
