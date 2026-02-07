@@ -10197,7 +10197,7 @@ fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send 
     Ok(())
 }
 
-fn ensure_vnc_xstartup(home_dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn ensure_vnc_xstartup(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let vnc_dir = home_dir.join(".vnc");
     fs::create_dir_all(&vnc_dir)?;
     let xstartup_path = vnc_dir.join("xstartup");
