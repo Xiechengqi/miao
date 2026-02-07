@@ -10224,8 +10224,6 @@ set $terminal xterm
 font pango:monospace 10
 
 ### 窗口外观 / Appearance
-gaps inner 2
-gaps outer 2
 default_border pixel 3
 client.focused          #88c0d0 #88c0d0 #2e3440 #88c0d0 #88c0d0
 client.unfocused        #3b4252 #3b4252 #d8dee9 #3b4252 #3b4252
@@ -10249,12 +10247,12 @@ bindsym $mod+d exec --no-startup-id rofi -show drun
 bindsym $mod+a exec --no-startup-id rofi -show window
 
 ### 退出提示 / Exit prompt
-bindsym $mod+Ctrl+Alt+Shift+q exec i3-nagbar \
+bindsym $mod+Ctrl+Mod1+Shift+q exec i3-nagbar \
   -t warning \
   -m "Are you sure you want to exit i3?" \
   -b "Exit" "i3-msg exit" \
   -b "Cancel" ""
-bindsym $mod+Ctrl+Alt+Shift+r exec i3-nagbar \
+bindsym $mod+Ctrl+Mod1+Shift+r exec i3-nagbar \
   -t warning \
   -m "Are you sure you want to exit i3?" \
   -b "Exit" "i3-msg exit" \
