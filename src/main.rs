@@ -1465,7 +1465,7 @@ impl<T: Serialize> ApiResponse<T> {
 // 生成 JWT token
 fn generate_token() -> Result<String, jsonwebtoken::errors::Error> {
     let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::hours(24))
+        .checked_add_signed(chrono::Duration::days(30))
         .expect("valid timestamp")
         .timestamp() as usize;
 
