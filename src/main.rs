@@ -11560,6 +11560,61 @@ async fn prepare_subscription_dir(
 // Main Entry Point
 // ============================================================================
 
+async fn fix_singbox_routes() -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::process::Command;
+
+    // 等待 sing-tun 接口创建（最多等待 5 秒）
+    for _ in 0..10 {
+        let output = Command::new("ip")
+            .args(&["link", "show", "sing-tun"])
+            .output()
+            .await?;
+        if output.status.success() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    // 获取主网络接口的 IP 地址
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("ip route get 1.1.1.1 | grep -oP 'src \\K[0-9.]+'")
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Ok(()); // 如果获取失败，跳过修复
+    }
+
+    let local_ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if local_ip.is_empty() {
+        return Ok(());
+    }
+
+    // 删除错误的路由规则（忽略错误）
+    let _ = Command::new("ip")
+        .args(&["rule", "del", "priority", "9002", "not", "from", "all", "dport", "53", "lookup", "main", "suppress_prefixlength", "0"])
+        .output()
+        .await;
+
+    // 添加正确的路由规则（如果不存在）
+    let check = Command::new("sh")
+        .arg("-c")
+        .arg(format!("ip rule show | grep -q 'from {} lookup 2022'", local_ip))
+        .output()
+        .await?;
+
+    if !check.status.success() {
+        Command::new("ip")
+            .args(&["rule", "add", "from", &local_ip, "lookup", "2022", "priority", "9004"])
+            .output()
+            .await?;
+        log_info!("✅ Fixed sing-box routing rules for {}", local_ip);
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // CLI args (pre-parse for help; help should not require root)
@@ -11923,6 +11978,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(app_state)
         // SPA fallback (must be last, catches all unmatched routes)
         .fallback(spa_fallback);
+
+    // Fix sing-box routing rules
+    if let Err(e) = fix_singbox_routes().await {
+        log_error!("Failed to fix sing-box routes: {}", e);
+    }
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     log_info!("✅ Miao 控制面板已启动: http://localhost:{}", port);
