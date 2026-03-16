@@ -3412,6 +3412,7 @@ fn generate_ivnc_config(config: &IVncConfig) -> Result<(), String> {
 
     let toml_content = format!(
         r#"[http]
+host = "0.0.0.0"
 port = {}
 basic_auth_enabled = true
 basic_auth_user = "{}"
