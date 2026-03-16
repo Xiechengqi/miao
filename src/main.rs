@@ -10999,8 +10999,7 @@ fn get_config_template() -> serde_json::Value {
                 {"ip_cidr": ["100.64.0.0/10"], "action": "route", "outbound": "direct"},
                 {"ip_is_private": true, "action": "route", "outbound": "direct"},
                 {"protocol": "ssh", "action": "route", "outbound": "direct"},
-                {"network": "icmp", "action": "route", "outbound": "direct"},
-                {"domain_suffix": [".google.com", ".googleapis.com", ".gstatic.com", ".googleusercontent.com", ".youtube.com", ".ytimg.com"], "action": "route", "outbound": "direct"}
+                {"network": "icmp", "action": "route", "outbound": "direct"}
             ]
         }
     })
