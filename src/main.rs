@@ -3411,43 +3411,63 @@ fn generate_ivnc_config(config: &IVncConfig) -> Result<(), String> {
     }
 
     let toml_content = format!(
-        r#"[http]
-host = "0.0.0.0"
-port = {}
-basic_auth_enabled = true
-basic_auth_user = "{}"
-basic_auth_password = "{}"
+        r#"[server]
+foreground = true
+pidfile = "/tmp/ivnc.pid"
 
 [display]
 width = 0
 height = 0
 refresh_rate = 60
 
+[http]
+host = "0.0.0.0"
+port = {}
+basic_auth_enabled = true
+basic_auth_user = "{}"
+basic_auth_password = "{}"
+
 [encoding]
 target_fps = {}
 max_fps = 60
 
-[webrtc]
-enabled = true
-tcp_only = true
-video_codec = "h264"
-video_bitrate = {}
-hardware_encoder = "auto"
+[input]
+enable_keyboard = true
+enable_mouse = true
+enable_clipboard = true
+enable_binary_clipboard = false
+enable_commands = false
+file_transfers = ["upload", "download"]
+upload_dir = "~/Desktop"
+mouse_sensitivity = 1.0
 
 [audio]
 enabled = false
+sample_rate = 48000
+channels = 2
+bitrate = 128000
 
 [logging]
 level = "info"
-logfile = "{}"
+logfile = ""
 format = "json"
+
+[webrtc]
+enabled = true
+tcp_only = true
+candidate_from_host_header = true
+video_codec = "h264"
+video_bitrate = {}
+hardware_encoder = "auto"
+pipeline_latency_ms = 50
+keyframe_interval = 60
 "#,
         config.port,
         config.basic_auth_user,
         config.basic_auth_password,
         config.target_fps,
-        config.video_bitrate,
-        get_ivnc_log_path().display()
+        get_ivnc_log_path().display(),
+        config.video_bitrate
     );
 
     fs::write(config_path, toml_content).map_err(|e| format!("写入配置文件失败: {}", e))?;
