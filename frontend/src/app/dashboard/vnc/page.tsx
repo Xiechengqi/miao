@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Card, Button, Badge, Modal, Input } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { api } from "@/lib/api";
@@ -20,6 +20,14 @@ import {
   EyeOff,
 } from "lucide-react";
 
+interface UpgradeLogEntry {
+  step: number;
+  total_steps: number;
+  message: string;
+  level: string;
+  progress?: number;
+}
+
 export default function VncPage() {
   const { setLoading, loading, addToast } = useStore();
 
@@ -31,6 +39,12 @@ export default function VncPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [configForm, setConfigForm] = useState<IVncConfig | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgradeLogs, setUpgradeLogs] = useState<UpgradeLogEntry[]>([]);
+  const [upgradeProgress, setUpgradeProgress] = useState(0);
+  const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
+  const upgradeLogsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadStatus();
@@ -79,6 +93,54 @@ export default function VncPage() {
     } finally {
       setInstalling(false);
     }
+  };
+
+  const handleUpgrade = async () => {
+    if (upgrading) return;
+    if (!confirm("确定要更新 iVNC 吗？")) return;
+
+    setUpgrading(true);
+    setShowUpgradeModal(true);
+    setUpgradeLogs([]);
+    setUpgradeProgress(0);
+    setUpgradeStatus("running");
+
+    const token = localStorage.getItem("miao_token");
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/binaries/upgrade/ivnc/ws?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const entry: UpgradeLogEntry = JSON.parse(event.data);
+        setUpgradeLogs((prev) => [...prev, entry]);
+        setUpgradeProgress(Math.round((entry.step / entry.total_steps) * 100));
+        if (entry.level === "error") setUpgradeStatus("error");
+        setTimeout(() => {
+          if (upgradeLogsRef.current) {
+            upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
+          }
+        }, 50);
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      setUpgradeLogs((prev) => {
+        const hasError = prev.some((log) => log.level === "error");
+        if (!hasError && prev.length > 0) {
+          setUpgradeStatus("success");
+          loadStatus();
+        }
+        setUpgrading(false);
+        return prev;
+      });
+    };
+
+    ws.onerror = () => {
+      setUpgradeStatus("error");
+      setUpgrading(false);
+    };
   };
 
   const handleStart = async () => {
@@ -188,6 +250,14 @@ export default function VncPage() {
           <p className="text-slate-500 mt-1">基于 iVnc 的 WebRTC 桌面流媒体</p>
         </div>
         <div className="flex gap-2">
+          <Button
+            variant="secondary"
+            onClick={handleUpgrade}
+            loading={upgrading}
+          >
+            <RefreshCw className="w-4 h-4" />
+            更新
+          </Button>
           <Button
             variant="secondary"
             onClick={() => {
@@ -360,6 +430,79 @@ export default function VncPage() {
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        </div>
+      </Modal>
+
+      {/* Upgrade Modal */}
+      <Modal
+        isOpen={showUpgradeModal}
+        onClose={() => {
+          if (upgradeStatus !== "running") {
+            setShowUpgradeModal(false);
+          }
+        }}
+        title="iVNC 更新"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-slate-600">
+              <span>更新进度</span>
+              <span>{upgradeProgress}%</span>
+            </div>
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 rounded-full ${
+                  upgradeStatus === "error" ? "bg-red-500" :
+                  upgradeStatus === "success" ? "bg-emerald-500" : "bg-blue-500"
+                }`}
+                style={{ width: `${upgradeProgress}%` }}
+              />
+            </div>
+          </div>
+          <div
+            ref={upgradeLogsRef}
+            className="h-64 overflow-y-auto bg-slate-900 rounded-lg p-4 font-mono text-sm"
+          >
+            {upgradeLogs.map((log, index) => (
+              <div
+                key={index}
+                className={`py-0.5 ${
+                  log.level === "error" ? "text-red-400" :
+                  log.level === "success" ? "text-emerald-400" :
+                  log.level === "info" ? "text-slate-300" : "text-sky-400"
+                }`}
+              >
+                <span className="text-slate-500">[{log.step}/{log.total_steps}]</span>{" "}
+                {log.message}
+                {log.level === "progress" && log.progress != null && (
+                  <span className="text-slate-500"> ({log.progress}%)</span>
+                )}
+              </div>
+            ))}
+            {upgradeStatus === "running" && upgradeLogs.length > 0 && (
+              <div className="text-slate-500 animate-pulse">▌</div>
+            )}
+          </div>
+          <div className="flex items-center justify-between">
+            <span className={`text-sm font-medium ${
+              upgradeStatus === "error" ? "text-red-600" :
+              upgradeStatus === "success" ? "text-emerald-600" : "text-slate-600"
+            }`}>
+              {upgradeStatus === "running" && "更新中，请勿关闭页面..."}
+              {upgradeStatus === "success" && "更新成功"}
+              {upgradeStatus === "error" && "更新失败"}
+            </span>
+            {upgradeStatus !== "running" && (
+              <Button
+                variant={upgradeStatus === "error" ? "secondary" : "primary"}
+                size="sm"
+                onClick={() => setShowUpgradeModal(false)}
+              >
+                关闭
+              </Button>
             )}
           </div>
         </div>

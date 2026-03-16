@@ -3611,9 +3611,9 @@ fn detect_os_id() -> String {
 
 // iVnc utility functions
 fn get_ivnc_binary_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/root"))
-        .join(".local/bin/ivnc")
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("/data/miao"))
+        .join("ivnc")
 }
 
 fn get_ivnc_config_path() -> PathBuf {
