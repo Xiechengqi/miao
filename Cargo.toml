@@ -33,6 +33,7 @@ machine-info = "1.0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
 rust-embed = { version = "8.5", features = ["compression"] }
 mime_guess = "2.0"
+dirs = "5.0"
 
 # OpenAPI / Swagger UI
 utoipa = { version = "4.2", features = ["yaml", "uuid"] }
