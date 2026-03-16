@@ -3421,6 +3421,7 @@ basic_auth_password = "{}"
 [display]
 width = 0
 height = 0
+refresh_rate = 60
 
 [encoding]
 target_fps = {}
