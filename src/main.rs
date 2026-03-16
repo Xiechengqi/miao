@@ -1823,6 +1823,7 @@ struct SubscriptionUpsertRequest {
 struct LoadedSubscriptions {
     files: Vec<SubFileStatus>,
     outbounds: Vec<serde_json::Value>,
+    #[allow(dead_code)]
     node_names: Vec<String>,
     dir_error: Option<String>,
 }
@@ -2096,6 +2097,7 @@ macro_rules! log_warning {
 
 /// Spawns a child process with stdout/stderr piped and captured to the log broadcast.
 /// Returns the spawned Child. The caller is responsible for storing/managing the child.
+#[allow(dead_code)]
 fn spawn_with_log_capture(
     command: &mut tokio::process::Command,
     process_name: String,
@@ -3839,9 +3841,9 @@ async fn stop_ivnc(State(state): State<Arc<AppState>>) -> Result<Json<ApiRespons
 }
 
 async fn restart_ivnc(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
-    stop_ivnc(State(state.clone())).await?;
+    let _ = stop_ivnc(State(state.clone())).await?;
     sleep(Duration::from_secs(1)).await;
-    start_ivnc(State(state)).await?;
+    let _ = start_ivnc(State(state)).await?;
     Ok(Json(ApiResponse::success("iVnc 已重启", ())))
 }
 
@@ -3857,7 +3859,7 @@ async fn update_ivnc_config(
     *state.ivnc_config.lock().await = new_config.clone();
 
     if state.ivnc_process.lock().await.is_some() {
-        restart_ivnc(State(state)).await?;
+        let _ = restart_ivnc(State(state)).await?;
     }
 
     Ok(Json(ApiResponse::success("配置已更新", ())))

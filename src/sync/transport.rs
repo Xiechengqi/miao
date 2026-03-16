@@ -7,11 +7,9 @@ use russh::ChannelMsg;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
 use tokio::time::Duration;
 
 const CONNECT_TIMEOUT_MS: u64 = 30000;
-const BUFFER_SIZE: usize = 64 * 1024;
 
 pub struct ExecResult {
     pub exit_code: i32,
@@ -230,7 +228,7 @@ impl SshTransport {
         command: &str,
         mut stdin_data: impl tokio::io::AsyncRead + Unpin,
     ) -> Result<ExecResult, SyncError> {
-        let mut channel = self
+        let channel = self
             .session
             .channel_open_session()
             .await
