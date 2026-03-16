@@ -177,6 +177,13 @@ class ApiClient {
     return res.data;
   }
 
+  async installIvnc(): Promise<{ path: string }> {
+    const res = await this.fetch<{ data: { path: string } }>("/api/binaries/install/ivnc", {
+      method: "POST",
+    });
+    return res.data;
+  }
+
   async getSystemInfo(): Promise<SystemInfo> {
     const res = await this.fetch<{ data: SystemInfo }>("/api/system/info");
     return res.data;

@@ -2451,11 +2451,12 @@ async fn get_status(
     ))
 }
 
-/// GET /api/binaries/status - Check if sing-box and gotty binaries exist
+/// GET /api/binaries/status - Check if sing-box, gotty and ivnc binaries exist
 async fn get_binaries_status() -> Json<ApiResponse<serde_json::Value>> {
     let current_dir = std::env::current_dir().unwrap_or_default();
     let sing_box_exists = current_dir.join("sing-box").exists();
     let gotty_exists = current_dir.join("gotty").exists();
+    let ivnc_exists = current_dir.join("ivnc").exists();
 
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
 
@@ -2467,6 +2468,10 @@ async fn get_binaries_status() -> Json<ApiResponse<serde_json::Value>> {
         "gotty": {
             "installed": gotty_exists,
             "path": current_dir.join("gotty").to_string_lossy()
+        },
+        "ivnc": {
+            "installed": ivnc_exists,
+            "path": current_dir.join("ivnc").to_string_lossy()
         },
         "arch": arch
     })))
@@ -2616,6 +2621,69 @@ async fn install_gotty() -> Json<ApiResponse<serde_json::Value>> {
     log_info!("gotty installed successfully to {:?}", gotty_path);
     Json(ApiResponse::success("gotty 安装成功", json!({
         "path": gotty_path.to_string_lossy()
+    })))
+}
+
+/// POST /api/binaries/install/ivnc - Download and install iVNC
+async fn install_ivnc() -> Json<ApiResponse<serde_json::Value>> {
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::error(format!("获取当前目录失败: {}", e))),
+    };
+
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let client = reqwest::Client::new();
+    let release_url = "https://api.github.com/repos/Xiechengqi/iVnc/releases/latest";
+
+    let download_url = match client
+        .get(release_url)
+        .header("User-Agent", "miao-rust")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(release) = resp.json::<serde_json::Value>().await {
+                let tag = release["tag_name"].as_str().unwrap_or("latest");
+                format!(
+                    "https://github.com/Xiechengqi/iVnc/releases/download/{}/ivnc-linux-{}",
+                    tag, arch
+                )
+            } else {
+                return Json(ApiResponse::error("获取版本信息失败".to_string()));
+            }
+        }
+        Err(e) => return Json(ApiResponse::error(format!("请求失败: {}", e))),
+    };
+
+    log_info!("Downloading iVNC from: {}", download_url);
+
+    let response = match client.get(&download_url).send().await {
+        Ok(r) => r,
+        Err(e) => return Json(ApiResponse::error(format!("下载失败: {}", e))),
+    };
+
+    if !response.status().is_success() {
+        return Json(ApiResponse::error(format!("下载失败: HTTP {}", response.status())));
+    }
+
+    let bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Json(ApiResponse::error(format!("读取响应失败: {}", e))),
+    };
+
+    let ivnc_path = current_dir.join("ivnc");
+
+    if let Err(e) = fs::write(&ivnc_path, &bytes) {
+        return Json(ApiResponse::error(format!("写入文件失败: {}", e)));
+    }
+
+    if let Err(e) = fs::set_permissions(&ivnc_path, fs::Permissions::from_mode(0o755)) {
+        return Json(ApiResponse::error(format!("设置权限失败: {}", e)));
+    }
+
+    log_info!("iVNC installed successfully to {:?}", ivnc_path);
+    Json(ApiResponse::success("iVNC 安装成功", json!({
+        "path": ivnc_path.to_string_lossy()
     })))
 }
 
@@ -3040,6 +3108,175 @@ async fn perform_gotty_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry
 
     // Step 5: Done
     send_log(5, "gotty 更新完成", "success", None).await;
+}
+
+async fn upgrade_ivnc_ws(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(handle_ivnc_upgrade_websocket))
+}
+
+async fn handle_ivnc_upgrade_websocket(mut socket: WebSocket) {
+    use tokio::sync::mpsc;
+
+    let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
+
+    let mut upgrade_handle = tokio::spawn(async move {
+        perform_ivnc_upgrade(log_tx).await
+    });
+
+    loop {
+        tokio::select! {
+            Some(entry) = log_rx.recv() => {
+                let json = serde_json::to_string(&entry).unwrap_or_default();
+                if socket.send(axum::extract::ws::Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = &mut upgrade_handle => {
+                break;
+            }
+        }
+    }
+
+    while let Ok(entry) = log_rx.try_recv() {
+        let json = serde_json::to_string(&entry).unwrap_or_default();
+        let _ = socket.send(axum::extract::ws::Message::Text(json.into())).await;
+    }
+
+    let _ = socket.close().await;
+}
+
+async fn perform_ivnc_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+    use futures_util::StreamExt;
+
+    let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
+        let entry = UpgradeLogEntry {
+            step,
+            total_steps: 4,
+            message: message.to_string(),
+            level: level.to_string(),
+            progress,
+        };
+        let tx = log_tx.clone();
+        async move { let _ = tx.send(entry).await; }
+    };
+
+    // Step 1: Get latest release
+    send_log(1, "获取最新版本信息...", "info", None).await;
+
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let client = reqwest::Client::new();
+    let release_url = "https://api.github.com/repos/Xiechengqi/iVnc/releases/latest";
+
+    let download_url = match client
+        .get(release_url)
+        .header("User-Agent", "miao-rust")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(release) = resp.json::<serde_json::Value>().await {
+                let tag = release["tag_name"].as_str().unwrap_or("latest");
+                format!(
+                    "https://github.com/Xiechengqi/iVnc/releases/download/{}/ivnc-linux-{}",
+                    tag, arch
+                )
+            } else {
+                send_log(1, "解析版本信息失败", "error", None).await;
+                return;
+            }
+        }
+        Err(e) => {
+            send_log(1, &format!("获取版本信息失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    send_log(1, "获取版本信息成功", "success", None).await;
+
+    // Step 2: Download
+    send_log(2, "下载 iVNC...", "info", None).await;
+
+    let response = match client.get(&download_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            send_log(2, &format!("下载失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    if !response.status().is_success() {
+        send_log(2, &format!("下载失败: HTTP {}", response.status()), "error", None).await;
+        return;
+    }
+
+    let total_size = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(data) => {
+                downloaded += data.len() as u64;
+                bytes.extend_from_slice(&data);
+                if total_size > 0 {
+                    let progress = ((downloaded * 100) / total_size) as u8;
+                    send_log(2, "下载中...", "progress", Some(progress)).await;
+                }
+            }
+            Err(e) => {
+                send_log(2, &format!("下载失败: {}", e), "error", None).await;
+                return;
+            }
+        }
+    }
+
+    send_log(2, "下载完成", "success", None).await;
+
+    // Step 3: Backup and replace
+    send_log(3, "备份并替换 iVNC...", "info", None).await;
+
+    let current_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            send_log(3, &format!("获取目录失败: {}", e), "error", None).await;
+            return;
+        }
+    };
+
+    let ivnc_path = current_dir.join("ivnc");
+    let backup_path = current_dir.join("ivnc.bak");
+
+    if ivnc_path.exists() {
+        if let Err(e) = fs::copy(&ivnc_path, &backup_path) {
+            send_log(3, &format!("备份失败: {}", e), "error", None).await;
+            return;
+        }
+    }
+
+    if let Err(e) = fs::write(&ivnc_path, &bytes) {
+        let _ = fs::copy(&backup_path, &ivnc_path);
+        send_log(3, &format!("替换失败: {}", e), "error", None).await;
+        return;
+    }
+
+    if let Err(e) = fs::set_permissions(&ivnc_path, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::copy(&backup_path, &ivnc_path);
+        send_log(3, &format!("设置权限失败: {}", e), "error", None).await;
+        return;
+    }
+
+    let _ = fs::remove_file(&backup_path);
+    send_log(3, "替换完成", "success", None).await;
+
+    // Step 4: Done
+    send_log(4, "iVNC 更新完成", "success", None).await;
 }
 
 async fn refresh_system_metrics(state: &AppState) -> Result<(), String> {
@@ -3757,43 +3994,6 @@ async fn get_terminals(State(state): State<Arc<AppState>>) -> Json<ApiResponse<T
 }
 
 // iVnc API endpoints
-async fn install_ivnc() -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
-    if check_ivnc_installed() {
-        return Err((StatusCode::BAD_REQUEST, "iVnc 已安装".to_string()));
-    }
-
-    let target_path = get_ivnc_binary_path();
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("创建目录失败: {}", e)))?;
-    }
-
-    let download_url = "https://github.com/Xiechengqi/iVnc/releases/download/latest/ivnc-linux-amd64";
-    let response = reqwest::get(download_url)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("下载失败: {}", e)))?;
-
-    if !response.status().is_success() {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "下载失败".to_string()));
-    }
-
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("读取数据失败: {}", e)))?;
-
-    fs::write(&target_path, bytes)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入文件失败: {}", e)))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&target_path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("设置权限失败: {}", e)))?;
-    }
-
-    Ok(Json(ApiResponse::success("iVnc 安装成功", ())))
-}
-
 async fn get_ivnc_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<IVncStatus>> {
     let installed = check_ivnc_installed();
     let version = get_ivnc_version();
@@ -11847,8 +12047,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/binaries/status", get(get_binaries_status))
         .route("/api/binaries/install/sing-box", post(install_sing_box))
         .route("/api/binaries/install/gotty", post(install_gotty))
+        .route("/api/binaries/install/ivnc", post(install_ivnc))
         .route("/api/binaries/upgrade/sing-box/ws", get(upgrade_sing_box_ws))
         .route("/api/binaries/upgrade/gotty/ws", get(upgrade_gotty_ws))
+        .route("/api/binaries/upgrade/ivnc/ws", get(upgrade_ivnc_ws))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/status", get(get_system_status))
         .route("/api/system/metrics", get(get_system_metrics))
