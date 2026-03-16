@@ -3449,7 +3449,7 @@ bitrate = 128000
 
 [logging]
 level = "info"
-logfile = ""
+logfile = "{}"
 format = "json"
 
 [webrtc]
