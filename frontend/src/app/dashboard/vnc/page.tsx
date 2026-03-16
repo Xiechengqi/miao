@@ -16,6 +16,8 @@ import {
   Download,
   AlertTriangle,
   FileText,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 export default function VncPage() {
@@ -28,6 +30,7 @@ export default function VncPage() {
   const [showLogsModal, setShowLogsModal] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [configForm, setConfigForm] = useState<IVncConfig | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     loadStatus();
@@ -282,14 +285,28 @@ export default function VncPage() {
                 setConfigForm({ ...configForm, basic_auth_user: e.target.value })
               }
             />
-            <Input
-              label="密码"
-              type="password"
-              value={configForm.basic_auth_password}
-              onChange={(e) =>
-                setConfigForm({ ...configForm, basic_auth_password: e.target.value })
-              }
-            />
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                密码
+              </label>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={configForm.basic_auth_password}
+                  onChange={(e) =>
+                    setConfigForm({ ...configForm, basic_auth_password: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
             <Input
               label="帧率 (FPS)"
               type="number"
