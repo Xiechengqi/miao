@@ -10981,7 +10981,8 @@ fn get_config_template() -> serde_json::Value {
             ]
         },
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30", "fd00:172:18::1/126"], "mtu": 1400, "auto_route": true, "strict_route": true, "stack": "system", "sniff": true, "sniff_override_destination": false }
+            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30", "fd00:172:18::1/126"], "mtu": 1400, "auto_route": true, "strict_route": true, "stack": "system", "sniff": true, "sniff_override_destination": false },
+            {"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080}
         ],
         "outbounds": [
             {"type": "selector", "tag": "proxy", "outbounds": []},
