@@ -393,4 +393,29 @@ export interface ToolsStatus {
   tar: boolean;
   zstd: boolean;
   os: string;
+  ivnc?: {
+    installed: boolean;
+    version: string | null;
+  };
 }
+
+// iVnc Types
+export interface IVncStatus {
+  installed: boolean;
+  version: string | null;
+  running: boolean;
+  pid: number | null;
+  uptime_secs: number | null;
+  port: number;
+}
+
+export interface IVncConfig {
+  enabled: boolean;
+  port: number;
+  basic_auth_user: string;
+  basic_auth_password: string;
+  auto_start: boolean;
+  target_fps: number;
+  video_bitrate: number;
+}
+

@@ -40,7 +40,6 @@ const navItems = [
   { href: "/dashboard/tunnels", label: "穿透", icon: Box },
   { href: "/dashboard/terminals", label: "终端", icon: Terminal },
   { href: "/dashboard/vnc", label: "桌面", icon: Monitor },
-  { href: "/dashboard/apps", label: "应用", icon: AppWindow },
   { href: "/dashboard/sync", label: "备份", icon: Archive },
   { href: "/dashboard/logs", label: "日志", icon: FileText },
 ];

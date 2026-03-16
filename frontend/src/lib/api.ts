@@ -22,6 +22,8 @@ import {
   ToolsStatus,
   Node,
   LogEntry,
+  IVncStatus,
+  IVncConfig,
 } from "@/types/api";
 
 // 重试配置
@@ -1028,6 +1030,45 @@ class ApiClient {
     await this.fetch(`/api/v1/hosts/${id}`, {
       method: "DELETE",
     });
+  }
+
+  // iVnc API
+  async getIVncStatus(): Promise<IVncStatus> {
+    const res = await this.fetch<{ data: IVncStatus }>("/api/ivnc/status");
+    return res.data;
+  }
+
+  async installIVnc(): Promise<void> {
+    await this.fetch("/api/ivnc/install", { method: "POST" });
+  }
+
+  async startIVnc(): Promise<void> {
+    await this.fetch("/api/ivnc/start", { method: "POST" });
+  }
+
+  async stopIVnc(): Promise<void> {
+    await this.fetch("/api/ivnc/stop", { method: "POST" });
+  }
+
+  async restartIVnc(): Promise<void> {
+    await this.fetch("/api/ivnc/restart", { method: "POST" });
+  }
+
+  async getIVncConfig(): Promise<IVncConfig> {
+    const res = await this.fetch<{ data: IVncConfig }>("/api/ivnc/config");
+    return res.data;
+  }
+
+  async updateIVncConfig(config: Partial<IVncConfig>): Promise<void> {
+    await this.fetch("/api/ivnc/config", {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async getIVncLogs(limit = 100): Promise<LogEntry[]> {
+    const res = await this.fetch<{ data: LogEntry[] }>(`/api/ivnc/logs?limit=${limit}`);
+    return res.data;
   }
 }
 

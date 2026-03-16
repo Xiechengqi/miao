@@ -526,6 +526,61 @@ impl Default for AppConfig {
     }
 }
 
+// iVnc configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct IVncConfig {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_ivnc_port")]
+    port: u16,
+    #[serde(default = "default_ivnc_user")]
+    basic_auth_user: String,
+    #[serde(default = "default_ivnc_password")]
+    basic_auth_password: String,
+    #[serde(default)]
+    auto_start: bool,
+    #[serde(default = "default_ivnc_fps")]
+    target_fps: u32,
+    #[serde(default = "default_ivnc_bitrate")]
+    video_bitrate: u32,
+}
+
+fn default_ivnc_port() -> u16 { 8008 }
+fn default_ivnc_user() -> String { "admin".to_string() }
+fn default_ivnc_password() -> String { "password".to_string() }
+fn default_ivnc_fps() -> u32 { 30 }
+fn default_ivnc_bitrate() -> u32 { 4000 }
+
+impl Default for IVncConfig {
+    fn default() -> Self {
+        IVncConfig {
+            enabled: true,
+            port: default_ivnc_port(),
+            basic_auth_user: default_ivnc_user(),
+            basic_auth_password: default_ivnc_password(),
+            auto_start: false,
+            target_fps: default_ivnc_fps(),
+            video_bitrate: default_ivnc_bitrate(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct IVncStatus {
+    installed: bool,
+    version: Option<String>,
+    running: bool,
+    pid: Option<u32>,
+    uptime_secs: Option<u64>,
+    port: u16,
+}
+
+struct IVncProcess {
+    pid: u32,
+    child: tokio::process::Child,
+    started_at: Instant,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct MetricsConfig {
     #[serde(default = "default_metrics_enabled")]
@@ -1368,6 +1423,8 @@ pub struct AppState {
     sync_manager: sync::SyncManager,
     system_monitor: SystemMonitor,
     metrics_config: MetricsConfig,
+    ivnc_process: Arc<Mutex<Option<IVncProcess>>>,
+    ivnc_config: Arc<Mutex<IVncConfig>>,
 }
 
 #[derive(Serialize)]
@@ -3313,6 +3370,86 @@ fn detect_os_id() -> String {
     "unknown".to_string()
 }
 
+// iVnc utility functions
+fn get_ivnc_binary_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/root"))
+        .join(".local/bin/ivnc")
+}
+
+fn get_ivnc_config_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/root"))
+        .join(".config/miao/ivnc.toml")
+}
+
+fn get_ivnc_log_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/root"))
+        .join(".local/share/miao/ivnc.log")
+}
+
+fn check_ivnc_installed() -> bool {
+    get_ivnc_binary_path().exists()
+}
+
+fn get_ivnc_version() -> Option<String> {
+    let output = std::process::Command::new(get_ivnc_binary_path())
+        .arg("--version")
+        .output()
+        .ok()?;
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    Some(version_str.lines().next()?.trim().to_string())
+}
+
+fn generate_ivnc_config(config: &IVncConfig) -> Result<(), String> {
+    let config_path = get_ivnc_config_path();
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+    }
+
+    let toml_content = format!(
+        r#"[http]
+port = {}
+basic_auth_enabled = true
+basic_auth_user = "{}"
+basic_auth_password = "{}"
+
+[display]
+width = 0
+height = 0
+
+[encoding]
+target_fps = {}
+max_fps = 60
+
+[webrtc]
+enabled = true
+tcp_only = true
+video_codec = "h264"
+video_bitrate = {}
+hardware_encoder = "auto"
+
+[audio]
+enabled = false
+
+[logging]
+level = "info"
+logfile = "{}"
+format = "json"
+"#,
+        config.port,
+        config.basic_auth_user,
+        config.basic_auth_password,
+        config.target_fps,
+        config.video_bitrate,
+        get_ivnc_log_path().display()
+    );
+
+    fs::write(config_path, toml_content).map_err(|e| format!("写入配置文件失败: {}", e))?;
+    Ok(())
+}
+
 async fn get_tools_status() -> Json<ApiResponse<serde_json::Value>> {
     let vnc_available = binary_exists("vncserver") && binary_exists("vncpasswd");
     let i3_available = i3_available();
@@ -3320,11 +3457,18 @@ async fn get_tools_status() -> Json<ApiResponse<serde_json::Value>> {
     let zstd_available = binary_exists("zstd");
     let os_id = detect_os_id();
 
+    let ivnc_installed = check_ivnc_installed();
+    let ivnc_version = get_ivnc_version();
+
     let data = serde_json::json!({
         "vnc": vnc_available,
         "i3": i3_available,
         "tar": tar_available,
         "zstd": zstd_available,
+        "ivnc": {
+            "installed": ivnc_installed,
+            "version": ivnc_version,
+        },
         "os": os_id,
     });
 
@@ -3586,6 +3730,160 @@ async fn get_terminals(State(state): State<Arc<AppState>>) -> Json<ApiResponse<T
         items.push(build_terminal_item(t, status));
     }
     Json(ApiResponse::success("Terminals", TerminalListResponse { items }))
+}
+
+// iVnc API endpoints
+async fn install_ivnc() -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
+    if check_ivnc_installed() {
+        return Err((StatusCode::BAD_REQUEST, "iVnc 已安装".to_string()));
+    }
+
+    let target_path = get_ivnc_binary_path();
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("创建目录失败: {}", e)))?;
+    }
+
+    let download_url = "https://github.com/Xiechengqi/iVnc/releases/download/latest/ivnc-linux-amd64";
+    let response = reqwest::get(download_url)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("下载失败: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "下载失败".to_string()));
+    }
+
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("读取数据失败: {}", e)))?;
+
+    fs::write(&target_path, bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入文件失败: {}", e)))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&target_path, fs::Permissions::from_mode(0o755))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("设置权限失败: {}", e)))?;
+    }
+
+    Ok(Json(ApiResponse::success("iVnc 安装成功", ())))
+}
+
+async fn get_ivnc_status(State(state): State<Arc<AppState>>) -> Json<ApiResponse<IVncStatus>> {
+    let installed = check_ivnc_installed();
+    let version = get_ivnc_version();
+    let config = state.ivnc_config.lock().await.clone();
+
+    let process_guard = state.ivnc_process.lock().await;
+    let (running, pid, uptime_secs) = if let Some(proc) = process_guard.as_ref() {
+        let uptime = proc.started_at.elapsed().as_secs();
+        (true, Some(proc.pid), Some(uptime))
+    } else {
+        (false, None, None)
+    };
+
+    Json(ApiResponse::success("iVnc 状态", IVncStatus {
+        installed,
+        version,
+        running,
+        pid,
+        uptime_secs,
+        port: config.port,
+    }))
+}
+
+async fn start_ivnc(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
+    if !check_ivnc_installed() {
+        return Err((StatusCode::BAD_REQUEST, "iVnc 未安装".to_string()));
+    }
+
+    if state.ivnc_process.lock().await.is_some() {
+        return Err((StatusCode::BAD_REQUEST, "iVnc 已在运行".to_string()));
+    }
+
+    let config = state.ivnc_config.lock().await.clone();
+    generate_ivnc_config(&config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let child = tokio::process::Command::new(get_ivnc_binary_path())
+        .arg("-c")
+        .arg(get_ivnc_config_path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("启动失败: {}", e)))?;
+
+    let pid = child.id().ok_or((StatusCode::INTERNAL_SERVER_ERROR, "获取 PID 失败".to_string()))?;
+
+    state.ivnc_process.lock().await.replace(IVncProcess {
+        pid,
+        child,
+        started_at: Instant::now(),
+    });
+
+    Ok(Json(ApiResponse::success("iVnc 已启动", ())))
+}
+
+async fn stop_ivnc(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
+    let mut process_guard = state.ivnc_process.lock().await;
+
+    if let Some(mut proc) = process_guard.take() {
+        proc.child.kill()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("停止失败: {}", e)))?;
+        let _ = proc.child.wait().await;
+    }
+
+    Ok(Json(ApiResponse::success("iVnc 已停止", ())))
+}
+
+async fn restart_ivnc(State(state): State<Arc<AppState>>) -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
+    stop_ivnc(State(state.clone())).await?;
+    sleep(Duration::from_secs(1)).await;
+    start_ivnc(State(state)).await?;
+    Ok(Json(ApiResponse::success("iVnc 已重启", ())))
+}
+
+async fn get_ivnc_config(State(state): State<Arc<AppState>>) -> Json<ApiResponse<IVncConfig>> {
+    let config = state.ivnc_config.lock().await.clone();
+    Json(ApiResponse::success("iVnc 配置", config))
+}
+
+async fn update_ivnc_config(
+    State(state): State<Arc<AppState>>,
+    Json(new_config): Json<IVncConfig>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
+    *state.ivnc_config.lock().await = new_config.clone();
+
+    if state.ivnc_process.lock().await.is_some() {
+        restart_ivnc(State(state)).await?;
+    }
+
+    Ok(Json(ApiResponse::success("配置已更新", ())))
+}
+
+async fn get_ivnc_logs(Query(params): Query<HashMap<String, String>>) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, (StatusCode, String)> {
+    let limit: usize = params.get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+
+    let log_path = get_ivnc_log_path();
+    if !log_path.exists() {
+        return Ok(Json(ApiResponse::success("日志", vec![])));
+    }
+
+    let content = fs::read_to_string(log_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("读取日志失败: {}", e)))?;
+
+    let logs: Vec<serde_json::Value> = content
+        .lines()
+        .rev()
+        .take(limit)
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    Ok(Json(ApiResponse::success("日志", logs)))
 }
 
 async fn get_vnc_sessions(
@@ -11426,6 +11724,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sync_manager: sync::SyncManager::new(),
         system_monitor: SystemMonitor::new(),
         metrics_config: config.metrics.clone(),
+        ivnc_process: Arc::new(Mutex::new(None)),
+        ivnc_config: Arc::new(Mutex::new(IVncConfig::default())),
     });
 
     // Apply initial TCP tunnel config (best-effort).
@@ -11490,6 +11790,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/vnc-sessions/{id}/start", post(start_vnc_session))
         .route("/api/vnc-sessions/{id}/stop", post(stop_vnc_session))
         .route("/api/vnc-sessions/{id}/restart", post(restart_vnc_session))
+        // iVnc routes
+        .route("/api/ivnc/install", post(install_ivnc))
+        .route("/api/ivnc/status", get(get_ivnc_status))
+        .route("/api/ivnc/start", post(start_ivnc))
+        .route("/api/ivnc/stop", post(stop_ivnc))
+        .route("/api/ivnc/restart", post(restart_ivnc))
+        .route("/api/ivnc/config", get(get_ivnc_config).put(update_ivnc_config))
+        .route("/api/ivnc/logs", get(get_ivnc_logs))
         .route("/api/apps/templates", get(get_app_templates_handler))
         .route("/api/apps", get(get_apps))
         .route("/api/apps", post(create_app))
