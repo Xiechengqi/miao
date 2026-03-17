@@ -20,43 +20,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Generate build-info.json
-        id: build-info
-        run: |
-          export TZ='Asia/Shanghai'
-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          COMMIT=$(git rev-parse --short=7 HEAD)
-          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
-          COMMIT_TIMESTAMP=$(git log -1 --format='%ct')
-          COMMIT_DATE=$(date -d "@$COMMIT_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
-          echo "commitDate=${COMMIT_DATE}" >> $GITHUB_OUTPUT
-          COMMIT_MESSAGE=$(git log -1 --format='%s')
-          echo "commitMessage=${COMMIT_MESSAGE}" >> $GITHUB_OUTPUT
-          BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-          echo "buildTime=${BUILD_TIME}" >> $GITHUB_OUTPUT
-          echo "=== Build Info Generated ==="
-          echo "Version: ${VERSION}"
-          echo "Commit: ${COMMIT}"
-          echo "Commit Timestamp: ${COMMIT_TIMESTAMP}"
-          echo "Commit Date (UTC+8): ${COMMIT_DATE}"
-          echo "Build Time (UTC+8): ${BUILD_TIME}"
-          echo "Commit Message: ${COMMIT_MESSAGE}"
-
-      - name: Create build-info.json for frontend
-        run: |
-          mkdir -p frontend/public
-          cat > frontend/public/build-info.json <<EOF
-          {
-            "version": "${{ steps.build-info.outputs.version }}",
-            "commit": "${{ steps.build-info.outputs.commit }}",
-            "commitDate": "${{ steps.build-info.outputs.commitDate }}",
-            "commitMessage": "${{ steps.build-info.outputs.commitMessage }}",
-            "buildTime": "${{ steps.build-info.outputs.buildTime }}"
-          }
-          EOF
-          cat frontend/public/build-info.json
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.88.0
 
@@ -81,12 +44,6 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
-
-      - name: Debug frontend logs route
-        run: |
-          git rev-parse HEAD
-          git ls-files frontend/src/app/dashboard/logs/page.tsx || true
-          ls -la frontend/src/app/dashboard
 
       - name: Build for ${{ matrix.target }}
         run: ./build-ci.sh ${{ matrix.target }}
