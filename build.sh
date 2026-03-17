@@ -16,7 +16,7 @@ fi
 # Get commit info
 COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 COMMIT_TIMESTAMP=$(git log -1 --format='%ct' 2>/dev/null || echo "0")
-COMMIT_DATE=$(TZ='Asia/Shanghai' date -d "@$COMMIT_TIMESTAMP" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
+COMMIT_DATE=$(date -u -d "@$((COMMIT_TIMESTAMP + 28800))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
 COMMIT_MESSAGE=$(git log -1 --format='%s' 2>/dev/null || echo "unknown")
 BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
 
