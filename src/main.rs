@@ -6098,7 +6098,7 @@ async fn validate_uploaded_binary(
 
             match output {
                 Ok(Ok(out)) if out.status.success() => {
-                    return Ok(Json(ApiResponse::success("验证成功".to_string())));
+                    return Ok(Json(ApiResponse::success("验证成功", "ok".to_string())));
                 }
                 _ => {
                     let _ = fs::remove_file(temp_path);
