@@ -27,3 +27,6 @@ export { Skeleton, SkeletonCard, SkeletonNodeGrid, SkeletonConnectivity, Skeleto
 
 // Confirm Modal
 export { ConfirmModal } from "./ConfirmModal/ConfirmModal";
+
+// File Upload
+export { FileUpload } from "./FileUpload/FileUpload";

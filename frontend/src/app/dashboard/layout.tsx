@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Button, ClayBlobs, Input, Modal, ToastContainer } from "@/components/ui";
+import { Button, ClayBlobs, Input, Modal, ToastContainer, FileUpload } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
 import { useLogs, useTraffic } from "@/hooks";
 import { api } from "@/lib/api";
@@ -65,6 +65,9 @@ export default function DashboardLayout({
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [savingPassword, setSavingPassword] = useState(false);
+  const [showUploadConfirmModal, setShowUploadConfirmModal] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [validating, setValidating] = useState(false);
 
   useLogs();
   useTraffic();
@@ -121,11 +124,44 @@ export default function DashboardLayout({
 
   const handleUpgrade = async () => {
     if (upgrading) return;
-    if (!confirm("确定要强制更新到最新版本吗？\n更新过程中服务将短暂中断。")) {
-      return;
+    setShowUploadConfirmModal(true);
+  };
+
+  const handleConfirmUpgrade = async () => {
+    setShowUploadConfirmModal(false);
+
+    // 如果有上传文件，先验证
+    if (uploadedFile) {
+      setValidating(true);
+      try {
+        const formData = new FormData();
+        formData.append("file", uploadedFile);
+
+        const token = localStorage.getItem("miao_token");
+        const res = await fetch("/api/upgrade/validate", {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const error = await res.text();
+          addToast({ type: "error", message: `验证失败: ${error}` });
+          setValidating(false);
+          return;
+        }
+
+        addToast({ type: "success", message: "文件验证成功，开始更新..." });
+      } catch (error) {
+        addToast({ type: "error", message: "验证请求失败" });
+        setValidating(false);
+        return;
+      } finally {
+        setValidating(false);
+      }
     }
 
-    // Reset state and show modal
+    // 开始更新流程
     setUpgrading(true);
     setShowUpgradeModal(true);
     setUpgradeLogs([]);
@@ -134,7 +170,8 @@ export default function DashboardLayout({
 
     const token = localStorage.getItem("miao_token");
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${wsProtocol}//${window.location.host}/api/upgrade/ws?token=${token}`;
+    const useUploaded = uploadedFile ? "true" : "false";
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/upgrade/ws?token=${token}&use_uploaded=${useUploaded}`;
 
     const ws = new WebSocket(wsUrl);
 
@@ -148,7 +185,6 @@ export default function DashboardLayout({
           setUpgradeStatus("error");
         }
 
-        // Auto scroll to bottom
         setTimeout(() => {
           if (upgradeLogsRef.current) {
             upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
@@ -160,12 +196,10 @@ export default function DashboardLayout({
     };
 
     ws.onclose = () => {
-      // If no error occurred, assume success and wait for restart
       setUpgradeLogs((prev) => {
         const hasError = prev.some((log) => log.level === "error");
         if (!hasError && prev.length > 0) {
           setUpgradeStatus("success");
-          // Wait for service restart
           waitForRestart();
         } else if (hasError) {
           setUpgrading(false);
@@ -396,6 +430,35 @@ export default function DashboardLayout({
             </Button>
             <Button loading={savingPassword} onClick={handleUpdatePassword}>
               保存
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Upload Confirm Modal */}
+      <Modal
+        isOpen={showUploadConfirmModal}
+        onClose={() => !validating && setShowUploadConfirmModal(false)}
+        title="强制更新确认"
+      >
+        <div className="space-y-4">
+          <p className="text-slate-600">
+            更新过程中服务将短暂中断。你可以选择上传本地 miao binary 文件，或直接从 GitHub 下载最新版本。
+          </p>
+          <FileUpload
+            onFileSelect={setUploadedFile}
+            maxSize={100}
+          />
+          <div className="flex justify-end gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => setShowUploadConfirmModal(false)}
+              disabled={validating}
+            >
+              取消
+            </Button>
+            <Button loading={validating} onClick={handleConfirmUpgrade}>
+              继续
             </Button>
           </div>
         </div>

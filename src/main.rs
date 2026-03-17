@@ -1,9 +1,9 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        Path, Query, State, Multipart,
     },
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, HeaderMap},
     middleware::{self, Next},
     response::{Json, Response},
     routing::{delete, get, post, put},
@@ -1482,6 +1482,8 @@ struct WsAuthQuery {
     token: String,
     #[serde(default)]
     level: Option<String>,
+    #[serde(default)]
+    use_uploaded: Option<String>,
 }
 
 struct SystemMonitor {
@@ -6055,6 +6057,60 @@ struct UpgradeLogEntry {
     progress: Option<u8>,  // Download progress 0-100
 }
 
+/// POST /api/upgrade/validate - Validate uploaded binary
+async fn validate_uploaded_binary(
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if verify_token(token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        if field.name() == Some("file") {
+            let data = match field.bytes().await {
+                Ok(d) => d,
+                Err(_) => return Ok(Json(ApiResponse::error("读取文件失败"))),
+            };
+
+            let temp_path = "/tmp/miao-uploaded";
+            if let Err(e) = fs::write(temp_path, &data) {
+                return Ok(Json(ApiResponse::error(&format!("保存文件失败: {}", e))));
+            }
+
+            if let Err(e) = fs::set_permissions(temp_path, fs::Permissions::from_mode(0o755)) {
+                let _ = fs::remove_file(temp_path);
+                return Ok(Json(ApiResponse::error(&format!("设置权限失败: {}", e))));
+            }
+
+            let output = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::process::Command::new(temp_path)
+                    .arg("--version")
+                    .output()
+            ).await;
+
+            match output {
+                Ok(Ok(out)) if out.status.success() => {
+                    return Ok(Json(ApiResponse::success("验证成功".to_string())));
+                }
+                _ => {
+                    let _ = fs::remove_file(temp_path);
+                    return Ok(Json(ApiResponse::error("文件验证失败，无法执行")));
+                }
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::error("未找到上传文件")))
+}
+
 /// WebSocket endpoint for upgrade with real-time logs
 async fn upgrade_ws(
     Query(q): Query<WsAuthQuery>,
@@ -6063,17 +6119,18 @@ async fn upgrade_ws(
     if verify_token(&q.token).is_err() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(ws.on_upgrade(handle_upgrade_websocket))
+    let use_uploaded = q.use_uploaded.as_deref() == Some("true");
+    Ok(ws.on_upgrade(move |socket| handle_upgrade_websocket(socket, use_uploaded)))
 }
 
-async fn handle_upgrade_websocket(mut socket: WebSocket) {
+async fn handle_upgrade_websocket(mut socket: WebSocket, use_uploaded: bool) {
     use tokio::sync::mpsc;
 
     let (log_tx, mut log_rx) = mpsc::channel::<UpgradeLogEntry>(32);
 
     // Spawn the upgrade task
     let mut upgrade_handle = tokio::spawn(async move {
-        perform_upgrade_with_logs(log_tx).await
+        perform_upgrade_with_logs(log_tx, use_uploaded).await
     });
 
     // Stream logs to WebSocket
@@ -6100,7 +6157,7 @@ async fn handle_upgrade_websocket(mut socket: WebSocket) {
     let _ = socket.close().await;
 }
 
-async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>) {
+async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>, use_uploaded: bool) {
     use futures_util::StreamExt;
 
     let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
@@ -6117,8 +6174,37 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         }
     };
 
-    // Step 1: Fetch latest release info
-    send_log(1, "获取最新版本信息...", "info", None).await;
+    let temp_path = "/tmp/miao-new";
+
+    // If using uploaded file, skip download steps
+    if use_uploaded {
+        send_log(1, "使用上传的文件...", "info", None).await;
+
+        let uploaded_path = "/tmp/miao-uploaded";
+        if !std::path::Path::new(uploaded_path).exists() {
+            send_log(1, "上传的文件不存在", "error", None).await;
+            return;
+        }
+
+        // Copy uploaded file to temp path
+        if let Err(e) = fs::copy(uploaded_path, temp_path) {
+            send_log(1, &format!("复制上传文件失败: {}", e), "error", None).await;
+            return;
+        }
+
+        send_log(1, "上传文件准备完成", "success", None).await;
+
+        // Skip to step 5 (set permissions)
+        send_log(5, "设置可执行权限...", "info", None).await;
+        if let Err(e) = fs::set_permissions(temp_path, fs::Permissions::from_mode(0o755)) {
+            send_log(5, &format!("设置权限失败: {}", e), "error", None).await;
+            return;
+        }
+        send_log(5, "权限设置完成", "success", None).await;
+    } else {
+        // Original download logic
+        // Step 1: Fetch latest release info
+        send_log(1, "获取最新版本信息...", "info", None).await;
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -6245,6 +6331,7 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         send_log(4, &format!("写入临时文件失败: {}", e), "error", None).await;
         return;
     }
+    } // End of else block for download logic
 
     // Step 5: Set permissions
     send_log(5, "设置可执行权限...", "info", None).await;
@@ -12186,6 +12273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/connectivity", post(test_connectivity))
         // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
+        .route("/api/upgrade/validate", post(validate_uploaded_binary))
         // Clash API proxy (protected HTTP)
         .route("/api/clash/proxies", get(clash_get_proxies))
         .route("/api/clash/proxies/{group}", put(clash_switch_proxy))
