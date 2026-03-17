@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "port": 8008,
+  "basic_auth_user": "admin",
+  "basic_auth_password": "password",
+  "auto_start": false,
+  "target_fps": 30,
+  "video_bitrate": 4000
+}
