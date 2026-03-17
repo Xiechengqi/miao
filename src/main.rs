@@ -10977,12 +10977,12 @@ network:
 
     let mut child = spawn_with_vnc_log_capture(&mut command, format!("vnc-{}", id))?;
     let pid = child.id();
-    log_info!("kasmvnc process spawned with PID: {:?}", pid);
+    log_info!("VNC process spawned with PID: {:?}", pid);
 
     sleep(Duration::from_millis(500)).await;
     if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
         let code = exit_status.code().unwrap_or(-1);
-        return Err(format!("kasmvnc exited immediately with code {}", code).into());
+        return Err(format!("VNC exited immediately with code {}", code).into());
     }
 
     lock.insert(
@@ -12053,16 +12053,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             match start_terminal_internal(&terminal.id, terminal).await {
                 Ok(_) => log_info!("gotty started successfully"),
                 Err(e) => log_error!("Failed to start gotty: {}", e),
-            }
-        }
-
-        for vnc in &config.vnc_sessions {
-            if !vnc.enabled {
-                continue;
-            }
-            match start_vnc_internal(&vnc.id, vnc).await {
-                Ok(_) => log_info!("kasmvnc started successfully"),
-                Err(e) => log_error!("Failed to start kasmvnc: {}", e),
             }
         }
 
