@@ -149,6 +149,7 @@ export default function VncPage() {
       await api.startIVnc();
       addToast({ type: "success", message: "iVnc 已启动" });
       await loadStatus();
+      await loadLogs(); // 启动后加载日志
     } catch (error) {
       addToast({
         type: "error",
@@ -194,6 +195,12 @@ export default function VncPage() {
   const handleOpenDesktop = () => {
     if (!status || !status.running) return;
     const url = `http://${window.location.hostname}:${status.port}`;
+    window.open(url, "_blank");
+  };
+
+  const handleOpenConsole = () => {
+    if (!status || !status.running) return;
+    const url = `http://${window.location.hostname}:${status.port}/console`;
     window.open(url, "_blank");
   };
 
@@ -311,6 +318,10 @@ export default function VncPage() {
                 <Button variant="primary" onClick={handleOpenDesktop}>
                   <ExternalLink className="w-4 h-4" />
                   打开桌面
+                </Button>
+                <Button variant="secondary" onClick={handleOpenConsole}>
+                  <Settings className="w-4 h-4" />
+                  管理页
                 </Button>
                 <Button variant="secondary" onClick={handleRestart}>
                   <RefreshCw className="w-4 h-4" />

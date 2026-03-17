@@ -4170,6 +4170,10 @@ async fn update_ivnc_config(
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, String)> {
     *state.ivnc_config.lock().await = new_config.clone();
 
+    if let Err(e) = save_ivnc_config(&new_config).await {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("保存配置失败: {}", e)));
+    }
+
     if state.ivnc_process.lock().await.is_some() {
         let _ = restart_ivnc(State(state)).await?;
     }
@@ -9915,6 +9919,19 @@ async fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + 
     Ok(())
 }
 
+async fn save_ivnc_config(config: &IVncConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let json = serde_json::to_string_pretty(config)?;
+    tokio::fs::write("ivnc_config.json", json).await?;
+    Ok(())
+}
+
+async fn load_ivnc_config() -> IVncConfig {
+    match tokio::fs::read_to_string("ivnc_config.json").await {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => IVncConfig::default(),
+    }
+}
+
 fn normalize_sync_name(name: Option<String>) -> Option<String> {
     name.and_then(|n| {
         let trimmed = n.trim();
@@ -12085,7 +12102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         system_monitor: SystemMonitor::new(),
         metrics_config: config.metrics.clone(),
         ivnc_process: Arc::new(Mutex::new(None)),
-        ivnc_config: Arc::new(Mutex::new(IVncConfig::default())),
+        ivnc_config: Arc::new(Mutex::new(load_ivnc_config().await)),
     });
 
     // Apply initial TCP tunnel config (best-effort).
