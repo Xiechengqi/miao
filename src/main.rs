@@ -3707,9 +3707,7 @@ fn get_ivnc_binary_path() -> PathBuf {
 }
 
 fn get_ivnc_config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/root"))
-        .join(".config/miao/ivnc.toml")
+    PathBuf::from("ivnc.toml")
 }
 
 fn get_ivnc_log_path() -> PathBuf {
