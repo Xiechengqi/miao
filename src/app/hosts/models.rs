@@ -40,6 +40,8 @@ pub struct HostCreateRequest {
 
     pub group_id: Option<Uuid>,
 
+    pub jump_host_id: Option<Uuid>,
+
     #[validate(length(max = 10))]
     pub tags: Option<Vec<String>>,
 
@@ -88,6 +90,8 @@ pub struct HostUpdateRequest {
     pub private_key_passphrase: Option<String>,
 
     pub group_id: Option<Uuid>,
+
+    pub jump_host_id: Option<Uuid>,
 
     #[validate(length(max = 10))]
     pub tags: Option<Vec<String>>,
@@ -153,6 +157,8 @@ pub struct HostResponse {
     pub private_key_passphrase: Option<String>,
     pub group_id: Option<String>,
     pub group_name: Option<String>,
+    pub jump_host_id: Option<String>,
+    pub jump_host_name: Option<String>,
     pub tags: Vec<String>,
     pub description: Option<String>,
     pub enabled: bool,

@@ -346,6 +346,8 @@ export interface Host {
   password?: string;
   private_key_path?: string;
   private_key_passphrase?: string;
+  jump_host_id?: string | null;
+  jump_host_name?: string | null;
   created_at?: number;
   updated_at?: number;
 }

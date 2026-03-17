@@ -17,6 +17,7 @@ const defaultHostForm = {
   password: "",
   private_key_path: "",
   private_key_passphrase: "",
+  jump_host_id: null as string | null,
 };
 
 const HOST_TEST_STORAGE_KEY = "miao_host_test_results_v2";
@@ -69,6 +70,15 @@ export default function HostsPage() {
   const [showModal, setShowModal] = useState(false);
   const [editingHostId, setEditingHostId] = useState<string | null>(null);
   const [formData, setFormData] = useState(defaultHostForm);
+
+  const availableJumpHosts = useMemo(() => {
+    return hosts.filter(h => {
+      if (editingHostId && h.id === editingHostId) return false;
+      if (h.jump_host_id) return false;
+      if (!h.enabled) return false;
+      return true;
+    });
+  }, [hosts, editingHostId]);
 
   const canSubmit = useMemo(() => {
     if (!formData.host.trim() || !formData.username.trim()) return false;
@@ -179,6 +189,7 @@ export default function HostsPage() {
           password: detail.password || "",
           private_key_path: detail.private_key_path || "",
           private_key_passphrase: detail.private_key_passphrase || "",
+          jump_host_id: detail.jump_host_id || null,
         });
         setAutoFilledKeyPath(false);
       } catch (error) {
@@ -211,6 +222,7 @@ export default function HostsPage() {
         enabled: true,
         connection_timeout_ms: 10000,
         keepalive_interval_ms: 30000,
+        jump_host_id: formData.jump_host_id || null,
       };
 
       if (formData.auth_type === "password") {
@@ -438,6 +450,9 @@ export default function HostsPage() {
                         {host.name || host.host}
                       </span>
                       <Badge variant="info">{getAuthTypeLabel(host.auth_type)}</Badge>
+                      {host.jump_host_name && (
+                        <Badge variant="warning">跳板: {host.jump_host_name}</Badge>
+                      )}
                     </div>
                     <div className="text-sm text-slate-500 mt-1">
                       {host.username}@{host.host}:{host.port}
@@ -564,6 +579,25 @@ export default function HostsPage() {
               <option value="password">密码</option>
               <option value="private_key_path">私钥路径</option>
             </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-2">跳板主机（可选）</label>
+            <select
+              value={formData.jump_host_id || ""}
+              onChange={(e) => setFormData({ ...formData, jump_host_id: e.target.value || null })}
+              className="w-full h-11 rounded-lg border border-slate-200 bg-white px-4 text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
+            >
+              <option value="">无（直接连接）</option>
+              {availableJumpHosts.map(h => (
+                <option key={h.id} value={h.id}>
+                  {h.name || h.host} ({h.username}@{h.host}:{h.port})
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-slate-500 mt-1">
+              选择跳板主机后，所有 SSH 连接将通过该主机转发
+            </p>
           </div>
 
           {formData.auth_type === "password" && (

@@ -14,6 +14,27 @@ use crate::HostAuth;
 use super::models::*;
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn validate_no_jump_cycle(hosts: &[crate::HostConfig], host_id: &str, jump_id: &str) -> Result<(), String> {
+    let mut visited = std::collections::HashSet::new();
+    let mut current = jump_id;
+
+    while let Some(host) = hosts.iter().find(|h| h.id == current) {
+        if visited.contains(&host.id) || host.id == host_id {
+            return Err("Jump host cycle detected".to_string());
+        }
+        visited.insert(host.id.clone());
+        current = match &host.jump_host_id {
+            Some(id) => id,
+            None => break,
+        };
+    }
+    Ok(())
+}
+
+// ============================================================================
 // API Handlers
 // ============================================================================
 
@@ -94,6 +115,14 @@ pub async fn get_hosts(
             .collect()
     };
 
+    // 构建跳板机名称映射
+    let jump_host_names: std::collections::HashMap<String, String> = {
+        let config = state.config.lock().await;
+        config.hosts.iter()
+            .filter_map(|h| Some((h.id.clone(), h.name.clone().unwrap_or_else(|| h.host.clone()))))
+            .collect()
+    };
+
     // 分页
     let total = filtered.len() as u64;
     let total_pages = ((total as f64) / page_size as f64).ceil() as u32;
@@ -112,6 +141,8 @@ pub async fn get_hosts(
             private_key_passphrase: None,
             group_id: h.group_id.clone(),
             group_name: h.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
+            jump_host_id: h.jump_host_id.clone(),
+            jump_host_name: h.jump_host_id.as_ref().and_then(|id| jump_host_names.get(id).cloned()),
             tags: h.tags.clone(),
             description: h.description.clone(),
             enabled: h.enabled,
@@ -152,6 +183,12 @@ pub async fn get_host(
     let group_names: std::collections::HashMap<String, String> = config.host_groups.iter()
         .filter_map(|g| Some((g.id.clone(), g.name.clone()))).collect();
 
+    let jump_host_name = host.jump_host_id.as_ref().and_then(|jump_id| {
+        config.hosts.iter()
+            .find(|h| &h.id == jump_id)
+            .map(|h| h.name.clone().unwrap_or_else(|| h.host.clone()))
+    });
+
     let response = HostDetailResponse {
         host: HostResponse {
             id: host.id.clone(),
@@ -171,6 +208,8 @@ pub async fn get_host(
             },
             group_id: host.group_id.clone(),
             group_name: host.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
+            jump_host_id: host.jump_host_id.clone(),
+            jump_host_name,
             tags: host.tags.clone(),
             description: host.description.clone(),
             enabled: host.enabled,
@@ -203,6 +242,19 @@ pub async fn create_host(
 
     let now = Utc::now().timestamp();
     let id = Uuid::new_v4().to_string();
+
+    // 验证跳板机
+    if let Some(jump_id) = &req.jump_host_id {
+        let config = state.config.lock().await;
+        let jump_id_str = jump_id.to_string();
+        if !config.hosts.iter().any(|h| h.id == jump_id_str) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": "Jump host not found"}))));
+        }
+        // 检测循环依赖
+        if let Err(e) = validate_no_jump_cycle(&config.hosts, &id, &jump_id_str) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": e}))));
+        }
+    }
 
     let auth = match req.auth_type.as_str() {
         "private_key_path" => {
@@ -254,6 +306,7 @@ pub async fn create_host(
         username: req.username.trim().to_string(),
         auth,
         group_id: req.group_id.map(|id| id.to_string()),
+        jump_host_id: req.jump_host_id.map(|id| id.to_string()),
         tags: req.tags.unwrap_or_default(),
         description: req.description,
         enabled: req.enabled,
@@ -279,6 +332,15 @@ pub async fn create_host(
             .filter_map(|g| Some((g.id.clone(), g.name.clone()))).collect()
     };
 
+    let jump_host_name = {
+        let config = state.config.lock().await;
+        host.jump_host_id.as_ref().and_then(|jump_id| {
+            config.hosts.iter()
+                .find(|h| &h.id == jump_id)
+                .map(|h| h.name.clone().unwrap_or_else(|| h.host.clone()))
+        })
+    };
+
     let response = HostResponse {
         id: host.id.clone(),
         name: host.name.clone(),
@@ -297,6 +359,8 @@ pub async fn create_host(
         },
         group_id: host.group_id.clone(),
         group_name: host.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
+        jump_host_id: host.jump_host_id.clone(),
+        jump_host_name,
         tags: host.tags.clone(),
         description: host.description.clone(),
         enabled: host.enabled,
@@ -381,6 +445,7 @@ pub async fn update_host(
             username: req.username.unwrap_or_else(|| existing.username.clone()),
             auth,
             group_id: req.group_id.map(|id| id.to_string()).or(existing.group_id.clone()),
+            jump_host_id: req.jump_host_id.map(|id| id.to_string()).or(existing.jump_host_id.clone()),
             tags: req.tags.unwrap_or_else(|| existing.tags.clone()),
             description: req.description.or(existing.description.clone()),
             enabled: req.enabled.unwrap_or(existing.enabled),
@@ -391,6 +456,13 @@ pub async fn update_host(
             last_connected_at: existing.last_connected_at,
             last_test_result: existing.last_test_result.clone(),
         };
+
+        // 验证跳板机循环依赖
+        if let Some(jump_id) = &host.jump_host_id {
+            if let Err(e) = validate_no_jump_cycle(&config.hosts, &id, jump_id) {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": e}))));
+            }
+        }
 
         config.hosts[pos] = host.clone();
         if let Err(e) = crate::save_config(&config).await {
@@ -404,6 +476,15 @@ pub async fn update_host(
         let config = state.config.lock().await;
         config.host_groups.iter()
             .filter_map(|g| Some((g.id.clone(), g.name.clone()))).collect()
+    };
+
+    let jump_host_name = {
+        let config = state.config.lock().await;
+        updated.jump_host_id.as_ref().and_then(|jump_id| {
+            config.hosts.iter()
+                .find(|h| &h.id == jump_id)
+                .map(|h| h.name.clone().unwrap_or_else(|| h.host.clone()))
+        })
     };
 
     let response = HostResponse {
@@ -424,6 +505,8 @@ pub async fn update_host(
         },
         group_id: updated.group_id.clone(),
         group_name: updated.group_id.as_ref().and_then(|id| group_names.get(id).cloned()),
+        jump_host_id: updated.jump_host_id.clone(),
+        jump_host_name,
         tags: updated.tags.clone(),
         description: updated.description.clone(),
         enabled: updated.enabled,
@@ -466,15 +549,17 @@ pub async fn test_ssh(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     use crate::test_ssh_connection;
 
-    let host = {
+    let (host, all_hosts) = {
         let config = state.config.lock().await;
-        config.hosts.iter().find(|h| h.id == id)
+        let host = config.hosts.iter().find(|h| h.id == id)
             .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Host not found"}))))?;
+        let all_hosts = config.hosts.clone();
+        (host, all_hosts)
     };
 
     // 执行 SSH 连接测试
-    match test_ssh_connection(&host).await {
+    match test_ssh_connection(&host, Some(&all_hosts)).await {
         Ok(latency_ms) => {
             let response = SSHTestResponse {
                 id: host.id.clone(),

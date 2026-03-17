@@ -80,6 +80,12 @@ pub async fn get_group(
 
     let hosts: Vec<crate::app::hosts::models::HostResponse> = {
         let config = state.config.lock().await;
+
+        // 构建跳板机名称映射
+        let jump_host_names: std::collections::HashMap<String, String> = config.hosts.iter()
+            .map(|h| (h.id.clone(), h.name.clone().unwrap_or_else(|| h.host.clone())))
+            .collect();
+
         config.hosts.iter().filter(|h| h.group_id.as_ref() == Some(&group.id))
             .map(|h| crate::app::hosts::models::HostResponse {
                 id: h.id.clone(),
@@ -93,6 +99,8 @@ pub async fn get_group(
                 private_key_passphrase: None,
                 group_id: h.group_id.clone(),
                 group_name: Some(group.name.clone()),
+                jump_host_id: h.jump_host_id.clone(),
+                jump_host_name: h.jump_host_id.as_ref().and_then(|id| jump_host_names.get(id).cloned()),
                 tags: h.tags.clone(),
                 description: h.description.clone(),
                 enabled: h.enabled,

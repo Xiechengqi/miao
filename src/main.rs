@@ -658,7 +658,7 @@ fn resolve_private_key_path(path: &str) -> Result<String, String> {
 }
 
 /// Test SSH connection and return latency on success
-async fn test_ssh_connection(cfg: &HostConfig) -> Result<f64, String> {
+async fn test_ssh_connection(cfg: &HostConfig, all_hosts: Option<&[HostConfig]>) -> Result<f64, String> {
     use russh::client;
     use russh::keys::key::PrivateKeyWithHashAlg;
     use russh::keys::load_secret_key;
@@ -676,6 +676,19 @@ async fn test_ssh_connection(cfg: &HostConfig) -> Result<f64, String> {
         }
     }
 
+    let start = std::time::Instant::now();
+
+    // 检查是否需要通过跳板机连接
+    if let Some(jump_id) = &cfg.jump_host_id {
+        if let Some(hosts) = all_hosts {
+            let jump_host = hosts.iter()
+                .find(|h| &h.id == jump_id)
+                .ok_or_else(|| format!("Jump host '{}' not found in configuration", jump_id))?;
+            return test_ssh_via_jump(cfg, jump_host, start).await;
+        }
+    }
+
+    // 直接连接（原有逻辑）
     let handler = HostClientHandler;
     let client_cfg = client::Config {
         nodelay: true,
@@ -692,8 +705,6 @@ async fn test_ssh_connection(cfg: &HostConfig) -> Result<f64, String> {
     let client_cfg = Arc::new(client_cfg);
     let addr = (cfg.host.as_str(), cfg.port);
     let connect_timeout = Duration::from_millis(cfg.connection_timeout_ms.max(1000).min(60000));
-
-    let start = std::time::Instant::now();
 
     let mut session = tokio::time::timeout(
         connect_timeout,
@@ -746,6 +757,83 @@ async fn test_ssh_connection(cfg: &HostConfig) -> Result<f64, String> {
         .disconnect(russh::Disconnect::ByApplication, "test done", "en")
         .await;
 
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+async fn test_ssh_via_jump(target: &HostConfig, jump: &HostConfig, start: std::time::Instant) -> Result<f64, String> {
+    use russh::client;
+    use russh::keys::key::PrivateKeyWithHashAlg;
+    use russh::keys::load_secret_key;
+    use std::borrow::Cow;
+
+    struct HostClientHandler;
+    impl russh::client::Handler for HostClientHandler {
+        type Error = russh::Error;
+        async fn check_server_key(&mut self, _: &russh::keys::ssh_key::PublicKey) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    let client_cfg = Arc::new(client::Config {
+        nodelay: true,
+        inactivity_timeout: None,
+        preferred: russh::Preferred {
+            kex: Cow::Owned(vec![russh::kex::CURVE25519_PRE_RFC_8731, russh::kex::EXTENSION_SUPPORT_AS_CLIENT]),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    let timeout = Duration::from_millis(jump.connection_timeout_ms.max(1000).min(60000));
+
+    // 连接跳板机
+    let mut jump_session = tokio::time::timeout(timeout, client::connect(client_cfg.clone(), (&jump.host as &str, jump.port), HostClientHandler))
+        .await.map_err(|_| "jump host connect timeout".to_string())?.map_err(|e| format!("jump connect: {e:?}"))?;
+
+    // 认证跳板机
+    let jump_auth = match &jump.auth {
+        HostAuth::Password { password } => {
+            let pwd = password.as_ref().ok_or("jump password required")?.trim();
+            tokio::time::timeout(timeout, jump_session.authenticate_password(jump.username.clone(), pwd.to_string()))
+                .await.map_err(|_| "jump auth timeout".to_string())?.map_err(|e| format!("jump auth: {e:?}"))?
+        }
+        HostAuth::PrivateKeyPath { path, passphrase } => {
+            let key = load_secret_key(&resolve_private_key_path(path)?, passphrase.as_deref()).map_err(|e| format!("jump key: {e:?}"))?;
+            let rsa_hash = tokio::time::timeout(timeout, jump_session.best_supported_rsa_hash())
+                .await.map_err(|_| "jump auth timeout".to_string())?.map_err(|e| format!("{e:?}"))?.flatten();
+            tokio::time::timeout(timeout, jump_session.authenticate_publickey(jump.username.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash)))
+                .await.map_err(|_| "jump auth timeout".to_string())?.map_err(|e| format!("jump auth: {e:?}"))?
+        }
+    };
+    if !jump_auth.success() { return Err("jump authentication failed".to_string()); }
+
+    // 在跳板机上测试到目标主机的连接
+    let mut channel = jump_session.channel_open_session().await.map_err(|e| format!("channel: {e:?}"))?;
+
+    // 使用 shell 转义防止命令注入
+    let escaped_host = target.host.replace("'", "'\\''");
+    let escaped_user = target.username.replace("'", "'\\''");
+    let test_cmd = format!(
+        "nc -z -w 5 '{}' {} 2>&1 || ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no '{}@{}' -p {} exit 2>&1",
+        escaped_host, target.port, escaped_user, escaped_host, target.port
+    );
+    channel.exec(true, test_cmd).await.map_err(|e| format!("exec: {e:?}"))?;
+
+    let mut output = Vec::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { ref data } => output.extend_from_slice(data),
+            russh::ChannelMsg::ExitStatus { exit_status } => {
+                if exit_status != 0 {
+                    return Err(format!("target unreachable via jump host (exit {})", exit_status));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let _ = jump_session.disconnect(russh::Disconnect::ByApplication, "test done", "en").await;
     Ok(start.elapsed().as_secs_f64() * 1000.0)
 }
 
@@ -906,6 +994,8 @@ pub struct HostConfig {
     pub last_connected_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_test_result: Option<HostTestResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_host_id: Option<String>,
 }
 
 impl HostConfig {
