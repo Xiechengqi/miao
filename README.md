@@ -1,6 +1,6 @@
 # Miao
 
-一个基于 SSH 协议的服务器运维管理工具，提供 Web 管理面板，集成 SSH 隧道、远程终端、文件同步、VNC 桌面等功能。
+一个基于 SSH 协议的服务器运维管理工具，提供 Web 管理面板，集成 SSH 隧道、远程终端、文件同步、iVNC 桌面等功能。
 
 ## 特性
 
@@ -8,8 +8,8 @@
 - **TCP 穿透 (SSH -R)** - 基于 SSH 反向隧道，将本机端口映射到远程服务器
 - **Web Terminal** - 内置 gotty 提供浏览器终端，无需本地 SSH 客户端
 - **文件同步** - 基于 SSH 协议的本地文件/目录同步到远端（支持定时 cron）
-- **KasmVNC 桌面** - 通过 VNC Web 端访问远程桌面/应用
-- **桌面应用管理** - Chromium 等应用可在 Web 面板启动并绑定到 VNC DISPLAY
+- **iVNC 桌面** - 基于 WebRTC + GStreamer + Wayland 的高性能桌面流媒体，支持一键更新
+- **桌面应用管理** - Chromium 等应用可在 Web 面板启动并绑定到 iVNC DISPLAY
 - **流量转发** - 集成 sing-box，支持通过 SSH 隧道转发流量
 - **自动更新** - 支持从 GitHub 一键更新到最新版本
 
@@ -98,8 +98,8 @@ miao/
 | `/dashboard/tunnels` | TCP 隧道配置与管理 |
 | `/dashboard/sync` | 文件同步配置、定时任务 |
 | `/dashboard/terminals` | Web Terminal (gotty) 配置 |
-| `/dashboard/vnc` | KasmVNC 远程桌面配置 |
-| `/dashboard/apps` | 桌面应用管理（绑定 VNC） |
+| `/dashboard/vnc` | iVNC 远程桌面配置与更新 |
+| `/dashboard/apps` | 桌面应用管理（绑定 iVNC） |
 | `/dashboard/proxies` | 流量转发节点管理 |
 | `/dashboard/logs` | 实时日志（WebSocket 流） |
 
@@ -146,7 +146,7 @@ sudo ./miao
 | `host_groups` | 主机分组配置 | - |
 | `tcp_tunnels` | SSH 隧道配置列表 | - |
 | `terminals` | Web Terminal (gotty) 配置列表 | - |
-| `vnc_sessions` | KasmVNC 会话配置列表 | - |
+| `ivnc` | iVNC 远程桌面配置 | - |
 | `apps` | 桌面应用配置列表 | - |
 | `syncs` | 文件同步配置列表 | - |
 
@@ -154,13 +154,25 @@ sudo ./miao
 
 启用后会在独立端口启动 gotty（默认 `127.0.0.1:7681`），登录认证由 miao 配置。可在 `config.yaml` 中配置多个终端节点，支持独立端口、地址、命令和额外参数；面板里留空认证不会清空，需勾选"清除认证"。默认额外参数为 `-w --enable-idle-alert`。
 
-### KasmVNC Sessions
+### iVNC 远程桌面
 
-启用后会在独立端口启动 KasmVNC（默认 `0.0.0.0:7900`）。每个会话可指定 `DISPLAY`、分辨率、帧率、密码等，访问地址为 `http://<host>:<port>`（不使用 https）。
+iVNC 是基于 WebRTC + GStreamer + Wayland 的高性能桌面流媒体服务，提供低延迟的远程桌面访问。
+
+特性：
+- **WebRTC 传输** - 使用 WebRTC 实现低延迟、高质量的桌面流媒体
+- **硬件加速** - 支持 VA-API、NVENC、QSV 等硬件编码
+- **Wayland 原生** - 基于 Smithay compositor，无需 X11
+- **一键更新** - 在远程桌面页面点击"更新"按钮即可升级到最新版本
+- **灵活配置** - 支持自定义端口、分辨率、帧率、码率等参数
+
+配置说明：
+- 默认端口：`8008`
+- 默认认证：`admin/password`
+- 访问地址：`http://<host>:8008`
 
 ### Desktop Apps
 
-桌面应用支持绑定到某个 VNC 会话（自动使用该 DISPLAY），或手动指定 DISPLAY。应用模板预设可快速生成 Chromium 等配置，后续可在面板中编辑参数与环境变量。
+桌面应用支持绑定到 iVNC 会话（自动使用该 DISPLAY），或手动指定 DISPLAY。应用模板预设可快速生成 Chromium 等配置，后续可在面板中编辑参数与环境变量。
 
 ### Sync
 
