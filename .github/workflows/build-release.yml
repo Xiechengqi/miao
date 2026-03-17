@@ -34,7 +34,13 @@ jobs:
           echo "commitMessage=${COMMIT_MESSAGE}" >> $GITHUB_OUTPUT
           BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
           echo "buildTime=${BUILD_TIME}" >> $GITHUB_OUTPUT
-          echo "Generated build-info.json: version=${VERSION}, commit=${COMMIT}"
+          echo "=== Build Info Generated ==="
+          echo "Version: ${VERSION}"
+          echo "Commit: ${COMMIT}"
+          echo "Commit Timestamp: ${COMMIT_TIMESTAMP}"
+          echo "Commit Date (UTC+8): ${COMMIT_DATE}"
+          echo "Build Time (UTC+8): ${BUILD_TIME}"
+          echo "Commit Message: ${COMMIT_MESSAGE}"
 
       - name: Create build-info.json for frontend
         run: |
