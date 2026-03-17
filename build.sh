@@ -15,7 +15,7 @@ fi
 
 # Get commit info
 COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
-COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
+COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format-local:'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
 COMMIT_MESSAGE=$(git log -1 --format='%s' 2>/dev/null || echo "unknown")
 BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
 
@@ -29,9 +29,6 @@ cat > build-info-temp.json <<EOF
   "buildTime": "$BUILD_TIME"
 }
 EOF
-
-ps aux | grep -v grep | grep miao | awk '{print $2}' | xargs -n1 -I{} kill -9 {} || true
-kill -9 $(ss -plunt | grep 6161 | awk -F 'pid=' '{print $NF}' | awk -F ',' '{print $1}') || true
 
 # Detect architecture
 ARCH=$(uname -m)
