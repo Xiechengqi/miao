@@ -27,7 +27,8 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           COMMIT=$(git rev-parse --short=7 HEAD)
           echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
-          COMMIT_DATE=$(TZ='Asia/Shanghai' git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M:%S')
+          COMMIT_TIMESTAMP=$(git log -1 --format='%ct')
+          COMMIT_DATE=$(date -u -d "@$((COMMIT_TIMESTAMP + 28800))" '+%Y-%m-%d %H:%M:%S')
           echo "commitDate=${COMMIT_DATE}" >> $GITHUB_OUTPUT
           COMMIT_MESSAGE=$(git log -1 --format='%s')
           echo "commitMessage=${COMMIT_MESSAGE}" >> $GITHUB_OUTPUT
