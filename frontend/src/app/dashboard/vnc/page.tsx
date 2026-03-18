@@ -257,6 +257,35 @@ export default function VncPage() {
           <p className="text-slate-500 mt-1">基于 iVnc 的 WebRTC 桌面流媒体</p>
         </div>
         <div className="flex gap-2">
+          {status?.running ? (
+            <>
+              <Button variant="primary" onClick={handleOpenDesktop}>
+                <ExternalLink className="w-4 h-4" />
+                打开桌面
+              </Button>
+              <Button variant="secondary" onClick={handleOpenConsole}>
+                <Settings className="w-4 h-4" />
+                管理页
+              </Button>
+              <Button variant="secondary" onClick={handleRestart}>
+                <RefreshCw className="w-4 h-4" />
+                重启
+              </Button>
+              <Button variant="secondary" onClick={handleStop}>
+                <Square className="w-4 h-4" />
+                停止
+              </Button>
+              <div className="w-px h-8 bg-slate-300" />
+            </>
+          ) : (
+            <>
+              <Button onClick={handleStart}>
+                <Play className="w-4 h-4" />
+                启动
+              </Button>
+              <div className="w-px h-8 bg-slate-300" />
+            </>
+          )}
           <Button
             variant="secondary"
             onClick={handleUpgrade}
@@ -289,58 +318,39 @@ export default function VncPage() {
       </div>
 
       <Card className="p-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-lg bg-violet-600/10 flex items-center justify-center">
-              <Monitor className="w-6 h-6 text-violet-600" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-xl font-bold">iVnc 桌面</span>
-                <Badge variant={status?.running ? "success" : "default"}>
-                  {status?.running ? "运行中" : "已停止"}
-                </Badge>
-              </div>
-              <p className="text-sm text-slate-500">
-                版本: {status?.version || "未知"} · 端口: {status?.port}
-              </p>
-              {status?.running && (
-                <p className="text-sm text-slate-500">
-                  PID: {status.pid} · 运行时间: {formatUptime(status.uptime_secs || 0)}
-                </p>
-              )}
-            </div>
+        <div className="flex items-start gap-4">
+          <div className="w-12 h-12 rounded-lg bg-violet-600/10 flex items-center justify-center">
+            <Monitor className="w-6 h-6 text-violet-600" />
           </div>
-
-          <div className="flex gap-2">
-            {status?.running ? (
-              <>
-                <Button variant="primary" onClick={handleOpenDesktop}>
-                  <ExternalLink className="w-4 h-4" />
-                  打开桌面
-                </Button>
-                <Button variant="secondary" onClick={handleOpenConsole}>
-                  <Settings className="w-4 h-4" />
-                  管理页
-                </Button>
-                <Button variant="secondary" onClick={handleRestart}>
-                  <RefreshCw className="w-4 h-4" />
-                  重启
-                </Button>
-                <Button variant="secondary" onClick={handleStop}>
-                  <Square className="w-4 h-4" />
-                  停止
-                </Button>
-              </>
-            ) : (
-              <Button onClick={handleStart}>
-                <Play className="w-4 h-4" />
-                启动
-              </Button>
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xl font-bold">iVnc 桌面</span>
+              <Badge variant={status?.running ? "success" : "default"}>
+                {status?.running ? "运行中" : "已停止"}
+              </Badge>
+            </div>
+            <p className="text-sm text-slate-500">
+              版本: {status?.version || "未知"} · 端口: {status?.port}
+            </p>
+            {status?.running && (
+              <p className="text-sm text-slate-500">
+                PID: {status.pid} · 运行时间: {formatUptime(status.uptime_secs || 0)}
+              </p>
             )}
           </div>
         </div>
       </Card>
+
+      {status?.running && (
+        <Card className="p-0 overflow-hidden">
+          <iframe
+            src={`http://${window.location.hostname}:${status.port}/`}
+            className="w-full border-0"
+            style={{ height: '70vh' }}
+            title="iVNC Web"
+          />
+        </Card>
+      )}
 
       {/* Config Modal */}
       <Modal
