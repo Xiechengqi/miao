@@ -265,26 +265,6 @@ export interface TerminalLogEntry {
   message: string;
 }
 
-// VNC Types
-export interface VncSession {
-  id: string;
-  name?: string;
-  enabled?: boolean;
-  addr: string;
-  port: number;
-  display: string;
-  resolution?: string;
-  depth?: number;
-  frame_rate?: number;
-  password?: string;
-  view_only?: boolean;
-  status: {
-    running: boolean;
-    pid?: number;
-    uptime_secs?: number;
-  };
-}
-
 // App Types
 export interface App {
   id: string;

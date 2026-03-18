@@ -131,30 +131,6 @@ fn default_terminal_extra_args() -> Vec<String> {
     vec!["-w".to_string(), "--enable-idle-alert".to_string()]
 }
 
-fn default_vnc_addr() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_vnc_port() -> u16 {
-    DEFAULT_VNC_PORT
-}
-
-fn default_vnc_display() -> String {
-    ":10".to_string()
-}
-
-fn default_vnc_resolution() -> String {
-    "1920x1080".to_string()
-}
-
-fn default_vnc_depth() -> u16 {
-    24
-}
-
-fn default_vnc_frame_rate() -> u16 {
-    24
-}
-
 fn default_tcp_tunnel_backoff() -> TcpTunnelBackoff {
     TcpTunnelBackoff {
         base_ms: 1_000,
@@ -449,44 +425,6 @@ impl Default for TerminalNodeConfig {
             auth_username: None,
             auth_password: None,
             extra_args: default_terminal_extra_args(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-struct VncSessionConfig {
-    id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(default)]
-    enabled: bool,
-    addr: String,
-    port: u16,
-    display: String,
-    resolution: String,
-    depth: u16,
-    frame_rate: u16,
-    #[serde(default)]
-    view_only: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    password: Option<String>,
-}
-
-impl Default for VncSessionConfig {
-    fn default() -> Self {
-        VncSessionConfig {
-            id: String::new(),
-            name: None,
-            enabled: false,
-            addr: default_vnc_addr(),
-            port: default_vnc_port(),
-            display: default_vnc_display(),
-            resolution: default_vnc_resolution(),
-            depth: default_vnc_depth(),
-            frame_rate: default_vnc_frame_rate(),
-            view_only: false,
-            password: None,
         }
     }
 }
@@ -1050,8 +988,6 @@ struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     terminals: Vec<TerminalNodeConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    vnc_sessions: Vec<VncSessionConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     apps: Vec<AppConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     syncs: Vec<SyncConfig>,
@@ -1087,18 +1023,7 @@ struct Config {
 
 const DEFAULT_PORT: u16 = 6161;
 const DEFAULT_TERMINAL_PORT: u16 = 7681;
-const DEFAULT_VNC_PORT: u16 = 7900;
 const DEFAULT_DNS_ACTIVE: &str = "doh-cf";
-const KASMVNC_USER: &str = "user";
-const KASMVNC_HTTPD_DIR: &str = "/usr/share/kasmvnc/www";
-const KASMVNC_DEFAULTS_JS: &str = "/usr/share/kasmvnc/www/kasmvnc-defaults.js";
-const KASMVNC_BASE_HOME: &str = "/app/kasmvnc";
-const I3_CONFIG: &str = include_str!("../assets/i3/i3/config");
-const I3_LOCAL_CONF: &str = include_str!("../assets/i3/i3/local.conf");
-const I3_POLYBAR_LAUNCH: &str = include_str!("../assets/i3/polybar/launch.sh");
-const I3_POLYBAR_CONFIG: &str = include_str!("../assets/i3/polybar/config.ini");
-const I3_XRESOURCES: &str = include_str!("../assets/i3/xterm/Xresources");
-const I3_BACKGROUND_PNG: &[u8] = include_bytes!("../assets/i3/background.png");
 
 // JWT 密钥（生产环境应使用环境变量）
 const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
@@ -1660,14 +1585,6 @@ struct TerminalRuntimeStatus {
 }
 
 #[derive(Serialize, Clone)]
-struct VncRuntimeStatus {
-    running: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    uptime_secs: Option<u64>,
-}
-
 #[derive(Serialize, Clone)]
 struct AppRuntimeStatus {
     running: bool,
@@ -1702,21 +1619,6 @@ struct LogEntry {
 type TerminalLogEntry = LogEntry;
 
 #[derive(Serialize)]
-struct VncSessionItem {
-    id: String,
-    name: Option<String>,
-    enabled: bool,
-    addr: String,
-    port: u16,
-    display: String,
-    resolution: String,
-    depth: u16,
-    frame_rate: u16,
-    view_only: bool,
-    password: Option<String>,
-    status: VncRuntimeStatus,
-}
-
 #[derive(Serialize)]
 struct AppItem {
     id: String,
@@ -1733,11 +1635,6 @@ struct AppItem {
 #[derive(Serialize)]
 struct TerminalListResponse {
     items: Vec<TerminalItem>,
-}
-
-#[derive(Serialize)]
-struct VncSessionListResponse {
-    items: Vec<VncSessionItem>,
 }
 
 #[derive(Serialize)]
@@ -1769,32 +1666,6 @@ struct TerminalUpsertRequest {
     restart: bool,
     #[serde(default)]
     clear_auth: bool,
-}
-
-#[derive(Deserialize)]
-struct VncSessionUpsertRequest {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    addr: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    display: Option<String>,
-    #[serde(default)]
-    resolution: Option<String>,
-    #[serde(default)]
-    depth: Option<u16>,
-    #[serde(default)]
-    frame_rate: Option<u16>,
-    #[serde(default)]
-    view_only: Option<bool>,
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    restart: bool,
 }
 
 #[derive(Deserialize)]
@@ -2016,11 +1887,6 @@ struct GottyProcess {
     started_at: Instant,
 }
 
-struct VncProcess {
-    child: tokio::process::Child,
-    started_at: Instant,
-}
-
 struct AppProcess {
     child: tokio::process::Child,
     started_at: Instant,
@@ -2029,7 +1895,6 @@ struct AppProcess {
 lazy_static! {
     static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
     static ref GOTTY_PROCESSES: Mutex<HashMap<String, GottyProcess>> = Mutex::new(HashMap::new());
-    static ref VNC_PROCESSES: Mutex<HashMap<String, VncProcess>> = Mutex::new(HashMap::new());
     static ref APP_PROCESSES: Mutex<HashMap<String, AppProcess>> = Mutex::new(HashMap::new());
     static ref WS_CONNECT_ERROR_LOGS: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
     static ref LOG_BROADCAST: broadcast::Sender<String> = {
@@ -2037,11 +1902,6 @@ lazy_static! {
         tx
     };
     static ref LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
-    static ref VNC_LOG_BROADCAST: broadcast::Sender<String> = {
-        let (tx, _rx) = broadcast::channel(1000);
-        tx
-    };
-    static ref VNC_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
     static ref APP_LOG_BROADCAST: broadcast::Sender<String> = {
         let (tx, _rx) = broadcast::channel(1000);
         tx
@@ -2121,26 +1981,6 @@ fn broadcast_gotty_log(level: &str, message: &str) {
         }
     }
     let _ = GOTTY_LOG_BROADCAST.send(entry_str);
-}
-
-fn broadcast_vnc_log(level: &str, message: &str) {
-    use chrono::FixedOffset;
-    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
-    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
-    let entry = serde_json::json!({
-        "time": time_str,
-        "level": level,
-        "message": message
-    });
-    let entry_str = entry.to_string();
-    {
-        let mut buffer = VNC_LOG_BUFFER.lock().expect("log buffer lock poisoned");
-        buffer.push_back(entry_str.clone());
-        if buffer.len() > 1000 {
-            buffer.pop_front();
-        }
-    }
-    let _ = VNC_LOG_BROADCAST.send(entry_str);
 }
 
 fn broadcast_app_log(level: &str, message: &str) {
@@ -2300,45 +2140,6 @@ fn spawn_with_gotty_log_capture(
                 eprintln!("[{}] {}", name, line);
                 let _ = std::io::stderr().flush();
                 broadcast_gotty_log("error", &format!("[{}] {}", name, line));
-            }
-        });
-    }
-
-    Ok(child)
-}
-
-fn spawn_with_vnc_log_capture(
-    command: &mut tokio::process::Command,
-    process_name: String,
-) -> Result<tokio::process::Child, std::io::Error> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-
-    if let Some(stdout) = child.stdout.take() {
-        let name = process_name.clone();
-        tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                println!("[{}] {}", name, line);
-                let _ = std::io::stdout().flush();
-                broadcast_vnc_log("info", &format!("[{}] {}", name, line));
-            }
-        });
-    }
-
-    if let Some(stderr) = child.stderr.take() {
-        let name = process_name;
-        tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("[{}] {}", name, line);
-                let _ = std::io::stderr().flush();
-                broadcast_vnc_log("error", &format!("[{}] {}", name, line));
             }
         });
     }
@@ -3956,41 +3757,6 @@ async fn get_terminal_runtime_status(id: &str) -> TerminalRuntimeStatus {
     }
 }
 
-async fn get_vnc_runtime_status(id: &str) -> VncRuntimeStatus {
-    let mut lock = VNC_PROCESSES.lock().await;
-    if let Some(proc) = lock.get_mut(id) {
-        match proc.child.try_wait() {
-            Ok(Some(_)) => {
-                lock.remove(id);
-                VncRuntimeStatus {
-                    running: false,
-                    pid: None,
-                    uptime_secs: None,
-                }
-            }
-            Ok(None) => VncRuntimeStatus {
-                running: true,
-                pid: proc.child.id(),
-                uptime_secs: Some(proc.started_at.elapsed().as_secs()),
-            },
-            Err(_) => {
-                lock.remove(id);
-                VncRuntimeStatus {
-                    running: false,
-                    pid: None,
-                    uptime_secs: None,
-                }
-            }
-        }
-    } else {
-        VncRuntimeStatus {
-            running: false,
-            pid: None,
-            uptime_secs: None,
-        }
-    }
-}
-
 async fn get_app_runtime_status(id: &str) -> AppRuntimeStatus {
     let mut lock = APP_PROCESSES.lock().await;
     if let Some(proc) = lock.get_mut(id) {
@@ -4042,22 +3808,6 @@ fn build_terminal_item(cfg: TerminalNodeConfig, status: TerminalRuntimeStatus) -
     }
 }
 
-fn build_vnc_session_item(cfg: VncSessionConfig, status: VncRuntimeStatus) -> VncSessionItem {
-    VncSessionItem {
-        id: cfg.id,
-        name: cfg.name,
-        enabled: cfg.enabled,
-        addr: cfg.addr,
-        port: cfg.port,
-        display: cfg.display,
-        resolution: cfg.resolution,
-        depth: cfg.depth,
-        frame_rate: cfg.frame_rate,
-        view_only: cfg.view_only,
-        password: cfg.password,
-        status,
-    }
-}
 
 fn build_app_item(cfg: AppConfig, status: AppRuntimeStatus) -> AppItem {
     AppItem {
@@ -4204,21 +3954,6 @@ async fn get_ivnc_logs(Query(params): Query<HashMap<String, String>>) -> Result<
     Ok(Json(ApiResponse::success("日志", logs)))
 }
 
-async fn get_vnc_sessions(
-    State(state): State<Arc<AppState>>,
-) -> Json<ApiResponse<VncSessionListResponse>> {
-    let sessions = { state.config.lock().await.vnc_sessions.clone() };
-    let mut items = Vec::with_capacity(sessions.len());
-    for s in sessions {
-        let status = get_vnc_runtime_status(&s.id).await;
-        items.push(build_vnc_session_item(s, status));
-    }
-    Json(ApiResponse::success(
-        "VNC 会话列表",
-        VncSessionListResponse { items },
-    ))
-}
-
 async fn get_apps(State(state): State<Arc<AppState>>) -> Json<ApiResponse<AppListResponse>> {
     let apps = { state.config.lock().await.apps.clone() };
     let mut items = Vec::with_capacity(apps.len());
@@ -4238,278 +3973,6 @@ async fn get_app_templates_handler() -> Json<ApiResponse<AppTemplateListResponse
     ))
 }
 
-async fn create_vnc_session(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<VncSessionUpsertRequest>,
-) -> Result<Json<ApiResponse<VncSessionItem>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let id = generate_vnc_session_id();
-    let mut cfg = normalize_vnc_session_request(req, id.clone(), None)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
-
-    {
-        let mut config_guard = state.config.lock().await;
-        if let Some(err) = vnc_bind_conflict(&cfg.id, &cfg, &config_guard.vnc_sessions) {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
-        }
-        config_guard.vnc_sessions.push(cfg.clone());
-        if let Err(e) = save_config(&config_guard).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-    }
-
-    if cfg.enabled {
-        if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
-            let mut config_guard = state.config.lock().await;
-            if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == cfg.id) {
-                v.enabled = false;
-                cfg.enabled = false;
-            }
-            let _ = save_config(&config_guard).await;
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(format!("Failed to start: {}", e))),
-            ));
-        }
-    }
-
-    let status = get_vnc_runtime_status(&cfg.id).await;
-    Ok(Json(ApiResponse::success(
-        "VNC 会话已创建",
-        build_vnc_session_item(cfg, status),
-    )))
-}
-
-async fn update_vnc_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<VncSessionUpsertRequest>,
-) -> Result<Json<ApiResponse<VncSessionItem>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let existing = {
-        let config_guard = state.config.lock().await;
-        config_guard
-            .vnc_sessions
-            .iter()
-            .find(|v| v.id == id)
-            .cloned()
-    };
-    let Some(existing) = existing else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("VNC session not found")),
-        ));
-    };
-
-    let restart = req.restart;
-    let mut cfg = normalize_vnc_session_request(req, id.clone(), Some(&existing))
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))))?;
-
-    {
-        let mut config_guard = state.config.lock().await;
-        if let Some(err) = vnc_bind_conflict(&cfg.id, &cfg, &config_guard.vnc_sessions) {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
-        }
-        let Some(pos) = config_guard.vnc_sessions.iter().position(|v| v.id == id) else {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("VNC session not found")),
-            ));
-        };
-        config_guard.vnc_sessions[pos] = cfg.clone();
-        if let Err(e) = save_config(&config_guard).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-    }
-
-    let restart = restart && cfg.enabled;
-    if restart {
-        cfg.enabled = true;
-        {
-            let mut config_guard = state.config.lock().await;
-            if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) {
-                v.enabled = true;
-            }
-            let _ = save_config(&config_guard).await;
-        }
-        let _ = stop_vnc_internal(&cfg.id, &existing.display).await;
-        if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(format!("Failed to restart: {}", e))),
-            ));
-        }
-    } else {
-        let status = get_vnc_runtime_status(&cfg.id).await;
-        if cfg.enabled && !status.running {
-            if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error(format!("Failed to start: {}", e))),
-                ));
-            }
-        }
-        if !cfg.enabled && status.running {
-            let _ = stop_vnc_internal(&cfg.id, &existing.display).await;
-        }
-    }
-
-    let status = get_vnc_runtime_status(&cfg.id).await;
-    Ok(Json(ApiResponse::success(
-        "VNC 会话已更新",
-        build_vnc_session_item(cfg, status),
-    )))
-}
-
-async fn delete_vnc_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let display = {
-        let mut config_guard = state.config.lock().await;
-        if config_guard
-            .apps
-            .iter()
-            .any(|app| app.vnc_session_id.as_deref() == Some(id.as_str()))
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "VNC 会话已绑定应用，无法删除",
-                )),
-            ));
-        }
-        let mut display = None;
-        let before = config_guard.vnc_sessions.len();
-        if let Some(pos) = config_guard.vnc_sessions.iter().position(|v| v.id == id) {
-            display = Some(config_guard.vnc_sessions[pos].display.clone());
-            config_guard.vnc_sessions.remove(pos);
-        }
-        if config_guard.vnc_sessions.len() == before {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("VNC session not found")),
-            ));
-        }
-        if let Err(e) = save_config(&config_guard).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-        display.unwrap_or_else(default_vnc_display)
-    };
-    let _ = stop_vnc_internal(&id, &display).await;
-    Ok(Json(ApiResponse::success_no_data("VNC 会话已删除")))
-}
-
-async fn start_vnc_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let cfg = {
-        let config_guard = state.config.lock().await;
-        let Some(v) = config_guard.vnc_sessions.iter().find(|v| v.id == id) else {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("VNC session not found")),
-            ));
-        };
-        if let Some(err) = vnc_bind_conflict(&id, v, &config_guard.vnc_sessions) {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
-        }
-        v.clone()
-    };
-    if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!("Failed to start: {}", e))),
-        ));
-    }
-    {
-        let mut config_guard = state.config.lock().await;
-        if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) {
-            v.enabled = true;
-            if let Err(e) = save_config(&config_guard).await {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-                ));
-            }
-        }
-    }
-    Ok(Json(ApiResponse::success_no_data("VNC 会话已启动")))
-}
-
-async fn stop_vnc_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let display = {
-        let mut config_guard = state.config.lock().await;
-        let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) else {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("VNC session not found")),
-            ));
-        };
-        v.enabled = false;
-        let display = v.display.clone();
-        if let Err(e) = save_config(&config_guard).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-            ));
-        }
-        display
-    };
-    let _ = stop_vnc_internal(&id, &display).await;
-    Ok(Json(ApiResponse::success_no_data("VNC 会话已停止")))
-}
-
-async fn restart_vnc_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let (cfg, display) = {
-        let config_guard = state.config.lock().await;
-        let Some(v) = config_guard.vnc_sessions.iter().find(|v| v.id == id) else {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("VNC session not found")),
-            ));
-        };
-        if let Some(err) = vnc_bind_conflict(&id, v, &config_guard.vnc_sessions) {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
-        }
-        (v.clone(), v.display.clone())
-    };
-    let _ = stop_vnc_internal(&id, &display).await;
-    if let Err(e) = start_vnc_internal(&cfg.id, &cfg).await {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
-        ));
-    }
-    {
-        let mut config_guard = state.config.lock().await;
-        if let Some(v) = config_guard.vnc_sessions.iter_mut().find(|v| v.id == id) {
-            v.enabled = true;
-            if let Err(e) = save_config(&config_guard).await {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::error(format!("Failed to save config: {}", e))),
-                ));
-            }
-        }
-    }
-    Ok(Json(ApiResponse::success_no_data("VNC 会话已重启")))
-}
-
 async fn create_app(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AppUpsertRequest>,
@@ -4520,17 +3983,6 @@ async fn create_app(
 
     {
         let mut config_guard = state.config.lock().await;
-        if let Some(vnc_id) = &cfg.vnc_session_id {
-            if !config_guard.vnc_sessions.iter().any(|v| v.id == *vnc_id) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error("VNC 会话不存在")),
-                ));
-            }
-            if let Some(err) = app_vnc_conflict(&cfg.id, vnc_id, &config_guard.apps) {
-                return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
-            }
-        }
         config_guard.apps.push(cfg.clone());
         if let Err(e) = save_config(&config_guard).await {
             return Err((
@@ -4582,17 +4034,6 @@ async fn update_app(
 
     {
         let mut config_guard = state.config.lock().await;
-        if let Some(vnc_id) = &cfg.vnc_session_id {
-            if !config_guard.vnc_sessions.iter().any(|v| v.id == *vnc_id) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error("VNC 会话不存在")),
-                ));
-            }
-            if let Some(err) = app_vnc_conflict(&cfg.id, vnc_id, &config_guard.apps) {
-                return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(err))));
-            }
-        }
         let Some(pos) = config_guard.apps.iter().position(|a| a.id == id) else {
             return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("App not found"))));
         };
@@ -4890,93 +4331,6 @@ fn normalize_terminal_request(
     }
     if cfg.port == 0 {
         return Err("terminal port is required".to_string());
-    }
-
-    Ok(cfg)
-}
-
-fn normalize_vnc_session_request(
-    req: VncSessionUpsertRequest,
-    id: String,
-    existing: Option<&VncSessionConfig>,
-) -> Result<VncSessionConfig, String> {
-    let mut cfg = existing.cloned().unwrap_or_else(|| {
-        let mut v = VncSessionConfig::default();
-        v.id = id.clone();
-        v
-    });
-    cfg.id = id;
-
-    if let Some(name) = req.name {
-        let trimmed = name.trim();
-        cfg.name = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-    if let Some(enabled) = req.enabled {
-        cfg.enabled = enabled;
-    }
-    if let Some(addr) = req.addr {
-        let trimmed = addr.trim();
-        cfg.addr = if trimmed.is_empty() {
-            default_vnc_addr()
-        } else {
-            trimmed.to_string()
-        };
-    }
-    if let Some(port) = req.port {
-        if port == 0 {
-            return Err("VNC 端口不能为空".to_string());
-        }
-        cfg.port = port;
-    }
-    if let Some(display) = req.display {
-        let trimmed = display.trim();
-        if trimmed.is_empty() {
-            return Err("VNC DISPLAY 不能为空".to_string());
-        }
-        cfg.display = normalize_display_value(trimmed);
-    } else {
-        cfg.display = normalize_display_value(&cfg.display);
-    }
-    if let Some(resolution) = req.resolution {
-        let trimmed = resolution.trim();
-        cfg.resolution = if trimmed.is_empty() {
-            default_vnc_resolution()
-        } else {
-            trimmed.to_string()
-        };
-    }
-    if let Some(depth) = req.depth {
-        if depth == 0 {
-            return Err("VNC 色深必须大于 0".to_string());
-        }
-        cfg.depth = depth;
-    }
-    if let Some(frame_rate) = req.frame_rate {
-        if frame_rate == 0 {
-            return Err("VNC 帧率必须大于 0".to_string());
-        }
-        cfg.frame_rate = frame_rate;
-    }
-    if let Some(view_only) = req.view_only {
-        cfg.view_only = view_only;
-    }
-    if let Some(password) = req.password {
-        let trimmed = password.trim().to_string();
-        cfg.password = if trimmed.is_empty() { None } else { Some(trimmed) };
-    }
-
-    if cfg.port == 0 {
-        return Err("VNC 端口不能为空".to_string());
-    }
-    if cfg.display.trim().is_empty() {
-        return Err("VNC DISPLAY 不能为空".to_string());
-    }
-    if cfg.resolution.trim().is_empty() {
-        return Err("VNC 分辨率不能为空".to_string());
     }
 
     Ok(cfg)
@@ -7609,10 +6963,6 @@ fn generate_terminal_id() -> String {
     format!("term-{}", uuid::Uuid::new_v4())
 }
 
-fn generate_vnc_session_id() -> String {
-    format!("vnc-{}", uuid::Uuid::new_v4())
-}
-
 fn generate_app_id() -> String {
     format!("app-{}", uuid::Uuid::new_v4())
 }
@@ -7672,55 +7022,6 @@ fn terminal_bind_conflict(
         if conflicts {
             let name = t.name.clone().unwrap_or_else(|| t.id.clone());
             return Some(format!("terminal port already in use by {}", name));
-        }
-    }
-    None
-}
-
-fn vnc_bind_conflict(
-    id: &str,
-    cfg: &VncSessionConfig,
-    sessions: &[VncSessionConfig],
-) -> Option<String> {
-    let addr = if cfg.addr.trim().is_empty() {
-        "0.0.0.0"
-    } else {
-        cfg.addr.as_str()
-    };
-    let port = cfg.port;
-    let display = normalize_display_value(&cfg.display);
-    for s in sessions {
-        if s.id == id {
-            continue;
-        }
-        if s.port == port {
-            let other_addr = if s.addr.trim().is_empty() {
-                "0.0.0.0"
-            } else {
-                s.addr.as_str()
-            };
-            let conflicts = addr == other_addr || addr == "0.0.0.0" || other_addr == "0.0.0.0";
-            if conflicts {
-                let name = s.name.clone().unwrap_or_else(|| s.id.clone());
-            return Some(format!("VNC 端口已被 {} 使用", name));
-            }
-        }
-        if normalize_display_value(&s.display) == display {
-            let name = s.name.clone().unwrap_or_else(|| s.id.clone());
-            return Some(format!("VNC DISPLAY 已被 {} 使用", name));
-        }
-    }
-    None
-}
-
-fn app_vnc_conflict(id: &str, vnc_session_id: &str, apps: &[AppConfig]) -> Option<String> {
-    for app in apps {
-        if app.id == id {
-            continue;
-        }
-        if app.vnc_session_id.as_deref() == Some(vnc_session_id) {
-            let name = app.name.clone().unwrap_or_else(|| app.id.clone());
-            return Some(format!("VNC 会话已绑定应用 {}", name));
         }
     }
     None
@@ -9464,43 +8765,6 @@ async fn get_sing_box_logs(
     Json(ApiResponse::success("Logs retrieved", logs))
 }
 
-async fn get_vnc_logs(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(q): Query<VncLogsQuery>,
-) -> Result<Json<ApiResponse<Vec<LogEntry>>>, (StatusCode, Json<ApiResponse<()>>)> {
-    {
-        let config = state.config.lock().await;
-        if !config.vnc_sessions.iter().any(|s| s.id == id) {
-            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("VNC session not found"))));
-        }
-    }
-
-    let tag = format!("[vnc-{}]", id);
-    let mut logs: Vec<LogEntry> = {
-        let buffer = VNC_LOG_BUFFER.lock().expect("log buffer lock poisoned");
-        buffer
-            .iter()
-            .filter_map(|msg| serde_json::from_str::<LogEntry>(msg).ok())
-            .filter(|entry| entry.message.contains(&tag))
-            .map(|mut entry| {
-                if let Some(stripped) = entry.message.strip_prefix(&tag) {
-                    entry.message = stripped.trim_start().to_string();
-                }
-                entry
-            })
-            .collect()
-    };
-
-    if let Some(limit) = q.limit {
-        if logs.len() > limit {
-            logs = logs.split_off(logs.len() - limit);
-        }
-    }
-
-    Ok(Json(ApiResponse::success("Logs retrieved", logs)))
-}
-
 async fn get_app_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -9626,24 +8890,6 @@ async fn sing_box_ws_logs(
     Ok(ws.on_upgrade(handle_sing_box_logs_websocket))
 }
 
-async fn vnc_ws_logs(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(q): Query<WsAuthQuery>,
-    ws: WebSocketUpgrade,
-) -> Result<Response, StatusCode> {
-    if verify_token(&q.token).is_err() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    {
-        let config = state.config.lock().await;
-        if !config.vnc_sessions.iter().any(|s| s.id == id) {
-            return Err(StatusCode::NOT_FOUND);
-        }
-    }
-    Ok(ws.on_upgrade(move |socket| handle_vnc_logs_websocket(socket, id)))
-}
-
 async fn app_ws_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -9722,77 +8968,6 @@ async fn handle_sing_box_logs_websocket(mut socket: WebSocket) {
                 match result {
                     Ok(msg) => {
                         if socket.send(Message::Text(msg.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        let warning = serde_json::json!({
-                            "time": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                            "level": "warning",
-                            "message": format!("Dropped {} log messages", n)
-                        });
-                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = socket.send(Message::Pong(data)).await;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-async fn handle_vnc_logs_websocket(mut socket: WebSocket, vnc_id: String) {
-    let mut rx = VNC_LOG_BROADCAST.subscribe();
-    let tag = format!("[vnc-{}]", vnc_id);
-
-    let history: Vec<String> = {
-        let buffer = VNC_LOG_BUFFER.lock().expect("log buffer lock poisoned");
-        buffer.iter().cloned().collect()
-    };
-    for msg in history {
-        let mut entry = match serde_json::from_str::<LogEntry>(&msg) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        if !entry.message.contains(&tag) {
-            continue;
-        }
-        if let Some(stripped) = entry.message.strip_prefix(&tag) {
-            entry.message = stripped.trim_start().to_string();
-        }
-        let payload = serde_json::to_string(&entry).unwrap_or_default();
-        if socket.send(Message::Text(payload.into())).await.is_err() {
-            return;
-        }
-    }
-
-    loop {
-        tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Ok(msg) => {
-                        let mut entry = match serde_json::from_str::<LogEntry>(&msg) {
-                            Ok(entry) => entry,
-                            Err(_) => continue,
-                        };
-                        if !entry.message.contains(&tag) {
-                            continue;
-                        }
-                        if let Some(stripped) = entry.message.strip_prefix(&tag) {
-                            entry.message = stripped.trim_start().to_string();
-                        }
-                        let payload = serde_json::to_string(&entry).unwrap_or_default();
-                        if socket.send(Message::Text(payload.into())).await.is_err() {
                             break;
                         }
                     }
@@ -10876,263 +10051,6 @@ fn binary_exists(cmd: &str) -> bool {
     false
 }
 
-fn i3_available() -> bool {
-    binary_exists("i3")
-}
-
-fn ensure_vnc_dependencies() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if !binary_exists("vncserver") {
-        return Err("vncserver not found in PATH".into());
-    }
-    if !binary_exists("vncpasswd") {
-        return Err("vncpasswd not found in PATH".into());
-    }
-    if !i3_available() {
-        return Err("i3 not found in PATH".into());
-    }
-    if !PathBuf::from(KASMVNC_HTTPD_DIR).exists() {
-        return Err(format!("kasmvnc httpd dir not found: {}", KASMVNC_HTTPD_DIR).into());
-    }
-    Ok(())
-}
-
-fn ensure_kasmvnc_web_defaults() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if !PathBuf::from(KASMVNC_DEFAULTS_JS).exists() {
-        let defaults_js = r#"(function() {
-  var defaults = {
-    'enable_ime': true,
-    'resize': 'remote'
-  };
-  for (var key in defaults) {
-    if (localStorage.getItem(key) === null) {
-      localStorage.setItem(key, JSON.stringify(defaults[key]));
-    }
-  }
-})();
-"#;
-        if let Err(e) = fs::write(KASMVNC_DEFAULTS_JS, defaults_js) {
-            log_error!("Failed to write kasmvnc defaults js: {}", e);
-            return Ok(());
-        }
-        let vnc_html_path = PathBuf::from(KASMVNC_HTTPD_DIR).join("vnc.html");
-        if let Ok(contents) = fs::read_to_string(&vnc_html_path) {
-            if !contents.contains("kasmvnc-defaults.js") {
-                let updated = contents.replace(
-                    "</head>",
-                    "<script src=\"./kasmvnc-defaults.js\"></script></head>",
-                );
-                if let Err(e) = fs::write(&vnc_html_path, updated) {
-                    log_error!("Failed to inject kasmvnc defaults js: {}", e);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn ensure_i3_assets(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let i3_assets_dir = home_dir.join(".config").join("miao");
-    let i3_config_dir = i3_assets_dir.join("i3");
-    let i3_polybar_dir = i3_assets_dir.join("polybar");
-    let i3_xterm_dir = i3_assets_dir.join("xterm");
-
-    fs::create_dir_all(&i3_config_dir)?;
-    fs::create_dir_all(&i3_polybar_dir)?;
-    fs::create_dir_all(&i3_xterm_dir)?;
-
-    fs::write(i3_config_dir.join("local.conf"), I3_LOCAL_CONF)?;
-    fs::write(i3_polybar_dir.join("config.ini"), I3_POLYBAR_CONFIG)?;
-    let launch_path = i3_polybar_dir.join("launch.sh");
-    fs::write(&launch_path, I3_POLYBAR_LAUNCH)?;
-    fs::set_permissions(&launch_path, fs::Permissions::from_mode(0o755))?;
-    fs::write(i3_xterm_dir.join("Xresources"), I3_XRESOURCES)?;
-    fs::write(i3_assets_dir.join("background.png"), I3_BACKGROUND_PNG)?;
-    Ok(())
-}
-
-fn ensure_vnc_xstartup(home_dir: &StdPath) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let vnc_dir = home_dir.join(".vnc");
-    fs::create_dir_all(&vnc_dir)?;
-
-    ensure_i3_assets(home_dir)?;
-
-    // Write i3 config for VNC environment
-    let i3_dir = home_dir.join(".config").join("i3");
-    fs::create_dir_all(&i3_dir)?;
-    let i3_config_path = i3_dir.join("config");
-    fs::write(&i3_config_path, I3_CONFIG)?;
-    log_info!("Wrote i3 config at {:?}", i3_config_path);
-
-    let xstartup_path = vnc_dir.join("xstartup");
-    let i3_config_str = i3_config_path.to_string_lossy();
-    let contents = format!(
-        r#"#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-
-if command -v i3 >/dev/null 2>&1; then
-  exec i3 -c "{}"
-fi
-
-exec /bin/sh
-"#,
-        i3_config_str
-    );
-    fs::write(&xstartup_path, contents)?;
-    fs::set_permissions(&xstartup_path, fs::Permissions::from_mode(0o755))?;
-    log_info!("Created VNC xstartup at {:?}", xstartup_path);
-    Ok(())
-}
-
-async fn start_vnc_internal(
-    id: &str,
-    config: &VncSessionConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut lock = VNC_PROCESSES.lock().await;
-    if let Some(proc) = lock.get_mut(id) {
-        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
-            return Err("vnc already running".into());
-        }
-        lock.remove(id);
-    }
-
-    ensure_vnc_dependencies()?;
-    ensure_kasmvnc_web_defaults()?;
-
-    let display = normalize_display_value(&config.display);
-    let home_dir = PathBuf::from(KASMVNC_BASE_HOME).join(id);
-    let vnc_dir = home_dir.join(".vnc");
-    fs::create_dir_all(&vnc_dir)?;
-    fs::write(vnc_dir.join(".de-was-selected"), "")?;
-    ensure_vnc_xstartup(&home_dir)?;
-
-    let kasmvnc_yaml = r#"logging:
-  log_writer_name: all
-  log_dest: logfile
-  level: 100
-
-network:
-  udp:
-    public_ip: 127.0.0.1
-  ssl:
-    require_ssl: false
-"#;
-    fs::write(vnc_dir.join("kasmvnc.yaml"), kasmvnc_yaml)?;
-
-    let password = config
-        .password
-        .clone()
-        .unwrap_or_else(|| "kasmvnc".to_string());
-    let password = if password.trim().is_empty() {
-        "kasmvnc".to_string()
-    } else {
-        password
-    };
-
-    let mut pass_cmd = tokio::process::Command::new("vncpasswd");
-    pass_cmd.arg("-u").arg(KASMVNC_USER);
-    if !config.view_only {
-        pass_cmd.arg("-w");
-    }
-    pass_cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .env("HOME", &home_dir);
-    let mut child = pass_cmd.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(format!("{}\n{}\n\n", password, password).as_bytes())
-            .await?;
-    }
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err("vncpasswd failed".into());
-    }
-
-    let _ = tokio::process::Command::new("vncserver")
-        .arg("-kill")
-        .arg(&display)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    let mut command = tokio::process::Command::new("vncserver");
-    command
-        .arg(&display)
-        .arg("-fg")
-        .arg("-ac")
-        .arg("-depth")
-        .arg(config.depth.to_string())
-        .arg("-geometry")
-        .arg(&config.resolution)
-        .arg("-websocketPort")
-        .arg(config.port.to_string())
-        .arg(format!("-FrameRate={}", config.frame_rate))
-        .arg("-interface")
-        .arg(&config.addr)
-        .arg("-httpd")
-        .arg(KASMVNC_HTTPD_DIR)
-        .env("HOME", &home_dir)
-        .current_dir(&home_dir);
-
-    let mut child = spawn_with_vnc_log_capture(&mut command, format!("vnc-{}", id))?;
-    let pid = child.id();
-    log_info!("VNC process spawned with PID: {:?}", pid);
-
-    sleep(Duration::from_millis(500)).await;
-    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
-        let code = exit_status.code().unwrap_or(-1);
-        return Err(format!("VNC exited immediately with code {}", code).into());
-    }
-
-    lock.insert(
-        id.to_string(),
-        VncProcess {
-            child,
-            started_at: Instant::now(),
-        },
-    );
-    Ok(())
-}
-
-async fn stop_vnc_internal(id: &str, display: &str) -> Result<(), String> {
-    let display = normalize_display_value(display);
-    // Use the same HOME as start to ensure vncserver can find its pid files.
-    let home_dir = PathBuf::from(KASMVNC_BASE_HOME).join(id);
-    let _ = tokio::process::Command::new("vncserver")
-        .arg("-kill")
-        .arg(&display)
-        .env("HOME", &home_dir)
-        .current_dir(&home_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    let mut lock = VNC_PROCESSES.lock().await;
-    let Some(proc) = lock.get_mut(id) else {
-        return Ok(());
-    };
-    if proc.child.try_wait().ok().flatten().is_none() {
-        if let Some(pid) = proc.child.id() {
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-            for _ in 0..30 {
-                sleep(Duration::from_millis(100)).await;
-                if proc.child.try_wait().ok().flatten().is_some() {
-                    break;
-                }
-            }
-            if proc.child.try_wait().ok().flatten().is_none() {
-                proc.child.start_kill().ok();
-            }
-        }
-    }
-    lock.remove(id);
-    Ok(())
-}
-
 async fn start_app_internal(
     app: &AppConfig,
     config: &Config,
@@ -11146,30 +10064,7 @@ async fn start_app_internal(
     }
     drop(lock);
 
-    let mut display = app.display.clone();
-    let mut bound_vnc_id: Option<String> = None;
-    if let Some(vnc_id) = &app.vnc_session_id {
-        let vnc = config
-            .vnc_sessions
-            .iter()
-            .find(|v| v.id == *vnc_id)
-            .cloned()
-            .ok_or_else(|| format!("VNC 会话不存在: {}", vnc_id))?;
-        if let Some(err) = app_vnc_conflict(&app.id, vnc_id, &config.apps) {
-            return Err(err.into());
-        }
-        display = Some(vnc.display.clone());
-        bound_vnc_id = Some(vnc.id.clone());
-        let vnc_status = get_vnc_runtime_status(&vnc.id).await;
-        if !vnc_status.running {
-            if let Some(err) = vnc_bind_conflict(&vnc.id, &vnc, &config.vnc_sessions) {
-                return Err(err.into());
-            }
-            start_vnc_internal(&vnc.id, &vnc).await?;
-        }
-    }
-
-    let display = display.ok_or_else(|| "未绑定 VNC 时必须填写 DISPLAY".to_string())?;
+    let display = app.display.clone().ok_or_else(|| "应用必须指定 DISPLAY".to_string())?;
     let display = normalize_display_value(&display);
 
     if app.command.trim().is_empty() {
@@ -11184,7 +10079,7 @@ async fn start_app_internal(
 
     // Set XAUTHORITY from the VNC session's home directory if bound
     if let Some(ref vid) = bound_vnc_id {
-        let xauth_path = PathBuf::from(KASMVNC_BASE_HOME)
+        let xauth_path = PathBuf::from("/tmp/vnc")
             .join(vid)
             .join(".Xauthority");
         if xauth_path.exists() {
@@ -12047,7 +10942,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 password: None,
                 terminal: None,
                 terminals: vec![],
-                vnc_sessions: vec![],
                 apps: vec![],
                 syncs: vec![],
                 selections: HashMap::new(),
@@ -12248,12 +11142,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/terminals/{id}/stop", post(stop_terminal))
         .route("/api/terminals/{id}/restart", post(restart_terminal))
         .route("/api/gotty/upgrade", post(upgrade_gotty))
-        .route("/api/vnc-sessions", get(get_vnc_sessions))
-        .route("/api/vnc-sessions", post(create_vnc_session))
-        .route("/api/vnc-sessions/{id}", put(update_vnc_session).delete(delete_vnc_session))
-        .route("/api/vnc-sessions/{id}/start", post(start_vnc_session))
-        .route("/api/vnc-sessions/{id}/stop", post(stop_vnc_session))
-        .route("/api/vnc-sessions/{id}/restart", post(restart_vnc_session))
         // iVnc routes
         .route("/api/ivnc/install", post(install_ivnc))
         .route("/api/ivnc/status", get(get_ivnc_status))
@@ -12331,8 +11219,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}/ws/logs", get(sync_ws_logs))
         .route("/api/sing-box/logs", get(get_sing_box_logs))
         .route("/api/sing-box/ws/logs", get(sing_box_ws_logs))
-        .route("/api/vnc-sessions/{id}/logs", get(get_vnc_logs))
-        .route("/api/vnc-sessions/{id}/ws/logs", get(vnc_ws_logs))
         .route("/api/apps/{id}/logs", get(get_app_logs))
         .route("/api/apps/{id}/ws/logs", get(app_ws_logs))
         .route("/api/terminals/{id}/logs", get(get_terminal_logs))

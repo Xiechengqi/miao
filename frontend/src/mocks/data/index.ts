@@ -7,7 +7,6 @@ export { mockManualNodes } from "./manualNodes";
 export { mockSyncs } from "./syncs";
 export { mockTcpTunnels } from "./tunnels";
 export { mockTerminals } from "./terminals";
-export { mockVncSessions } from "./vnc";
 export { mockApps } from "./apps";
 export { mockAppTemplates } from "./appTemplates";
 export { mockLogs } from "./logs";

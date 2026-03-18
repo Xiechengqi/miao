@@ -11,7 +11,6 @@ import {
   TerminalLogEntry,
   TcpTunnel,
   Terminal,
-  VncSession,
   App,
   AppTemplate,
   VersionInfo,
@@ -460,15 +459,6 @@ class ApiClient {
     return res.data;
   }
 
-  async getVncLogs(id: string, limit?: number): Promise<LogEntry[]> {
-    const params = new URLSearchParams();
-    if (limit) params.set("limit", limit.toString());
-    const res = await this.fetch<{ data: LogEntry[] }>(
-      `/api/vnc-sessions/${id}/logs?${params.toString()}`
-    );
-    return res.data;
-  }
-
   async getAppLogs(id: string, limit?: number): Promise<LogEntry[]> {
     const params = new URLSearchParams();
     if (limit) params.set("limit", limit.toString());
@@ -866,51 +856,6 @@ class ApiClient {
     });
   }
 
-  // VNC
-  async getVncSessions(): Promise<VncSession[]> {
-    const res = await this.fetch<{ data: { items: VncSession[] } }>("/api/vnc-sessions");
-    return res.data.items;
-  }
-
-  async createVncSession(config: Record<string, unknown>): Promise<VncSession> {
-    const res = await this.fetch<{ data: VncSession }>("/api/vnc-sessions", {
-      method: "POST",
-      body: JSON.stringify(config),
-    });
-    return res.data;
-  }
-
-  async updateVncSession(id: string, config: Partial<VncSession>): Promise<void> {
-    await this.fetch(`/api/vnc-sessions/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(config),
-    });
-  }
-
-  async deleteVncSession(id: string): Promise<void> {
-    await this.fetch(`/api/vnc-sessions/${id}`, {
-      method: "DELETE",
-    });
-  }
-
-  async startVncSession(id: string): Promise<void> {
-    await this.fetch(`/api/vnc-sessions/${id}/start`, {
-      method: "POST",
-    });
-  }
-
-  async stopVncSession(id: string): Promise<void> {
-    await this.fetch(`/api/vnc-sessions/${id}/stop`, {
-      method: "POST",
-    });
-  }
-
-  async restartVncSession(id: string): Promise<void> {
-    await this.fetch(`/api/vnc-sessions/${id}/restart`, {
-      method: "POST",
-    });
-  }
-
   // Apps
   async getApps(): Promise<App[]> {
     const res = await this.fetch<{ data: { items: App[] } }>("/api/apps");
@@ -1115,15 +1060,6 @@ export function getSingBoxLogsWsUrl(): string {
   }
   const wsBase = getWsBase();
   return `${wsBase}/api/sing-box/ws/logs?token=${token}`;
-}
-
-export function getVncLogsWsUrl(id: string): string {
-  const token = localStorage.getItem("miao_token");
-  if (!token) {
-    throw new Error("No authentication token found. Please login first.");
-  }
-  const wsBase = getWsBase();
-  return `${wsBase}/api/vnc-sessions/${id}/ws/logs?token=${token}`;
 }
 
 export function getAppLogsWsUrl(id: string): string {

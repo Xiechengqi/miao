@@ -12,7 +12,6 @@ import {
   mockSyncs,
   mockTcpTunnels,
   mockTerminals,
-  mockVncSessions,
   mockApps,
   mockAppTemplates,
   mockLogs,
@@ -33,7 +32,6 @@ let mockState = {
   syncs: [...mockSyncs],
   tunnels: [...mockTcpTunnels],
   terminals: [...mockTerminals],
-  vncSessions: [...mockVncSessions],
   apps: [...mockApps],
   manualNodes: [...mockManualNodes],
 };
@@ -268,23 +266,6 @@ const handlers: Record<string, Record<HttpMethod, (req: NextRequest, pathParts: 
     DELETE: () => errorResponse("Method not allowed", 405),
   },
 
-  // VNC Sessions
-  "vnc-sessions": {
-    GET: () => successResponse(mockState.vncSessions),
-    POST: async (req) => {
-      const body = await req.json();
-      const newSession = {
-        ...body,
-        id: String(Date.now()),
-        status: { running: true as const, pid: 1234, uptime_secs: 0 },
-      };
-      mockState.vncSessions.push(newSession);
-      return successResponse(newSession);
-    },
-    PUT: () => errorResponse("Method not allowed", 405),
-    DELETE: () => errorResponse("Method not allowed", 405),
-  },
-
   // Apps
   "apps": {
     GET: () => successResponse(mockState.apps),
@@ -488,44 +469,6 @@ function handleDynamicRoute(
     }
   }
 
-  // Handle vnc-sessions/:id routes
-  if (pathParts[0] === "vnc-sessions" && pathParts.length >= 2) {
-    const id = pathParts[1];
-    const action = pathParts[2];
-
-    if (method === "PUT" && !action) {
-      const sessionIndex = mockState.vncSessions.findIndex((s) => s.id === id);
-      if (sessionIndex === -1) return errorResponse("VNC session not found", 404);
-      return req.json().then((body) => {
-        mockState.vncSessions[sessionIndex] = { ...mockState.vncSessions[sessionIndex], ...body };
-        return successResponse({});
-      });
-    }
-    if (method === "DELETE" && !action) {
-      const sessionIndex = mockState.vncSessions.findIndex((s) => s.id === id);
-      if (sessionIndex === -1) return errorResponse("VNC session not found", 404);
-      mockState.vncSessions.splice(sessionIndex, 1);
-      return successResponse({});
-    }
-    if (method === "POST" && action === "start") {
-      const sessionIndex = mockState.vncSessions.findIndex((s) => s.id === id);
-      if (sessionIndex === -1) return errorResponse("VNC session not found", 404);
-      mockState.vncSessions[sessionIndex].status = { running: true, pid: 3333, uptime_secs: 0 };
-      return successResponse({});
-    }
-    if (method === "POST" && action === "stop") {
-      const sessionIndex = mockState.vncSessions.findIndex((s) => s.id === id);
-      if (sessionIndex === -1) return errorResponse("VNC session not found", 404);
-      mockState.vncSessions[sessionIndex].status = { running: false };
-      return successResponse({});
-    }
-    if (method === "POST" && action === "restart") {
-      const sessionIndex = mockState.vncSessions.findIndex((s) => s.id === id);
-      if (sessionIndex === -1) return errorResponse("VNC session not found", 404);
-      mockState.vncSessions[sessionIndex].status = { running: true, pid: 4444, uptime_secs: 0 };
-      return successResponse({});
-    }
-  }
 
   // Handle apps/:id routes
   if (pathParts[0] === "apps" && pathParts.length >= 2) {
