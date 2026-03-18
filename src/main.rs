@@ -3867,11 +3867,22 @@ async fn start_ivnc(State(state): State<Arc<AppState>>) -> Result<Json<ApiRespon
     generate_ivnc_config(&config)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    let log_path = get_ivnc_log_path();
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("创建日志目录失败: {}", e)))?;
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("打开日志文件失败: {}", e)))?;
+
     let child = tokio::process::Command::new(get_ivnc_binary_path())
         .arg("-c")
         .arg(get_ivnc_config_path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(log_file.try_clone().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("克隆文件句柄失败: {}", e)))?)
+        .stderr(log_file)
         .spawn()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("启动失败: {}", e)))?;
 
