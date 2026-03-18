@@ -9,6 +9,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
@@ -545,8 +546,6 @@ impl Default for MetricsConfig {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum SubscriptionSource {
     Url { url: String },
-    Git { repo: String },
-    Path { path: String },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1026,7 +1025,7 @@ const DEFAULT_DNS_ACTIVE: &str = "doh-cf";
 
 // JWT 密钥（生产环境应使用环境变量）
 const JWT_SECRET: &str = "miao_jwt_secret_key_change_in_production";
-const SUBSCRIPTIONS_ENABLED: bool = false;
+const SUBSCRIPTIONS_ENABLED: bool = true;
 
 // JWT Claims 结构
 #[derive(Debug, Serialize, Deserialize)]
@@ -1763,11 +1762,9 @@ struct SubscriptionSaveResponse {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(untagged)]
 enum SubscriptionSourceInput {
     Url { url: String },
-    Git { repo: String },
-    Path { path: String },
 }
 
 #[derive(Deserialize)]
@@ -6064,11 +6061,6 @@ fn build_subscription_source_response(
 ) -> SubscriptionSourceResponse {
     match &sub.source {
         SubscriptionSource::Url { url } => SubscriptionSourceResponse::Url { url: url.clone() },
-        SubscriptionSource::Git { repo } => SubscriptionSourceResponse::Git {
-            repo: repo.clone(),
-            workdir: root.join(&sub.id).display().to_string(),
-        },
-        SubscriptionSource::Path { path } => SubscriptionSourceResponse::Path { path: path.clone() },
     }
 }
 
@@ -6103,26 +6095,10 @@ fn validate_subscription_source(input: &SubscriptionSourceInput) -> Result<Subsc
     match input {
         SubscriptionSourceInput::Url { url } => {
             let trimmed = url.trim();
-            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-                Ok(SubscriptionSource::Url { url: trimmed.to_string() })
-            } else {
-                Err("Subscription URL must start with http:// or https://".to_string())
-            }
-        }
-        SubscriptionSourceInput::Git { repo } => {
-            let trimmed = repo.trim();
-            if looks_like_git_url(trimmed) {
-                Ok(SubscriptionSource::Git { repo: trimmed.to_string() })
-            } else {
-                Err("Git repository URL must be https://, ssh://, or git@".to_string())
-            }
-        }
-        SubscriptionSourceInput::Path { path } => {
-            let trimmed = path.trim();
             if trimmed.is_empty() {
-                Err("Subscription path is required".to_string())
+                Err("订阅内容不能为空".to_string())
             } else {
-                Ok(SubscriptionSource::Path { path: trimmed.to_string() })
+                Ok(SubscriptionSource::Url { url: trimmed.to_string() })
             }
         }
     }
@@ -6179,6 +6155,7 @@ async fn create_subscription(
     }
 
     if let Err(e) = regenerate_and_restart(state.clone()).await {
+        eprintln!("❌ Failed to regenerate and restart: {}", e);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(e)),
@@ -6235,6 +6212,7 @@ async fn update_subscription(
     };
 
     if let Err(e) = regenerate_and_restart(state.clone()).await {
+        eprintln!("❌ Failed to regenerate and restart: {}", e);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(e)),
@@ -6274,11 +6252,12 @@ async fn delete_subscription(
         removed
     };
 
-    if let SubscriptionSource::Url { .. } | SubscriptionSource::Git { .. } = removed.source {
+    if let SubscriptionSource::Url { .. } = removed.source {
         let _ = remove_path_if_exists(&state.subscriptions_root.join(&removed.id)).await;
     }
 
     if let Err(e) = regenerate_and_restart(state.clone()).await {
+        eprintln!("❌ Failed to regenerate and restart: {}", e);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(e)),
@@ -9183,11 +9162,6 @@ struct SingBoxLogsQuery {
 }
 
 #[derive(Deserialize)]
-struct VncLogsQuery {
-    limit: Option<usize>,
-}
-
-#[derive(Deserialize)]
 struct AppLogsQuery {
     limit: Option<usize>,
 }
@@ -10080,7 +10054,7 @@ fn binary_exists(cmd: &str) -> bool {
 
 async fn start_app_internal(
     app: &AppConfig,
-    config: &Config,
+    _config: &Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lock = APP_PROCESSES.lock().await;
     if let Some(proc) = lock.get_mut(&app.id) {
@@ -10169,13 +10143,9 @@ async fn stop_app_internal(id: &str) -> Result<(), String> {
 async fn gen_config(
     config: &Config,
     sing_box_home: &str,
-    _subs: &LoadedSubscriptions,
+    subs: &LoadedSubscriptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let my_outbounds: Vec<serde_json::Value> = config
-        .nodes
-        .iter()
-        .filter_map(|s| serde_json::from_str(s).ok())
-        .collect();
+    let my_outbounds: Vec<serde_json::Value> = subs.outbounds.clone();
     let my_names: Vec<String> = my_outbounds
         .iter()
         .filter_map(|o| o.get("tag").and_then(|v| v.as_str()).map(String::from))
@@ -10183,9 +10153,7 @@ async fn gen_config(
 
     let total_nodes = my_outbounds.len();
     if total_nodes == 0 {
-        return Err(
-            "No nodes available: no manual nodes configured".into(),
-        );
+        eprintln!("⚠️  Warning: No proxy nodes available. Generating minimal config.");
     }
 
     let mut sing_box_config = get_config_template();
@@ -10201,6 +10169,10 @@ async fn gen_config(
                     .into_iter()
                     .map(serde_json::Value::String),
             );
+            // Ensure selector has at least one outbound
+            if arr.is_empty() {
+                arr.push(serde_json::Value::String("direct".to_string()));
+            }
         }
     }
     if let Some(arr) = sing_box_config["outbounds"].as_array_mut() {
@@ -10572,10 +10544,14 @@ fn parse_singbox_json(
 
 /// Try to detect if the text is base64 encoded SS URLs
 fn try_parse_ss_urls(text: &str) -> Option<Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>>> {
-    // Check if the text looks like base64 (only contains valid base64 characters)
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    // First check if it's already decoded SS URLs
+    if trimmed.contains("ss://") {
+        return Some(parse_ss_url_list(trimmed));
     }
 
     // Try to decode as base64
@@ -10816,20 +10792,32 @@ async fn fetch_subscription_url(url: &str, dest_dir: &StdPath) -> Result<PathBuf
     tokio::fs::create_dir_all(dest_dir)
         .await
         .map_err(|e| format!("Failed to create dir {}: {}", dest_dir.display(), e))?;
-    let resp = reqwest::get(url)
-        .await
-        .map_err(|e| format!("Failed to fetch {}: {}", url, e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Failed to fetch {}: {}", url, resp.status()));
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+
     let target = dest_dir.join("subscription.yaml");
-    tokio::fs::write(&target, bytes)
-        .await
-        .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
+
+    // Check if it's a URL or direct content
+    if url.starts_with("http://") || url.starts_with("https://") {
+        // Download from URL
+        let resp = reqwest::get(url)
+            .await
+            .map_err(|e| format!("Failed to fetch {}: {}", url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("Failed to fetch {}: {}", url, resp.status()));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+        tokio::fs::write(&target, bytes)
+            .await
+            .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
+    } else {
+        // Direct content (will be decoded by try_parse_ss_urls if needed)
+        tokio::fs::write(&target, url.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
+    }
+
     Ok(target)
 }
 
@@ -10841,21 +10829,6 @@ async fn prepare_subscription_dir(
         SubscriptionSource::Url { url } => {
             let dir = root.join(&sub.id);
             let _ = fetch_subscription_url(url, &dir).await?;
-            Ok(dir)
-        }
-        SubscriptionSource::Git { repo } => {
-            let dir = root.join(&sub.id);
-            tokio::fs::create_dir_all(root)
-                .await
-                .map_err(|e| format!("Failed to create dir {}: {}", root.display(), e))?;
-            sync_git_repo(repo, &dir).await?;
-            Ok(dir)
-        }
-        SubscriptionSource::Path { path } => {
-            let dir = PathBuf::from(path);
-            tokio::fs::metadata(&dir)
-                .await
-                .map_err(|e| format!("Subscription path {} is not available: {}", dir.display(), e))?;
             Ok(dir)
         }
     }
@@ -10979,20 +10952,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     migrate_terminals(&mut config);
     if SUBSCRIPTIONS_ENABLED {
-        let mut subscriptions_changed = normalize_subscriptions(&mut config);
-        if config.subscriptions.is_empty()
-            && tokio::fs::metadata(&subscriptions_root).await.is_ok()
-        {
-            config.subscriptions.push(SubscriptionConfig {
-                id: generate_subscription_id(),
-                name: Some("本地订阅".to_string()),
-                enabled: true,
-                source: SubscriptionSource::Path {
-                    path: subscriptions_root.display().to_string(),
-                },
-            });
-            subscriptions_changed = true;
-        }
+        let subscriptions_changed = normalize_subscriptions(&mut config);
         if subscriptions_changed && !setup_required {
             let _ = save_config(&config).await;
         }

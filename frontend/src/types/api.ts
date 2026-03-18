@@ -401,3 +401,19 @@ export interface IVncConfig {
   video_bitrate: number;
 }
 
+// Subscription Types
+export interface Subscription {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  source: {
+    url: string;
+  };
+}
+
+export interface SubscriptionRequest {
+  name?: string;
+  enabled?: boolean;
+  url: string;
+}
+

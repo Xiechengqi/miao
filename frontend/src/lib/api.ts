@@ -23,6 +23,8 @@ import {
   LogEntry,
   IVncStatus,
   IVncConfig,
+  Subscription,
+  SubscriptionRequest,
 } from "@/types/api";
 
 // 重试配置
@@ -1021,6 +1023,46 @@ class ApiClient {
   async getIVncLogs(limit = 100): Promise<LogEntry[]> {
     const res = await this.fetch<{ data: LogEntry[] }>(`/api/ivnc/logs?limit=${limit}`);
     return res.data;
+  }
+
+  // Subscription Management
+  async getSubscriptions(): Promise<Subscription[]> {
+    const res = await this.fetch<{ data: { items: Subscription[] } }>("/api/subscriptions");
+    return res.data.items;
+  }
+
+  async createSubscription(data: SubscriptionRequest): Promise<Subscription> {
+    const res = await this.fetch<{ data: { item: Subscription } }>("/api/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return res.data.item;
+  }
+
+  async updateSubscription(id: string, data: Partial<SubscriptionRequest>): Promise<Subscription> {
+    const res = await this.fetch<{ data: { item: Subscription } }>(`/api/subscriptions/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+    return res.data.item;
+  }
+
+  async deleteSubscription(id: string): Promise<void> {
+    await this.fetch(`/api/subscriptions/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  async reloadSubscription(id: string): Promise<void> {
+    await this.fetch(`/api/subscriptions/${id}/reload`, {
+      method: "POST",
+    });
+  }
+
+  async reloadAllSubscriptions(): Promise<void> {
+    await this.fetch("/api/subscriptions/reload", {
+      method: "POST",
+    });
   }
 }
 

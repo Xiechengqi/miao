@@ -7,7 +7,7 @@ import { useProxies, useStatus, useTraffic } from "@/hooks";
 import { api, getSingBoxLogsWsUrl } from "@/lib/api";
 import { formatUptime, formatSpeed, cn } from "@/lib/utils";
 import { RefreshCw, Zap, Activity, Clock, Cpu, Wifi, Globe, Server, Plus, Check, Download, FileText } from "lucide-react";
-import { Host, ManualNode, LogEntry } from "@/types/api";
+import { Host, ManualNode, LogEntry, Subscription } from "@/types/api";
 import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
 
 const CONNECTIVITY_SITES = [
@@ -215,6 +215,20 @@ export default function ProxiesPage() {
   const [manualNodes, setManualNodes] = useState<ManualNode[]>([]);
   const [switchingNode, setSwitchingNode] = useState(false);
 
+  // 订阅管理状态
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [subscriptionsLoading, setSubscriptionsLoading] = useState(false);
+  const [showAddSubscription, setShowAddSubscription] = useState(false);
+  const [newSubscriptionUrl, setNewSubscriptionUrl] = useState("");
+  const [newSubscriptionName, setNewSubscriptionName] = useState("");
+  const [addingSubscription, setAddingSubscription] = useState(false);
+  const [deletingSubId, setDeletingSubId] = useState<string | null>(null);
+  const [reloadingSubId, setReloadingSubId] = useState<string | null>(null);
+  const [editingSubscription, setEditingSubscription] = useState<Subscription | null>(null);
+  const [editSubscriptionUrl, setEditSubscriptionUrl] = useState("");
+  const [editSubscriptionName, setEditSubscriptionName] = useState("");
+  const [updatingSubscription, setUpdatingSubscription] = useState(false);
+
   // DNS 切换确认对话框
   const [showDnsConfirm, setShowDnsConfirm] = useState(false);
   const [pendingDns, setPendingDns] = useState<string>("");
@@ -376,6 +390,22 @@ export default function ProxiesPage() {
       }
     };
     loadHostsAndNodes();
+  }, []);
+
+  // 加载订阅列表
+  useEffect(() => {
+    const loadSubscriptions = async () => {
+      setSubscriptionsLoading(true);
+      try {
+        const subs = await api.getSubscriptions();
+        setSubscriptions(subs);
+      } catch (error) {
+        console.error("Failed to load subscriptions:", error);
+      } finally {
+        setSubscriptionsLoading(false);
+      }
+    };
+    loadSubscriptions();
   }, []);
 
   // 添加主机为 SSH 节点
@@ -819,107 +849,312 @@ export default function ProxiesPage() {
         </CardContent>
       </Card>
 
-      {/* SSH 节点管理 */}
+      {/* 订阅管理 */}
       <Card className="p-6" hoverEffect={false}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-lg font-bold text-slate-900">SSH 节点</h2>
-            <p className="text-slate-500 text-sm mt-1">从主机配置添加 SSH 代理节点</p>
+            <h2 className="text-lg font-bold text-slate-900">订阅管理</h2>
+            <p className="text-slate-500 text-sm mt-1">管理代理节点订阅源</p>
           </div>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setShowAddSubscription(true)}
+          >
+            <Plus className="w-4 h-4" />
+            添加订阅
+          </Button>
         </div>
 
-        {hostsLoading ? (
+        {subscriptionsLoading ? (
           <div className="mt-4 text-center py-4 text-slate-500">
             <div className="w-6 h-6 border-2 border-indigo-600/30 border-t-indigo-600 rounded-full animate-spin mx-auto" />
             <p className="mt-2 text-sm">加载中...</p>
           </div>
-        ) : hosts.length === 0 ? (
+        ) : subscriptions.length === 0 ? (
           <div className="mt-4 text-center py-6 text-slate-500 bg-slate-50 rounded-lg">
-            <Server className="w-10 h-10 mx-auto mb-2 text-slate-300" />
-            <p className="text-sm">暂无主机配置</p>
-            <p className="text-xs mt-1">请先在"主机管理"页面添加主机配置</p>
+            <Globe className="w-10 h-10 mx-auto mb-2 text-slate-300" />
+            <p className="text-sm">暂无订阅</p>
+            <p className="text-xs mt-1">点击"添加订阅"按钮添加代理节点订阅源</p>
           </div>
         ) : (
           <div className="mt-4 space-y-2">
-            {hosts.map((host) => {
-              const displayName = host.name ? `${host.name} (${host.host})` : host.host;
-              const isExisting = existingNodeTags.has(displayName);
-              return (
-                <div
-                  key={host.id}
-                  className="flex flex-col gap-2 rounded-lg border border-slate-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex items-center gap-3">
-                    <Server className="w-5 h-5 text-slate-400" />
-                    <div>
-                      <div className="font-medium text-slate-900">{displayName}</div>
-                      <div className="flex items-center gap-2 text-xs text-slate-500">
-                        <span>{host.username}@{host.host}:{host.port}</span>
-                        <Badge variant="info">
-                          {host.auth_type === "password" ? "密码" : "私钥"}
-                        </Badge>
-                        {hostTestResults[host.id] && (
-                          <Badge variant={hostTestResults[host.id].success ? "success" : "error"}>
-                            {hostTestResults[host.id].latency_ms != null
-                              ? `${Math.round(hostTestResults[host.id].latency_ms!)}ms`
-                              : hostTestResults[host.id].error ?? "失败"}
-                          </Badge>
-                        )}
-                        {isExisting && currentNode === displayName && (
-                          <Badge variant="success" className="gap-1">
-                            <Check className="w-3 h-3" />
-                            使用中
-                          </Badge>
-                        )}
-                      </div>
+            {subscriptions.map((sub) => (
+              <div
+                key={sub.id}
+                className="flex flex-col gap-2 rounded-lg border border-slate-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <Globe className="w-5 h-5 text-slate-400 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-slate-900 truncate">
+                      {sub.name || "未命名订阅"}
                     </div>
+                    <div className="text-xs text-slate-500 truncate">{sub.source.url}</div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => handleTestHost(host)}
-                      loading={testingHostId === host.id}
-                    >
-                      <Zap className="w-4 h-4" />
-                      测试
-                    </Button>
-                    {isExisting ? (
-                      <>
-                        {currentNode !== displayName && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => handleSwitchNode(displayName)}
-                          loading={switchingNode}
-                          disabled={!status.running || needsRestart}
-                        >
-                          使用
-                        </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setPendingRemoveNode(displayName)}
-                        >
-                          删除
-                        </Button>
-                      </>
-                    ) : (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => handleAddHostAsNode(host)}
-                        loading={addingHostId === host.id}
-                      >
-                        <Plus className="w-4 h-4" />
-                        添加
-                      </Button>
-                    )}
-                  </div>
+                  <Badge variant={sub.enabled ? "success" : "default"}>
+                    {sub.enabled ? "已启用" : "已禁用"}
+                  </Badge>
                 </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const payload: any = {
+                          enabled: !sub.enabled,
+                          url: sub.source.url
+                        };
+                        if (sub.name) {
+                          payload.name = sub.name;
+                        }
+                        await api.updateSubscription(sub.id, payload);
+                        setSubscriptions(subs => subs.map(s => s.id === sub.id ? { ...s, enabled: !s.enabled } : s));
+                        addToast({ type: "success", message: sub.enabled ? "订阅已禁用" : "订阅已启用" });
+                      } catch (error) {
+                        addToast({ type: "error", message: "操作失败" });
+                      }
+                    }}
+                  >
+                    {sub.enabled ? "禁用" : "启用"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setEditingSubscription(sub);
+                      setEditSubscriptionUrl(sub.source.url);
+                      setEditSubscriptionName(sub.name || "");
+                    }}
+                  >
+                    编辑
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={async () => {
+                      if (!confirm("确定要删除此订阅吗？")) return;
+                      setDeletingSubId(sub.id);
+                      try {
+                        await api.deleteSubscription(sub.id);
+                        setSubscriptions(subs => subs.filter(s => s.id !== sub.id));
+                        addToast({ type: "success", message: "订阅已删除" });
+                      } catch (error) {
+                        addToast({ type: "error", message: "删除失败" });
+                      } finally {
+                        setDeletingSubId(null);
+                      }
+                    }}
+                    loading={deletingSubId === sub.id}
+                  >
+                    删除
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* 添加订阅对话框 */}
+      <Modal
+        isOpen={showAddSubscription}
+        onClose={() => {
+          setShowAddSubscription(false);
+          setNewSubscriptionUrl("");
+          setNewSubscriptionName("");
+        }}
+        title="添加订阅"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              订阅名称（可选）
+            </label>
+            <input
+              type="text"
+              value={newSubscriptionName}
+              onChange={(e) => setNewSubscriptionName(e.target.value)}
+              placeholder="例如：我的订阅"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              订阅内容 *
+            </label>
+            <textarea
+              value={newSubscriptionUrl}
+              onChange={(e) => setNewSubscriptionUrl(e.target.value)}
+              placeholder="粘贴订阅内容（base64编码的节点列表）"
+              rows={6}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none font-mono text-sm"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowAddSubscription(false);
+                setNewSubscriptionUrl("");
+                setNewSubscriptionName("");
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              onClick={async () => {
+                if (!newSubscriptionUrl.trim()) {
+                  addToast({ type: "error", message: "请输入订阅内容" });
+                  return;
+                }
+                setAddingSubscription(true);
+                try {
+                  const newSub = await api.createSubscription({
+                    url: newSubscriptionUrl.trim(),
+                    name: newSubscriptionName.trim() || undefined,
+                    enabled: true,
+                  });
+                  setSubscriptions(subs => [...subs, newSub]);
+                  setShowAddSubscription(false);
+                  setNewSubscriptionUrl("");
+                  setNewSubscriptionName("");
+                  addToast({ type: "success", message: "订阅已添加" });
+                } catch (error) {
+                  addToast({ type: "error", message: error instanceof Error ? error.message : "添加失败" });
+                } finally {
+                  setAddingSubscription(false);
+                }
+              }}
+              loading={addingSubscription}
+              disabled={!newSubscriptionUrl.trim()}
+            >
+              添加
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 编辑订阅对话框 */}
+      <Modal
+        isOpen={editingSubscription !== null}
+        onClose={() => {
+          setEditingSubscription(null);
+          setEditSubscriptionUrl("");
+          setEditSubscriptionName("");
+        }}
+        title="编辑订阅"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              订阅名称（可选）
+            </label>
+            <input
+              type="text"
+              value={editSubscriptionName}
+              onChange={(e) => setEditSubscriptionName(e.target.value)}
+              placeholder="例如：我的订阅"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              订阅内容 *
+            </label>
+            <textarea
+              value={editSubscriptionUrl}
+              onChange={(e) => setEditSubscriptionUrl(e.target.value)}
+              placeholder="粘贴订阅内容（base64编码的节点列表）"
+              rows={6}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none font-mono text-sm"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setEditingSubscription(null);
+                setEditSubscriptionUrl("");
+                setEditSubscriptionName("");
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              onClick={async () => {
+                if (!editingSubscription || !editSubscriptionUrl.trim()) {
+                  addToast({ type: "error", message: "请输入订阅内容" });
+                  return;
+                }
+                setUpdatingSubscription(true);
+                try {
+                  const updated = await api.updateSubscription(editingSubscription.id, {
+                    url: editSubscriptionUrl.trim(),
+                    name: editSubscriptionName.trim() || undefined,
+                    enabled: editingSubscription.enabled,
+                  });
+                  setSubscriptions(subs => subs.map(s => s.id === updated.id ? updated : s));
+                  setEditingSubscription(null);
+                  setEditSubscriptionUrl("");
+                  setEditSubscriptionName("");
+                  addToast({ type: "success", message: "订阅已更新" });
+                } catch (error) {
+                  addToast({ type: "error", message: error instanceof Error ? error.message : "更新失败" });
+                } finally {
+                  setUpdatingSubscription(false);
+                }
+              }}
+              loading={updatingSubscription}
+              disabled={!editSubscriptionUrl.trim()}
+            >
+              保存
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 节点列表 */}
+      <Card className="p-6" hoverEffect={false}>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900">代理节点</h2>
+            <p className="text-slate-500 text-sm mt-1">从订阅解析的代理节点列表</p>
+          </div>
+        </div>
+
+        {proxyGroups?.proxy?.all && proxyGroups.proxy.all.length > 0 ? (
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {proxyGroups.proxy.all.map((nodeName) => {
+              const isActive = currentNode === nodeName;
+              return (
+                <button
+                  key={nodeName}
+                  onClick={() => handleSwitchNode(nodeName)}
+                  disabled={switchingNode || !status.running}
+                  className={cn(
+                    "flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-all",
+                    isActive
+                      ? "border-indigo-500 bg-indigo-50"
+                      : "border-slate-100 bg-white hover:border-indigo-200",
+                    (switchingNode || !status.running) && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <span className={cn("font-medium", isActive ? "text-indigo-700" : "text-slate-900")}>
+                    {nodeName}
+                  </span>
+                  {isActive && <Check className="w-4 h-4 text-indigo-600" />}
+                </button>
               );
             })}
+          </div>
+        ) : (
+          <div className="mt-4 text-center py-6 text-slate-500 bg-slate-50 rounded-lg">
+            <p className="text-sm">暂无节点</p>
+            <p className="text-xs mt-1">请添加订阅或等待订阅加载</p>
           </div>
         )}
       </Card>
