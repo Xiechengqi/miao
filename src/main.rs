@@ -3956,7 +3956,26 @@ async fn get_ivnc_logs(Query(params): Query<HashMap<String, String>>) -> Result<
         .lines()
         .rev()
         .take(limit)
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| {
+            // Parse log format: [2026-03-18T05:28:15Z INFO  ivnc] message
+            if let Some(start) = line.find('[') {
+                if let Some(end) = line.find(']') {
+                    let header = &line[start+1..end];
+                    let parts: Vec<&str> = header.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let time = parts[0];
+                        let level = parts[1].to_lowercase();
+                        let message = line[end+1..].trim();
+                        return Some(serde_json::json!({
+                            "time": time,
+                            "level": level,
+                            "message": message
+                        }));
+                    }
+                }
+            }
+            None
+        })
         .collect();
 
     Ok(Json(ApiResponse::success("日志", logs)))
