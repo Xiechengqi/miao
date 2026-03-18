@@ -263,7 +263,7 @@ export default function VncPage() {
             loading={upgrading}
           >
             <RefreshCw className="w-4 h-4" />
-            更新
+            更新 iVnc
           </Button>
           <Button
             variant="secondary"
