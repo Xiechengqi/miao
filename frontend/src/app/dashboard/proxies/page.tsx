@@ -16,7 +16,7 @@ const CONNECTIVITY_SITES = [
   { name: "YouTube", url: "https://youtube.com" },
   { name: "Twitter", url: "https://x.com" },
   { name: "Telegram", url: "https://telegram.org" },
-  { name: "OpenAI", url: "https://openai.com" },
+  { name: "Baidu", url: "https://baidu.com" },
 ];
 
 const CONNECTIVITY_STORAGE_KEY = "miao_connectivity_results";
