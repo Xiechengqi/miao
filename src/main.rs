@@ -33,7 +33,6 @@ use tokio_tungstenite::connect_async;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::spawn_blocking;
 use tokio::time::sleep;
-use tokio::io::AsyncWriteExt;
 use chrono::Utc;
 use rust_embed::RustEmbed;
 use axum::response::IntoResponse;
@@ -1585,7 +1584,6 @@ struct TerminalRuntimeStatus {
 }
 
 #[derive(Serialize, Clone)]
-#[derive(Serialize, Clone)]
 struct AppRuntimeStatus {
     running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1618,7 +1616,6 @@ struct LogEntry {
 
 type TerminalLogEntry = LogEntry;
 
-#[derive(Serialize)]
 #[derive(Serialize)]
 struct AppItem {
     id: String,
@@ -3604,7 +3601,7 @@ keyframe_interval = 60
 
 async fn get_tools_status() -> Json<ApiResponse<serde_json::Value>> {
     let vnc_available = binary_exists("vncserver") && binary_exists("vncpasswd");
-    let i3_available = i3_available();
+    let i3_available = binary_exists("i3");
     let tar_available = binary_exists("tar");
     let zstd_available = binary_exists("zstd");
     let os_id = detect_os_id();
@@ -10076,16 +10073,6 @@ async fn start_app_internal(
         command.arg(arg);
     }
     command.env("DISPLAY", &display);
-
-    // Set XAUTHORITY from the VNC session's home directory if bound
-    if let Some(ref vid) = bound_vnc_id {
-        let xauth_path = PathBuf::from("/tmp/vnc")
-            .join(vid)
-            .join(".Xauthority");
-        if xauth_path.exists() {
-            command.env("XAUTHORITY", &xauth_path);
-        }
-    }
 
     // Set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS for GTK apps
     let uid = Uid::current();
