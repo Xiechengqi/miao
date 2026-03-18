@@ -191,6 +191,10 @@ export default function TerminalsPage() {
   const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
   const upgradeLogsRef = useRef<HTMLDivElement>(null);
 
+  // iframe 控制
+  const [selectedTerminalId, setSelectedTerminalId] = useState<string | null>(null);
+  const [iframeKey, setIframeKey] = useState(0);
+
   useEffect(() => {
     checkGottyAndLoad();
   }, []);
@@ -212,6 +216,12 @@ export default function TerminalsPage() {
       const data = await api.getTerminals();
       setTerminals(data);
       setTerminalsLoaded(true);
+
+      // 自动选中第一个终端
+      if (data.length > 0 && !selectedTerminalId) {
+        const runningTerminal = data.find(t => t.status.running);
+        setSelectedTerminalId(runningTerminal?.id || data[0].id);
+      }
     } catch (error) {
       console.error("Failed to load terminals:", error);
     }
@@ -497,9 +507,59 @@ export default function TerminalsPage() {
         </div>
       </div>
 
+      {/* iframe 控制栏 */}
+      {terminals.length > 0 && (
+        <Card className="p-0 overflow-hidden">
+          <div className="flex items-center gap-2 p-3 border-b border-slate-200">
+            <div className="flex gap-1 bg-slate-100 rounded-lg p-1 flex-wrap">
+              {terminals.map((terminal) => (
+                <button
+                  key={terminal.id}
+                  onClick={() => setSelectedTerminalId(terminal.id)}
+                  className={`px-3 py-1 rounded text-sm font-medium transition-colors flex items-center gap-1.5 ${
+                    selectedTerminalId === terminal.id
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <img
+                    src={`http://${terminal.addr}:${terminal.port}/favicon.ico`}
+                    className="w-4 h-4"
+                    alt=""
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                    }}
+                  />
+                  <span>{terminal.name || terminal.id}</span>
+                </button>
+              ))}
+            </div>
+            {selectedTerminalId && terminals.find(t => t.id === selectedTerminalId) && (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setIframeKey(prev => prev + 1)}
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </Button>
+                <a
+                  href={terminalUrl(terminals.find(t => t.id === selectedTerminalId)!)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-slate-600 hover:text-indigo-600 font-mono"
+                >
+                  {terminalUrl(terminals.find(t => t.id === selectedTerminalId)!)}
+                </a>
+              </>
+            )}
+          </div>
+        </Card>
+      )}
+
       {/* Terminal List */}
       <div className="grid gap-4">
-        {terminals.map((terminal) => (
+        {terminals.filter(t => t.id === selectedTerminalId).map((terminal) => (
           <Card key={terminal.id} className="p-4" hoverEffect>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-center gap-3">
@@ -529,18 +589,6 @@ export default function TerminalsPage() {
               </div>
 
               <div className="flex gap-2">
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => {
-                    const url = terminalUrl(terminal);
-                    if (url) window.open(url, "_blank");
-                  }}
-                  disabled={!terminalUrl(terminal)}
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  打开终端
-                </Button>
                 <Button variant="secondary" size="sm" onClick={() => handleRestart(terminal.id)}>
                   <RefreshCw className="w-4 h-4" />
                   重启
@@ -594,6 +642,19 @@ export default function TerminalsPage() {
           </Card>
         )}
       </div>
+
+      {/* iframe 区域 */}
+      {selectedTerminalId && terminals.find(t => t.id === selectedTerminalId)?.status.running && (
+        <Card className="p-0 overflow-hidden">
+          <iframe
+            key={iframeKey}
+            src={terminalUrl(terminals.find(t => t.id === selectedTerminalId)!)}
+            className="w-full border-0"
+            style={{ height: '70vh' }}
+            title="Terminal Web"
+          />
+        </Card>
+      )}
 
       {/* Add Modal */}
       <Modal
