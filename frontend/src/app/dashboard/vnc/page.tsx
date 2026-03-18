@@ -343,6 +343,14 @@ export default function VncPage() {
             >
               <RefreshCw className="w-4 h-4" />
             </Button>
+            <a
+              href={`http://${window.location.hostname}:${status.port}${viewMode === "console" ? "/console" : "/"}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-slate-600 hover:text-violet-600 font-mono"
+            >
+              http://{window.location.hostname}:{status.port}{viewMode === "console" ? "/console" : "/"}
+            </a>
           </div>
           <iframe
             key={iframeKey}
