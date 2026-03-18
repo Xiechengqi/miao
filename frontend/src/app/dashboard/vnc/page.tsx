@@ -46,6 +46,7 @@ export default function VncPage() {
   const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
   const upgradeLogsRef = useRef<HTMLDivElement>(null);
   const [iframeKey, setIframeKey] = useState(0);
+  const [viewMode, setViewMode] = useState<"console" | "desktop">("console");
 
   useEffect(() => {
     loadStatus();
@@ -260,18 +261,6 @@ export default function VncPage() {
         <div className="flex gap-2">
           {status?.running ? (
             <>
-              <Button variant="secondary" onClick={() => setIframeKey(prev => prev + 1)}>
-                <RefreshCw className="w-4 h-4" />
-                刷新
-              </Button>
-              <Button variant="primary" onClick={handleOpenDesktop}>
-                <ExternalLink className="w-4 h-4" />
-                打开桌面
-              </Button>
-              <Button variant="secondary" onClick={handleOpenConsole}>
-                <Settings className="w-4 h-4" />
-                管理页
-              </Button>
               <Button variant="secondary" onClick={handleRestart}>
                 <RefreshCw className="w-4 h-4" />
                 重启
@@ -324,9 +313,40 @@ export default function VncPage() {
 
       {status?.running && (
         <Card className="p-0 overflow-hidden">
+          <div className="flex items-center gap-2 p-3 border-b border-slate-200">
+            <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
+              <button
+                onClick={() => setViewMode("console")}
+                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                  viewMode === "console"
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                管理
+              </button>
+              <button
+                onClick={() => setViewMode("desktop")}
+                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                  viewMode === "desktop"
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                桌面
+              </button>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setIframeKey(prev => prev + 1)}
+            >
+              <RefreshCw className="w-4 h-4" />
+            </Button>
+          </div>
           <iframe
             key={iframeKey}
-            src={`http://${window.location.hostname}:${status.port}/`}
+            src={`http://${window.location.hostname}:${status.port}${viewMode === "console" ? "/console" : "/"}`}
             className="w-full border-0"
             style={{ height: '70vh' }}
             title="iVNC Web"
