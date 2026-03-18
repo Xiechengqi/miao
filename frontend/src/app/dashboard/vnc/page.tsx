@@ -45,6 +45,7 @@ export default function VncPage() {
   const [upgradeProgress, setUpgradeProgress] = useState(0);
   const [upgradeStatus, setUpgradeStatus] = useState<"running" | "success" | "error">("running");
   const upgradeLogsRef = useRef<HTMLDivElement>(null);
+  const [iframeKey, setIframeKey] = useState(0);
 
   useEffect(() => {
     loadStatus();
@@ -259,6 +260,10 @@ export default function VncPage() {
         <div className="flex gap-2">
           {status?.running ? (
             <>
+              <Button variant="secondary" onClick={() => setIframeKey(prev => prev + 1)}>
+                <RefreshCw className="w-4 h-4" />
+                刷新
+              </Button>
               <Button variant="primary" onClick={handleOpenDesktop}>
                 <ExternalLink className="w-4 h-4" />
                 打开桌面
@@ -317,33 +322,10 @@ export default function VncPage() {
         </div>
       </div>
 
-      <Card className="p-6">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-lg bg-violet-600/10 flex items-center justify-center">
-            <Monitor className="w-6 h-6 text-violet-600" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-xl font-bold">iVnc 桌面</span>
-              <Badge variant={status?.running ? "success" : "default"}>
-                {status?.running ? "运行中" : "已停止"}
-              </Badge>
-            </div>
-            <p className="text-sm text-slate-500">
-              版本: {status?.version || "未知"} · 端口: {status?.port}
-            </p>
-            {status?.running && (
-              <p className="text-sm text-slate-500">
-                PID: {status.pid} · 运行时间: {formatUptime(status.uptime_secs || 0)}
-              </p>
-            )}
-          </div>
-        </div>
-      </Card>
-
       {status?.running && (
         <Card className="p-0 overflow-hidden">
           <iframe
+            key={iframeKey}
             src={`http://${window.location.hostname}:${status.port}/`}
             className="w-full border-0"
             style={{ height: '70vh' }}
