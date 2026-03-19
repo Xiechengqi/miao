@@ -3526,6 +3526,26 @@ fn get_ivnc_version() -> Option<String> {
     Some(version_str.lines().next()?.trim().to_string())
 }
 
+/// 执行 `ivnc env`，解析 "export KEY=VALUE" 输出为 HashMap
+fn get_ivnc_env() -> Option<HashMap<String, String>> {
+    let output = std::process::Command::new(get_ivnc_binary_path())
+        .arg("env")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut env_map = HashMap::new();
+    for line in stdout.lines() {
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        if let Some((k, v)) = line.split_once('=') {
+            env_map.insert(k.to_string(), v.to_string());
+        }
+    }
+    if env_map.is_empty() { None } else { Some(env_map) }
+}
+
 fn generate_ivnc_config(config: &IVncConfig) -> Result<(), String> {
     let config_path = get_ivnc_config_path();
     if let Some(parent) = config_path.parent() {
@@ -10078,7 +10098,14 @@ async fn start_app_internal(
     }
     command.env("DISPLAY", &display);
 
-    // Set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS for GTK apps
+    // 从 ivnc env 动态获取 Wayland 环境变量 (GDK_BACKEND, WAYLAND_DISPLAY, XDG_RUNTIME_DIR)
+    if let Some(ivnc_env) = get_ivnc_env() {
+        for (k, v) in &ivnc_env {
+            command.env(k, v);
+        }
+    }
+
+    // Set XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS for GTK apps (fallback)
     let uid = Uid::current();
     let xdg_runtime = format!("/run/user/{}", uid);
     if PathBuf::from(&xdg_runtime).exists() {
