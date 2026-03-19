@@ -5619,11 +5619,19 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         .header("User-Agent", "miao")
         .send()
         .await {
-        Ok(r) => match r.json().await {
-            Ok(rel) => rel,
-            Err(e) => {
-                send_log(1, &format!("解析版本信息失败: {}", e), "error", None).await;
+        Ok(r) => {
+            let status = r.status();
+            if !status.is_success() {
+                let body = r.text().await.unwrap_or_default();
+                send_log(1, &format!("获取版本信息失败 (HTTP {}): {}", status.as_u16(), body), "error", None).await;
                 return;
+            }
+            match r.json().await {
+                Ok(rel) => rel,
+                Err(e) => {
+                    send_log(1, &format!("解析版本信息失败: {}", e), "error", None).await;
+                    return;
+                }
             }
         },
         Err(e) => {
