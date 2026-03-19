@@ -36,7 +36,7 @@ jobs:
       - name: Install Zig for cross-compilation
         uses: mlugg/setup-zig@v1
         with:
-          version: master
+          version: 0.13.0
 
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild
