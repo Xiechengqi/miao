@@ -34,8 +34,9 @@ jobs:
           version: 9
 
       - name: Install Zig for cross-compilation
-        run: |
-          sudo snap install zig --classic --edge
+        uses: mlugg/setup-zig@v1
+        with:
+          version: master
 
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild
