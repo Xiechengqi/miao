@@ -536,112 +536,68 @@ export default function TerminalsPage() {
             </div>
             {selectedTerminalId && terminals.find(t => t.id === selectedTerminalId) && (
               <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setIframeKey(prev => prev + 1)}
-                >
-                  <RefreshCw className="w-4 h-4" />
-                </Button>
-                <a
-                  href={terminalUrl(terminals.find(t => t.id === selectedTerminalId)!)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-slate-600 hover:text-indigo-600 font-mono"
-                >
-                  {terminalUrl(terminals.find(t => t.id === selectedTerminalId)!)}
-                </a>
+                {(() => {
+                  const selectedTerminal = terminals.find(t => t.id === selectedTerminalId)!;
+                  return (
+                    <>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setIframeKey(prev => prev + 1)}
+                      >
+                        <RefreshCw className="w-4 h-4" />
+                      </Button>
+                      <a
+                        href={terminalUrl(selectedTerminal)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-slate-600 hover:text-indigo-600 font-mono"
+                      >
+                        {terminalUrl(selectedTerminal)}
+                      </a>
+                      <div className="flex items-center gap-2 ml-auto">
+                        <Badge variant={selectedTerminal.status.running ? "success" : "default"}>
+                          {selectedTerminal.status.running ? "running" : "stopped"}
+                        </Badge>
+                        <Button variant="secondary" size="sm" onClick={() => handleRestart(selectedTerminal.id)}>
+                          <RefreshCw className="w-4 h-4" />
+                          重启
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={() => handleToggle(selectedTerminal.id, selectedTerminal.status.running)}>
+                          {selectedTerminal.status.running ? (
+                            <><Square className="w-4 h-4" />停止</>
+                          ) : (
+                            <><Play className="w-4 h-4" />启动</>
+                          )}
+                        </Button>
+                        <span className="inline-flex" title={selectedTerminal.status.running ? "查看运行日志" : "终端未运行，无法查看日志"}>
+                          <Button variant="secondary" size="sm" onClick={() => openLogModal(selectedTerminal)} disabled={!selectedTerminal.status.running}>
+                            <FileText className="w-4 h-4" />
+                            日志
+                          </Button>
+                        </span>
+                        <Button variant="ghost" size="sm" onClick={() => openModal(selectedTerminal)}>
+                          <Pencil className="w-4 h-4" />
+                          编辑
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => handleDelete(selectedTerminal.id)}>
+                          <Trash2 className="w-4 h-4 text-red-500" />
+                        </Button>
+                      </div>
+                    </>
+                  );
+                })()}
               </>
             )}
           </div>
         </Card>
       )}
 
-      {/* Terminal List */}
-      <div className="grid gap-4">
-        {terminals.filter(t => t.id === selectedTerminalId).map((terminal) => (
-          <Card key={terminal.id} className="p-4" hoverEffect>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-indigo-600/10 flex items-center justify-center">
-                  <TerminalIcon className="w-5 h-5 text-indigo-600" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold">{terminal.name || terminal.id}</span>
-                    <Badge variant={terminal.status.running ? "success" : "default"}>
-                      {terminal.status.running ? "running" : "stopped"}
-                    </Badge>
-                  </div>
-                  <p className="text-sm text-slate-500">地址: {terminal.addr}:{terminal.port}</p>
-                  <p className="text-sm text-slate-500">
-                    命令: {terminal.command || "-"} {terminal.command_args?.join(" ")}
-                  </p>
-                  <p className="text-sm text-slate-500">
-                    认证: {terminal.auth_username || "-"} / {terminal.auth_password || "-"}
-                  </p>
-                  {terminal.status.running && (
-                    <p className="text-sm text-slate-500">
-                      PID: {terminal.status.pid || "-"} · 运行: {formatUptime(terminal.status.uptime_secs)}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex gap-2">
-                <Button variant="secondary" size="sm" onClick={() => handleRestart(terminal.id)}>
-                  <RefreshCw className="w-4 h-4" />
-                  重启
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => handleToggle(terminal.id, terminal.status.running)}
-                >
-                  {terminal.status.running ? (
-                    <>
-                      <Square className="w-4 h-4" />
-                      停止
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4" />
-                      启动
-                    </>
-                  )}
-                </Button>
-                <span
-                  className="inline-flex"
-                  title={terminal.status.running ? "查看运行日志" : "终端未运行，无法查看日志"}
-                >
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => openLogModal(terminal)}
-                    disabled={!terminal.status.running}
-                  >
-                    <FileText className="w-4 h-4" />
-                    日志
-                  </Button>
-                </span>
-                <Button variant="ghost" size="sm" onClick={() => openModal(terminal)}>
-                  <Pencil className="w-4 h-4" />
-                  编辑
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => handleDelete(terminal.id)}>
-                  <Trash2 className="w-4 h-4 text-red-500" />
-                </Button>
-              </div>
-            </div>
-          </Card>
-        ))}
-
-        {terminals.length === 0 && (
-          <Card className="p-12 text-center">
-            <p className="text-slate-500">暂无终端配置</p>
-          </Card>
-        )}
-      </div>
+      {terminals.length === 0 && (
+        <Card className="p-12 text-center">
+          <p className="text-slate-500">暂无终端配置</p>
+        </Card>
+      )}
 
       {/* iframe 区域 */}
       {selectedTerminalId && terminals.find(t => t.id === selectedTerminalId)?.status.running && (
