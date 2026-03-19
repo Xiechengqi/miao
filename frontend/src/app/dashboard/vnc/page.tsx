@@ -18,6 +18,7 @@ import {
   FileText,
   Eye,
   EyeOff,
+  BookOpen,
 } from "lucide-react";
 
 interface UpgradeLogEntry {
@@ -47,6 +48,7 @@ export default function VncPage() {
   const upgradeLogsRef = useRef<HTMLDivElement>(null);
   const [iframeKey, setIframeKey] = useState(0);
   const [viewMode, setViewMode] = useState<"console" | "desktop">("console");
+  const [showDocsModal, setShowDocsModal] = useState(false);
 
   useEffect(() => {
     loadStatus();
@@ -308,6 +310,13 @@ export default function VncPage() {
             <Settings className="w-4 h-4" />
             配置
           </Button>
+          <Button
+            variant="secondary"
+            onClick={() => setShowDocsModal(true)}
+          >
+            <BookOpen className="w-4 h-4" />
+            文档
+          </Button>
         </div>
       </div>
 
@@ -536,6 +545,67 @@ export default function VncPage() {
               </Button>
             )}
           </div>
+        </div>
+      </Modal>
+
+      {/* Docs Modal */}
+      <Modal
+        isOpen={showDocsModal}
+        onClose={() => setShowDocsModal(false)}
+        title="桌面环境文档"
+        size="lg"
+      >
+        <div className="space-y-6">
+          <section>
+            <h3 className="text-lg font-bold text-slate-900 mb-3">iVNC 启动依赖</h3>
+            <p className="text-sm text-slate-600 mb-3">
+              iVNC 运行需要以下系统库，请先安装：
+            </p>
+            <pre className="bg-slate-900 text-slate-200 rounded-lg p-4 text-sm font-mono overflow-x-auto">
+              <code>{`apt-get install \\
+  libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \\
+  libpixman-1-0 libxkbcommon0 \\
+  gstreamer1.0-tools gstreamer1.0-plugins-base \\
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \\
+  gstreamer1.0-plugins-ugly gstreamer1.0-x \\
+  libpulse0 libopus0 pulseaudio pulseaudio-utils \\
+  libgtk-3-0 libwebkit2gtk-4.1-0 libsoup-3.0-0`}</code>
+            </pre>
+          </section>
+
+          <section>
+            <h3 className="text-lg font-bold text-slate-900 mb-3">安装 Google Chrome 浏览器</h3>
+            <div className="rounded-lg bg-red-50 border border-red-200 p-4 mb-4">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-red-800">注意：apt 和 Snap 安装的 Chrome/Chromium 均无法正常使用</p>
+                  <p className="text-sm text-red-700 mt-1">
+                    通过 apt 或 Snap 安装的浏览器在 systemd service 环境下存在 cgroup 限制、
+                    缺少 DBus session bus 等问题，会导致启动失败。请从 Google 官方下载 deb 包安装。
+                  </p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h3 className="text-base font-semibold text-slate-800 mb-2">Ubuntu 22.04 / 24.04</h3>
+            <p className="text-sm text-slate-600 mb-3">
+              从 Google 官方下载并安装 Chrome：
+            </p>
+            <pre className="bg-slate-900 text-slate-200 rounded-lg p-4 text-sm font-mono overflow-x-auto">
+              <code>{`wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt install ./google-chrome-stable_current_amd64.deb`}</code>
+            </pre>
+          </section>
+
+          <section>
+            <h3 className="text-base font-semibold text-slate-800 mb-2">验证安装</h3>
+            <pre className="bg-slate-900 text-slate-200 rounded-lg p-4 text-sm font-mono overflow-x-auto">
+              <code>{`google-chrome --version`}</code>
+            </pre>
+          </section>
         </div>
       </Modal>
     </div>
