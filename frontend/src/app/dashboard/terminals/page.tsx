@@ -193,7 +193,7 @@ export default function TerminalsPage() {
 
   // iframe 控制
   const [selectedTerminalId, setSelectedTerminalId] = useState<string | null>(null);
-  const [iframeKey, setIframeKey] = useState(0);
+  const [iframeKeys, setIframeKeys] = useState<Record<string, number>>({});
 
   // 动态 favicon：terminalId -> svgUrl
   const [dynamicFavicons, setDynamicFavicons] = useState<Record<string, string>>({});
@@ -574,7 +574,7 @@ export default function TerminalsPage() {
                       <Button
                         variant="secondary"
                         size="sm"
-                        onClick={() => setIframeKey(prev => prev + 1)}
+                        onClick={() => setIframeKeys(prev => ({ ...prev, [selectedTerminalId!]: (prev[selectedTerminalId!] || 0) + 1 }))}
                       >
                         <RefreshCw className="w-4 h-4" />
                       </Button>
@@ -630,16 +630,23 @@ export default function TerminalsPage() {
         </Card>
       )}
 
-      {/* iframe 区域 */}
-      {selectedTerminalId && terminals.find(t => t.id === selectedTerminalId)?.status.running && (
+      {/* iframe 区域：所有 running 的终端都保持 iframe 存活，仅用 CSS 切换可见性 */}
+      {terminals.some(t => t.status.running) && (
         <Card className="p-0 overflow-hidden">
-          <iframe
-            key={iframeKey}
-            src={terminalUrl(terminals.find(t => t.id === selectedTerminalId)!)}
-            className="w-full border-0"
-            style={{ height: '70vh' }}
-            title="Terminal Web"
-          />
+          <div className="relative" style={{ height: '70vh' }}>
+            {terminals.filter(t => t.status.running).map(terminal => (
+              <iframe
+                key={`${terminal.id}-${iframeKeys[terminal.id] || 0}`}
+                src={terminalUrl(terminal)}
+                className="absolute inset-0 w-full h-full border-0"
+                style={{
+                  visibility: selectedTerminalId === terminal.id ? 'visible' : 'hidden',
+                  zIndex: selectedTerminalId === terminal.id ? 1 : 0,
+                }}
+                title={`Terminal ${terminal.name || terminal.id}`}
+              />
+            ))}
+          </div>
         </Card>
       )}
 
