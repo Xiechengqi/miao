@@ -195,9 +195,39 @@ export default function TerminalsPage() {
   const [selectedTerminalId, setSelectedTerminalId] = useState<string | null>(null);
   const [iframeKey, setIframeKey] = useState(0);
 
+  // 动态 favicon：terminalId -> svgUrl
+  const [dynamicFavicons, setDynamicFavicons] = useState<Record<string, string>>({});
+
   useEffect(() => {
     checkGottyAndLoad();
   }, []);
+
+  // 监听 GoTTY iframe 发送的动态 favicon
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || data.type !== 'gotty-favicon' || !data.svgUrl) return;
+
+      // 通过 event.source 匹配到对应的 terminal iframe
+      const iframes = document.querySelectorAll('iframe');
+      for (const iframe of iframes) {
+        if (iframe.contentWindow === event.source) {
+          // 从 iframe src 中匹配 terminal
+          const src = iframe.src;
+          const matched = terminals.find(t => {
+            const url = terminalUrl(t);
+            return url && src.startsWith(url);
+          });
+          if (matched) {
+            setDynamicFavicons(prev => ({ ...prev, [matched.id]: data.svgUrl }));
+          }
+          break;
+        }
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [terminals]);
 
   const checkGottyAndLoad = async () => {
     try {
@@ -522,14 +552,15 @@ export default function TerminalsPage() {
                       : "text-slate-600 hover:text-slate-900"
                   }`}
                 >
-                  <img
-                    src={`http://${terminal.addr}:${terminal.port}/favicon.ico`}
-                    className="w-4 h-4"
-                    alt=""
-                    onError={(e) => {
-                      e.currentTarget.style.display = 'none';
-                    }}
-                  />
+                  {dynamicFavicons[terminal.id] ? (
+                    <img
+                      src={dynamicFavicons[terminal.id]}
+                      className="w-4 h-4"
+                      alt=""
+                    />
+                  ) : (
+                    <span className="w-3 h-3 rounded-full bg-slate-400 inline-block flex-shrink-0" />
+                  )}
                   <span>{terminal.name || terminal.id}</span>
                 </button>
               ))}
