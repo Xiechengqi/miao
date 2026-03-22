@@ -194,6 +194,7 @@ export default function TerminalsPage() {
   // iframe 控制
   const [selectedTerminalId, setSelectedTerminalId] = useState<string | null>(null);
   const [iframeKeys, setIframeKeys] = useState<Record<string, number>>({});
+  const iframeRefs = useRef<Record<string, HTMLIFrameElement | null>>({});
 
   // 动态 favicon：terminalId -> svgUrl
   const [dynamicFavicons, setDynamicFavicons] = useState<Record<string, string>>({});
@@ -228,6 +229,13 @@ export default function TerminalsPage() {
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, [terminals]);
+
+  // 切换终端时自动聚焦到 iframe
+  useEffect(() => {
+    if (selectedTerminalId && iframeRefs.current[selectedTerminalId]) {
+      iframeRefs.current[selectedTerminalId]?.focus();
+    }
+  }, [selectedTerminalId]);
 
   const checkGottyAndLoad = async () => {
     try {
@@ -637,6 +645,7 @@ export default function TerminalsPage() {
             {terminals.filter(t => t.status.running).map(terminal => (
               <iframe
                 key={`${terminal.id}-${iframeKeys[terminal.id] || 0}`}
+                ref={(el) => { iframeRefs.current[terminal.id] = el; }}
                 src={terminalUrl(terminal)}
                 className="absolute inset-0 w-full h-full border-0"
                 style={{
