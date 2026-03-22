@@ -233,7 +233,9 @@ export default function TerminalsPage() {
   // 切换终端时自动聚焦到 iframe
   useEffect(() => {
     if (selectedTerminalId && iframeRefs.current[selectedTerminalId]) {
-      iframeRefs.current[selectedTerminalId]?.focus();
+      const iframe = iframeRefs.current[selectedTerminalId];
+      iframe?.focus();
+      iframe?.contentWindow?.postMessage({ type: 'gotty-focus' }, '*');
     }
   }, [selectedTerminalId]);
 
