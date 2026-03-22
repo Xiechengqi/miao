@@ -630,6 +630,7 @@ export default function ProxiesPage() {
   // 升级 sing-box
   const handleUpgradeSingBox = () => {
     if (upgrading) return;
+    if (!confirm("确定要更新 sing-box 吗？")) return;
 
     setUpgrading(true);
     setShowUpgradeModal(true);

@@ -101,13 +101,23 @@ export default function VncPage() {
 
   const handleUpgrade = async () => {
     if (upgrading) return;
-    if (!confirm("确定要更新 iVNC 吗？")) return;
 
     setUpgrading(true);
     setShowUpgradeModal(true);
     setUpgradeLogs([]);
     setUpgradeProgress(0);
     setUpgradeStatus("running");
+
+    // 如果 iVnc 正在运行，先自动停止
+    if (status?.running) {
+      try {
+        await api.stopIVnc();
+        // 等待进程真正退出
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch {
+        // 忽略停止错误，继续升级
+      }
+    }
 
     const token = localStorage.getItem("miao_token");
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";

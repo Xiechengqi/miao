@@ -401,6 +401,7 @@ export default function TerminalsPage() {
 
   const handleUpgradeGotty = () => {
     if (upgrading) return;
+    if (!confirm("确定要更新 gotty 吗？")) return;
 
     setUpgrading(true);
     setShowUpgradeModal(true);
