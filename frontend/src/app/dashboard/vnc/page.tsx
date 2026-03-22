@@ -101,6 +101,7 @@ export default function VncPage() {
 
   const handleUpgrade = async () => {
     if (upgrading) return;
+    if (!confirm("确定要更新 iVNC 吗？")) return;
 
     setUpgrading(true);
     setShowUpgradeModal(true);
