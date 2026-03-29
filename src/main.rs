@@ -1912,6 +1912,7 @@ lazy_static! {
         tx
     };
     static ref SING_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
+    static ref MIAO_PORT: StdMutex<u16> = StdMutex::new(6161);
 }
 
 // ============================================================================
@@ -4705,6 +4706,34 @@ async fn restart_terminal(
                 ));
             }
         }
+    }
+    Ok(Json(ApiResponse::success_no_data("terminal restarted")))
+}
+
+#[derive(Deserialize)]
+struct RestartByPortQuery {
+    port: u16,
+}
+
+/// POST /api/terminals/restart-by-port?port=XXXX - No auth required, called from gotty inject script
+async fn restart_terminal_by_port(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RestartByPortQuery>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(t) = config_guard.terminals.iter().find(|t| t.port == q.port) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("Terminal not found"))));
+        };
+        t.clone()
+    };
+    let id = cfg.id.clone();
+    let _ = stop_terminal_internal(&id).await;
+    if let Err(e) = start_terminal_internal(&id, &cfg).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("Failed to restart: {}", e))),
+        ));
     }
     Ok(Json(ApiResponse::success_no_data("terminal restarted")))
 }
@@ -9800,9 +9829,12 @@ async fn start_terminal_internal(
     let gotty_path = check_gotty()?;
     log_info!("Starting gotty from: {:?}", gotty_path);
 
-    // 创建自定义 index.html
+    // 创建自定义 index.html，注入 miao 端口和 gotty 端口
     let index_path = std::env::temp_dir().join(format!("gotty-index-{}.html", id));
-    let index_content = include_str!("../embedded/gotty-index.html");
+    let miao_port = *MIAO_PORT.lock().unwrap();
+    let index_content = include_str!("../embedded/gotty-index.html")
+        .replace("__MIAO_PORT__", &miao_port.to_string())
+        .replace("__GOTTY_PORT__", &config.port.to_string());
     std::fs::write(&index_path, index_content)?;
 
     let mut command = tokio::process::Command::new(&gotty_path);
@@ -10911,6 +10943,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let port = config.port.unwrap_or(DEFAULT_PORT);
+    *MIAO_PORT.lock().unwrap() = port;
 
     // Check sing-box binary and determine working directory
     let sing_box_home = if let Some(custom_home) = &config.sing_box_home {
@@ -11178,6 +11211,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/version", get(get_version))
         // Gotty injection script
         .route("/miao-inject/restart-button.js", get(serve_gotty_restart_script))
+        // No-auth restart endpoint for gotty inject script
+        .route("/api/terminals/restart-by-port", post(restart_terminal_by_port))
         .merge(ws_routes)
         .merge(protected_routes)
         // Static assets route (matches files in public/)
