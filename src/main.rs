@@ -2185,6 +2185,16 @@ fn spawn_with_app_log_capture(
 // API Handlers
 // ============================================================================
 
+/// Serve gotty restart button injection script
+async fn serve_gotty_restart_script() -> Response {
+    let script = include_str!("../embedded/gotty-restart-button.js");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        script,
+    ).into_response()
+}
+
 /// Serve static files from embedded assets
 async fn serve_static(Path(path): Path<String>) -> Response {
     let path = path.trim_start_matches('/');
@@ -9891,12 +9901,19 @@ async fn start_terminal_internal(
     let gotty_path = check_gotty()?;
     log_info!("Starting gotty from: {:?}", gotty_path);
 
+    // 创建自定义 index.html
+    let index_path = std::env::temp_dir().join(format!("gotty-index-{}.html", id));
+    let index_content = include_str!("../embedded/gotty-index.html");
+    std::fs::write(&index_path, index_content)?;
+
     let mut command = tokio::process::Command::new(&gotty_path);
     command
         .arg("-a")
         .arg(&config.addr)
         .arg("-p")
-        .arg(config.port.to_string());
+        .arg(config.port.to_string())
+        .arg("--index")
+        .arg(&index_path);
 
     if let (Some(user), Some(pass)) = (&config.auth_username, &config.auth_password) {
         if !user.trim().is_empty() && !pass.trim().is_empty() {
@@ -11260,6 +11277,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/setup/init", post(setup_init))
         .route("/api/login", post(login))
         .route("/api/version", get(get_version))
+        // Gotty injection script
+        .route("/miao-inject/restart-button.js", get(serve_gotty_restart_script))
         .merge(ws_routes)
         .merge(protected_routes)
         // Static assets route (matches files in public/)

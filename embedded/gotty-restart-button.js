@@ -1,0 +1,15 @@
+(function() {
+  // 创建重启按钮
+  const restartBtn = document.createElement('button');
+  restartBtn.className = 'gotty-restart-btn';
+  restartBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 8c0 2.76-2.24 5-5 5s-5-2.24-5-5 2.24-5 5-5c1.38 0 2.63.56 3.54 1.46M13 3v3h-3" stroke="rgba(255,255,255,0.7)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  restartBtn.title = '重启终端';
+  restartBtn.style.cssText = 'position:fixed;bottom:10px;right:10px;background:rgba(0,0,0,0.7);color:#fff;padding:3px 8px;border-radius:4px;font-size:12px;z-index:1000;cursor:pointer;border:none;';
+
+  restartBtn.addEventListener('click', function() {
+    // 通过 postMessage 通知父页面重启
+    window.parent.postMessage({ type: 'gotty-restart' }, '*');
+  });
+
+  document.body.appendChild(restartBtn);
+})();

@@ -203,26 +203,44 @@ export default function TerminalsPage() {
     checkGottyAndLoad();
   }, []);
 
-  // 监听 GoTTY iframe 发送的动态 favicon
+  // 监听 GoTTY iframe 发送的动态 favicon 和重启请求
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const data = event.data;
-      if (!data || data.type !== 'gotty-favicon' || !data.svgUrl) return;
 
-      // 通过 event.source 匹配到对应的 terminal iframe
-      const iframes = document.querySelectorAll('iframe');
-      for (const iframe of iframes) {
-        if (iframe.contentWindow === event.source) {
-          // 从 iframe src 中匹配 terminal
-          const src = iframe.src;
-          const matched = terminals.find(t => {
-            const url = terminalUrl(t);
-            return url && src.startsWith(url);
-          });
-          if (matched) {
-            setDynamicFavicons(prev => ({ ...prev, [matched.id]: data.svgUrl }));
+      // 处理 favicon 更新
+      if (data && data.type === 'gotty-favicon' && data.svgUrl) {
+        const iframes = document.querySelectorAll('iframe');
+        for (const iframe of iframes) {
+          if (iframe.contentWindow === event.source) {
+            const src = iframe.src;
+            const matched = terminals.find(t => {
+              const url = terminalUrl(t);
+              return url && src.startsWith(url);
+            });
+            if (matched) {
+              setDynamicFavicons(prev => ({ ...prev, [matched.id]: data.svgUrl }));
+            }
+            break;
           }
-          break;
+        }
+      }
+
+      // 处理重启请求
+      if (data && data.type === 'gotty-restart') {
+        const iframes = document.querySelectorAll('iframe');
+        for (const iframe of iframes) {
+          if (iframe.contentWindow === event.source) {
+            const src = iframe.src;
+            const matched = terminals.find(t => {
+              const url = terminalUrl(t);
+              return url && src.startsWith(url);
+            });
+            if (matched) {
+              handleRestart(matched.id);
+            }
+            break;
+          }
         }
       }
     };
@@ -658,17 +676,6 @@ export default function TerminalsPage() {
                 title={`Terminal ${terminal.name || terminal.id}`}
               />
             ))}
-            {selectedTerminalId && (
-              <button
-                onClick={() => handleRestart(selectedTerminalId)}
-                disabled={loading}
-                className="absolute bottom-4 right-4 z-10 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white px-3 py-2 rounded-lg shadow-lg flex items-center gap-2 transition-colors"
-                title="重启当前终端"
-              >
-                <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
-                重启
-              </button>
-            )}
           </div>
         </Card>
       )}
