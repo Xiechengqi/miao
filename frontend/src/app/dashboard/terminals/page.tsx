@@ -658,6 +658,17 @@ export default function TerminalsPage() {
                 title={`Terminal ${terminal.name || terminal.id}`}
               />
             ))}
+            {selectedTerminalId && (
+              <button
+                onClick={() => handleRestart(selectedTerminalId)}
+                disabled={loading}
+                className="absolute bottom-4 right-4 z-10 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white px-3 py-2 rounded-lg shadow-lg flex items-center gap-2 transition-colors"
+                title="重启当前终端"
+              >
+                <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
+                重启
+              </button>
+            )}
           </div>
         </Card>
       )}
