@@ -2531,27 +2531,10 @@ async fn install_ivnc() -> Json<ApiResponse<serde_json::Value>> {
 
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
     let client = reqwest::Client::new();
-    let release_url = "https://api.github.com/repos/Xiechengqi/iVnc/releases/latest";
-
-    let download_url = match client
-        .get(release_url)
-        .header("User-Agent", "miao-rust")
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if let Ok(release) = resp.json::<serde_json::Value>().await {
-                let tag = release["tag_name"].as_str().unwrap_or("latest");
-                format!(
-                    "https://github.com/Xiechengqi/iVnc/releases/download/{}/ivnc-linux-{}",
-                    tag, arch
-                )
-            } else {
-                return Json(ApiResponse::error("获取版本信息失败".to_string()));
-            }
-        }
-        Err(e) => return Json(ApiResponse::error(format!("请求失败: {}", e))),
-    };
+    let download_url = format!(
+        "https://github.com/Xiechengqi/iVnc/releases/latest/download/ivnc-linux-{}",
+        arch
+    );
 
     log_info!("Downloading iVNC from: {}", download_url);
 
@@ -3069,31 +3052,10 @@ async fn perform_ivnc_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>
 
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
     let client = reqwest::Client::new();
-    let release_url = "https://api.github.com/repos/Xiechengqi/iVnc/releases/latest";
-
-    let download_url = match client
-        .get(release_url)
-        .header("User-Agent", "miao-rust")
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if let Ok(release) = resp.json::<serde_json::Value>().await {
-                let tag = release["tag_name"].as_str().unwrap_or("latest");
-                format!(
-                    "https://github.com/Xiechengqi/iVnc/releases/download/{}/ivnc-linux-{}",
-                    tag, arch
-                )
-            } else {
-                send_log(1, "解析版本信息失败", "error", None).await;
-                return;
-            }
-        }
-        Err(e) => {
-            send_log(1, &format!("获取版本信息失败: {}", e), "error", None).await;
-            return;
-        }
-    };
+    let download_url = format!(
+        "https://github.com/Xiechengqi/iVnc/releases/latest/download/ivnc-linux-{}",
+        arch
+    );
 
     send_log(1, "获取版本信息成功", "success", None).await;
 
@@ -5612,68 +5574,28 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
         send_log(5, "权限设置完成", "success", None).await;
     } else {
         // Original download logic
-        // Step 1: Fetch latest release info
-        send_log(1, "获取最新版本信息...", "info", None).await;
-
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build() {
-        Ok(c) => c,
-        Err(e) => {
-            send_log(1, &format!("创建 HTTP 客户端失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    let release: GitHubRelease = match client
-        .get("https://api.github.com/repos/xiechengqi/miao/releases/latest")
-        .header("User-Agent", "miao")
-        .send()
-        .await {
-        Ok(r) => {
-            let status = r.status();
-            if !status.is_success() {
-                let body = r.text().await.unwrap_or_default();
-                send_log(1, &format!("获取版本信息失败 (HTTP {}): {}", status.as_u16(), body), "error", None).await;
-                return;
-            }
-            match r.json().await {
-                Ok(rel) => rel,
-                Err(e) => {
-                    send_log(1, &format!("解析版本信息失败: {}", e), "error", None).await;
-                    return;
-                }
-            }
-        },
-        Err(e) => {
-            send_log(1, &format!("获取版本信息失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    send_log(1, &format!("最新版本: {}", release.tag_name), "success", None).await;
-
-    // Step 2: Find download URL
-    send_log(2, "查找下载链接...", "info", None).await;
+        // Step 1: Build download URL directly (no GitHub API needed)
+        send_log(1, "准备下载链接...", "info", None).await;
 
     let asset_name = if cfg!(target_arch = "x86_64") {
         "miao-rust-linux-amd64"
     } else if cfg!(target_arch = "aarch64") {
         "miao-rust-linux-arm64"
     } else {
-        send_log(2, "不支持的系统架构", "error", None).await;
+        send_log(1, "不支持的系统架构", "error", None).await;
         return;
     };
 
-    let download_url = match release.assets.iter().find(|a| a.name == asset_name) {
-        Some(a) => a.browser_download_url.clone(),
-        None => {
-            send_log(2, "未找到当前架构的二进制文件", "error", None).await;
-            return;
-        }
-    };
+    let download_url = format!(
+        "https://github.com/Xiechengqi/miao/releases/latest/download/{}",
+        asset_name
+    );
 
-    send_log(2, &format!("找到下载链接: {}", asset_name), "success", None).await;
+    send_log(1, "下载链接准备完成", "success", None).await;
+
+    // Step 2: (skipped - URL is fixed)
+
+    send_log(2, &format!("下载链接: {}", asset_name), "success", None).await;
 
     // Step 3: Download binary with progress
     send_log(3, "开始下载...", "info", Some(0)).await;
@@ -5847,30 +5769,7 @@ async fn perform_upgrade_with_logs(log_tx: tokio::sync::mpsc::Sender<UpgradeLogE
 
 /// POST /api/upgrade - Download and apply upgrade
 async fn upgrade() -> Json<ApiResponse<String>> {
-    // 1. Fetch latest release info
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build() {
-        Ok(c) => c,
-        Err(e) => return Json(ApiResponse::error(format!("Failed to create HTTP client: {}", e))),
-    };
-
-    let release: GitHubRelease = match client
-        .get("https://api.github.com/repos/xiechengqi/miao/releases/latest")
-        .header("User-Agent", "miao")
-        .send()
-        .await {
-        Ok(r) => match r.json().await {
-            Ok(rel) => rel,
-            Err(e) => return Json(ApiResponse::error(format!("Failed to parse release info: {}", e))),
-        },
-        Err(e) => return Json(ApiResponse::error(format!("Failed to fetch release info: {}", e))),
-    };
-
-    // 移除版本检查，允许强制更新到 latest
-    // 这样即使当前版本与 latest 相同也可以重新安装
-
-    // 2. Find download URL for current architecture
+    // 1. Build download URL directly (no GitHub API needed)
     let asset_name = if cfg!(target_arch = "x86_64") {
         "miao-rust-linux-amd64"
     } else if cfg!(target_arch = "aarch64") {
@@ -5879,12 +5778,12 @@ async fn upgrade() -> Json<ApiResponse<String>> {
         return Json(ApiResponse::error("Unsupported architecture"));
     };
 
-    let download_url = match release.assets.iter().find(|a| a.name == asset_name) {
-        Some(a) => a.browser_download_url.clone(),
-        None => return Json(ApiResponse::error("No binary found for current architecture")),
-    };
+    let download_url = format!(
+        "https://github.com/Xiechengqi/miao/releases/latest/download/{}",
+        asset_name
+    );
 
-    // 3. Download new binary to temp location (use longer timeout for large files)
+    // 2. Download new binary to temp location (use longer timeout for large files)
     log_info!("Downloading update from: {}", download_url);
     let download_client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
