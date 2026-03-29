@@ -5867,7 +5867,7 @@ async fn upgrade() -> Json<ApiResponse<String>> {
     // 10. Restart:
     // - Prefer systemd restart (when deployed as a service)
     // - Fallback to exec() restart (for non-systemd environments / failures)
-    let new_version = release.tag_name.clone();
+    let new_version = asset_name.to_string();
     tokio::spawn(async move {
         sleep(Duration::from_millis(500)).await;
 
