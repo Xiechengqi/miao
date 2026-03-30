@@ -10944,6 +10944,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 hosts: vec![],
                 host_groups: vec![],
                 metrics: MetricsConfig::default(),
+                enable_ipv6_tun: None,
             },
             true,
         ),
