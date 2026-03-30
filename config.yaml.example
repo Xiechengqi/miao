@@ -125,6 +125,10 @@ nodes:
 # IPv6 note:
 # Miao enables sing-box TUN with an IPv6 ULA prefix by default (fd00:172:18::1/126) to avoid IPv6 being blocked by strict routing rules.
 # DNS strategy is still prefer_ipv4 by default, so IPv6 will mainly be used when necessary.
+# If IPv6 is disabled on your system (net.ipv6.conf.all.disable_ipv6=1), miao will auto-detect and skip IPv6 TUN address.
+# You can also manually control this behavior:
+# enable_ipv6_tun: false  # Force disable IPv6 TUN address
+# enable_ipv6_tun: true   # Force enable IPv6 TUN address (may fail if system IPv6 is disabled)
 
 # TCP reverse tunneling via SSH (-R) (optional)
 # Note:

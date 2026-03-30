@@ -1018,6 +1018,9 @@ struct Config {
 
     #[serde(default)]
     metrics: MetricsConfig,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enable_ipv6_tun: Option<bool>,
 }
 
 const DEFAULT_PORT: u16 = 6161;
@@ -10140,7 +10143,8 @@ async fn gen_config(
         eprintln!("⚠️  Warning: No proxy nodes available. Generating minimal config.");
     }
 
-    let mut sing_box_config = get_config_template();
+    let enable_ipv6 = config.enable_ipv6_tun.unwrap_or_else(is_ipv6_enabled);
+    let mut sing_box_config = get_config_template(enable_ipv6);
     if let Some(dns) = sing_box_config.get_mut("dns") {
         let configured = config.dns_active.as_deref().unwrap_or(DEFAULT_DNS_ACTIVE);
         let active = sanitize_dns_active(configured);
@@ -10204,9 +10208,21 @@ async fn gen_config(
     Ok(())
 }
 
+fn is_ipv6_enabled() -> bool {
+    std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6")
+        .ok()
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .map(|v| v == 0)
+        .unwrap_or(true)
+}
 
+fn get_config_template(enable_ipv6: bool) -> serde_json::Value {
+    let tun_addresses: Vec<&str> = if enable_ipv6 {
+        vec!["172.18.0.1/30", "fd00:172:18::1/126"]
+    } else {
+        vec!["172.18.0.1/30"]
+    };
 
-fn get_config_template() -> serde_json::Value {
     serde_json::json!({
         "log": {"disabled": false, "timestamp": true, "level": "info"},
         "experimental": {"clash_api": {"external_controller": "127.0.0.1:6262", "access_control_allow_origin": ["*"]}},
@@ -10241,7 +10257,7 @@ fn get_config_template() -> serde_json::Value {
             ]
         },
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": ["172.18.0.1/30", "fd00:172:18::1/126"], "mtu": 1400, "auto_route": true, "strict_route": true, "stack": "system", "sniff": true, "sniff_override_destination": false },
+            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": tun_addresses, "mtu": 1400, "auto_route": true, "strict_route": true, "stack": "system", "sniff": true, "sniff_override_destination": false },
             {"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080}
         ],
         "outbounds": [
