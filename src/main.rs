@@ -5464,7 +5464,7 @@ struct UpgradeLogEntry {
 async fn validate_uploaded_binary(
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<(StatusCode, Json<ApiResponse<String>>), StatusCode> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -5479,17 +5479,17 @@ async fn validate_uploaded_binary(
         if field.name() == Some("file") {
             let data = match field.bytes().await {
                 Ok(d) => d,
-                Err(_) => return Ok(Json(ApiResponse::error("读取文件失败"))),
+                Err(_) => return Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::error("读取文件失败")))),
             };
 
             let temp_path = "/tmp/miao-uploaded";
             if let Err(e) = fs::write(temp_path, &data) {
-                return Ok(Json(ApiResponse::error(&format!("保存文件失败: {}", e))));
+                return Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(&format!("保存文件失败: {}", e)))));
             }
 
             if let Err(e) = fs::set_permissions(temp_path, fs::Permissions::from_mode(0o755)) {
                 let _ = fs::remove_file(temp_path);
-                return Ok(Json(ApiResponse::error(&format!("设置权限失败: {}", e))));
+                return Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(&format!("设置权限失败: {}", e)))));
             }
 
             let output = tokio::time::timeout(
@@ -5501,17 +5501,17 @@ async fn validate_uploaded_binary(
 
             match output {
                 Ok(Ok(out)) if out.status.success() => {
-                    return Ok(Json(ApiResponse::success("验证成功", "ok".to_string())));
+                    return Ok((StatusCode::OK, Json(ApiResponse::success("验证成功", "ok".to_string()))));
                 }
                 _ => {
                     let _ = fs::remove_file(temp_path);
-                    return Ok(Json(ApiResponse::error("文件验证失败，无法执行")));
+                    return Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::error("文件验证失败，无法执行"))));
                 }
             }
         }
     }
 
-    Ok(Json(ApiResponse::error("未找到上传文件")))
+    Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::error("未找到上传文件"))))
 }
 
 /// WebSocket endpoint for upgrade with real-time logs

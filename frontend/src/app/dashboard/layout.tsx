@@ -8,14 +8,6 @@ import { useStore } from "@/stores/useStore";
 import { useLogs, useTraffic } from "@/hooks";
 import { api } from "@/lib/api";
 import { VersionInfo } from "@/types/api";
-
-type UpgradeLogEntry = {
-  step: number;
-  total_steps: number;
-  message: string;
-  level: "info" | "error" | "success" | "progress";
-  progress?: number;
-};
 import {
   Share2,
   Terminal,
@@ -33,6 +25,17 @@ import {
   Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+const DEFAULT_UPGRADE_STEPS = 10;
+const UPLOAD_UPGRADE_STEPS = 11;
+
+type UpgradeLogEntry = {
+  step: number;
+  total_steps: number;
+  message: string;
+  level: "info" | "error" | "success" | "progress";
+  progress?: number;
+};
 
 const navItems = [
   { href: "/dashboard/hosts", label: "主机", icon: Server },
@@ -122,15 +125,43 @@ export default function DashboardLayout({
     addToast({ type: "error", message: "更新后未检测到服务恢复，请稍后手动刷新" });
   };
 
+  const scrollUpgradeLogsToBottom = () => {
+    setTimeout(() => {
+      if (upgradeLogsRef.current) {
+        upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
+      }
+    }, 50);
+  };
+
+  const normalizeUpgradeEntry = (entry: UpgradeLogEntry, useUploaded: boolean): UpgradeLogEntry => {
+    if (!useUploaded) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      step: entry.step + 1,
+      total_steps: UPLOAD_UPGRADE_STEPS,
+    };
+  };
+
   const handleUpgrade = async () => {
     if (upgrading) return;
+    setUploadedFile(null);
     setShowUploadConfirmModal(true);
   };
 
   const handleConfirmUpgrade = async () => {
     setShowUploadConfirmModal(false);
+    const useUploadedFile = Boolean(uploadedFile);
 
-    // 如果有上传文件，先验证
+    setUpgrading(true);
+    setShowUpgradeModal(true);
+    setUpgradeLogs([]);
+    setUpgradeProgress(0);
+    setUpgradeStatus("running");
+
+    // 如果有上传文件，先上传并验证
     if (uploadedFile) {
       setValidating(true);
       try {
@@ -138,58 +169,159 @@ export default function DashboardLayout({
         formData.append("file", uploadedFile);
 
         const token = localStorage.getItem("miao_token");
-        const res = await fetch("/api/upgrade/validate", {
-          method: "POST",
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-          body: formData,
+        setUpgradeLogs([{
+          step: 1,
+          total_steps: UPLOAD_UPGRADE_STEPS,
+          message: `开始上传本地文件: ${uploadedFile.name}`,
+          level: "info",
+        }]);
+
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "/api/upgrade/validate");
+          xhr.responseType = "json";
+
+          if (token) {
+            xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+          }
+
+          xhr.upload.onprogress = (event) => {
+            if (!event.lengthComputable) {
+              return;
+            }
+
+            const uploadPercent = Math.min(
+              100,
+              Math.round((event.loaded / event.total) * 100)
+            );
+            setUpgradeProgress(Math.round(uploadPercent / UPLOAD_UPGRADE_STEPS));
+            setUpgradeLogs((prev) => {
+              const next = [...prev];
+              const progressEntry: UpgradeLogEntry = {
+                step: 1,
+                total_steps: UPLOAD_UPGRADE_STEPS,
+                message: `上传本地文件中... ${(event.loaded / 1024 / 1024).toFixed(1)} MB / ${(event.total / 1024 / 1024).toFixed(1)} MB`,
+                level: "progress",
+                progress: uploadPercent,
+              };
+
+              const existingIndex = next.findIndex(
+                (log) => log.step === 1 && log.level === "progress"
+              );
+
+              if (existingIndex >= 0) {
+                next[existingIndex] = progressEntry;
+              } else {
+                next.push(progressEntry);
+              }
+
+              return next;
+            });
+            scrollUpgradeLogsToBottom();
+          };
+
+          xhr.upload.onload = () => {
+            setUpgradeLogs((prev) => [
+              ...prev.filter((log) => !(log.step === 1 && log.level === "progress")),
+              {
+                step: 1,
+                total_steps: UPLOAD_UPGRADE_STEPS,
+                message: "文件上传完成，正在校验可执行文件...",
+                level: "info",
+              },
+            ]);
+            scrollUpgradeLogsToBottom();
+          };
+
+          xhr.onload = () => {
+            let result: { success?: boolean; message?: string } | null = null;
+
+            if (xhr.response && typeof xhr.response === "object") {
+              result = xhr.response as { success?: boolean; message?: string };
+            } else {
+              try {
+                result = JSON.parse(xhr.responseText || "null") as
+                  | { success?: boolean; message?: string }
+                  | null;
+              } catch {
+                reject(new Error("校验响应格式无效"));
+                return;
+              }
+            }
+
+            if (xhr.status < 200 || xhr.status >= 300) {
+              reject(new Error(result?.message || "请求失败"));
+              return;
+            }
+
+            if (!result?.success) {
+              reject(new Error(result?.message || "文件校验未通过"));
+              return;
+            }
+
+            setUpgradeLogs((prev) => [
+              ...prev.filter((log) => !(log.step === 1 && log.level === "progress")),
+              {
+                step: 1,
+                total_steps: UPLOAD_UPGRADE_STEPS,
+                message: "本地文件上传并验证完成",
+                level: "success",
+              },
+            ]);
+            setUpgradeProgress(Math.round((1 / UPLOAD_UPGRADE_STEPS) * 100));
+            scrollUpgradeLogsToBottom();
+            resolve();
+          };
+
+          xhr.onerror = () => reject(new Error("上传请求失败"));
+          xhr.onabort = () => reject(new Error("上传请求已取消"));
+          xhr.send(formData);
         });
-
-        if (!res.ok) {
-          const error = await res.text();
-          addToast({ type: "error", message: `验证失败: ${error}` });
-          setValidating(false);
-          return;
-        }
-
-        addToast({ type: "success", message: "文件验证成功，开始更新..." });
       } catch (error) {
-        addToast({ type: "error", message: "验证请求失败" });
+        const message = error instanceof Error ? error.message : "上传或验证失败";
+        setUpgradeStatus("error");
+        setUpgradeLogs((prev) => [
+          ...prev.filter((log) => !(log.step === 1 && log.level === "progress")),
+          {
+            step: 1,
+            total_steps: UPLOAD_UPGRADE_STEPS,
+            message,
+            level: "error",
+          },
+        ]);
+        setUploadedFile(null);
         setValidating(false);
+        setUpgrading(false);
+        addToast({ type: "error", message: `验证失败: ${message}` });
         return;
       } finally {
         setValidating(false);
       }
     }
 
-    // 开始更新流程
-    setUpgrading(true);
-    setShowUpgradeModal(true);
-    setUpgradeLogs([]);
-    setUpgradeProgress(0);
-    setUpgradeStatus("running");
-
     const token = localStorage.getItem("miao_token");
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const useUploaded = uploadedFile ? "true" : "false";
+    const useUploaded = useUploadedFile ? "true" : "false";
     const wsUrl = `${wsProtocol}//${window.location.host}/api/upgrade/ws?token=${token}&use_uploaded=${useUploaded}`;
 
     const ws = new WebSocket(wsUrl);
+    let wsFailed = false;
+    let wsReceivedMessage = false;
 
     ws.onmessage = (event) => {
       try {
-        const entry: UpgradeLogEntry = JSON.parse(event.data);
+        const rawEntry: UpgradeLogEntry = JSON.parse(event.data);
+        const entry = normalizeUpgradeEntry(rawEntry, useUploadedFile);
+        wsReceivedMessage = true;
         setUpgradeLogs((prev) => [...prev, entry]);
         setUpgradeProgress(Math.round((entry.step / entry.total_steps) * 100));
 
         if (entry.level === "error") {
+          wsFailed = true;
           setUpgradeStatus("error");
         }
 
-        setTimeout(() => {
-          if (upgradeLogsRef.current) {
-            upgradeLogsRef.current.scrollTop = upgradeLogsRef.current.scrollHeight;
-          }
-        }, 50);
+        scrollUpgradeLogsToBottom();
       } catch {
         // Ignore parse errors
       }
@@ -198,10 +330,10 @@ export default function DashboardLayout({
     ws.onclose = () => {
       setUpgradeLogs((prev) => {
         const hasError = prev.some((log) => log.level === "error");
-        if (!hasError && prev.length > 0) {
+        if (!wsFailed && !hasError && wsReceivedMessage) {
           setUpgradeStatus("success");
           waitForRestart();
-        } else if (hasError) {
+        } else {
           setUpgrading(false);
         }
         return prev;
@@ -209,10 +341,16 @@ export default function DashboardLayout({
     };
 
     ws.onerror = () => {
+      wsFailed = true;
       setUpgradeStatus("error");
       setUpgradeLogs((prev) => [
         ...prev,
-        { step: 0, total_steps: 10, message: "WebSocket 连接失败", level: "error" },
+        {
+          step: useUploadedFile ? 2 : 0,
+          total_steps: useUploadedFile ? UPLOAD_UPGRADE_STEPS : DEFAULT_UPGRADE_STEPS,
+          message: "WebSocket 连接失败",
+          level: "error",
+        },
       ]);
       setUpgrading(false);
     };
@@ -438,7 +576,12 @@ export default function DashboardLayout({
       {/* Upload Confirm Modal */}
       <Modal
         isOpen={showUploadConfirmModal}
-        onClose={() => !validating && setShowUploadConfirmModal(false)}
+        onClose={() => {
+          if (!validating) {
+            setUploadedFile(null);
+            setShowUploadConfirmModal(false);
+          }
+        }}
         title="强制更新确认"
       >
         <div className="space-y-4">
@@ -452,7 +595,10 @@ export default function DashboardLayout({
           <div className="flex justify-end gap-3">
             <Button
               variant="secondary"
-              onClick={() => setShowUploadConfirmModal(false)}
+              onClick={() => {
+                setUploadedFile(null);
+                setShowUploadConfirmModal(false);
+              }}
               disabled={validating}
             >
               取消
