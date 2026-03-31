@@ -5495,7 +5495,7 @@ async fn validate_uploaded_binary(
             let output = tokio::time::timeout(
                 Duration::from_secs(5),
                 tokio::process::Command::new(temp_path)
-                    .arg("--version")
+                    .arg("--help")
                     .output()
             ).await;
 
