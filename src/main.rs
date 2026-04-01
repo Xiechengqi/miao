@@ -43,6 +43,7 @@ mod tcp_tunnel;
 mod full_tunnel;
 mod sync;
 mod app;
+mod subscription_parser;
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -5245,6 +5246,24 @@ async fn test_connectivity(
     };
 
     Json(ApiResponse::success("Test completed", result))
+}
+
+// ============================================================================
+// Subscription Parser API
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct ParseSubscriptionRequest {
+    content: String,
+}
+
+async fn parse_subscription_handler(
+    Json(req): Json<ParseSubscriptionRequest>,
+) -> Json<ApiResponse<Vec<subscription_parser::ShadowsocksOutbound>>> {
+    match subscription_parser::parse_subscription(&req.content) {
+        Ok(outbounds) => Json(ApiResponse::success("Parsed successfully", outbounds)),
+        Err(e) => Json(ApiResponse::error(format!("Parse failed: {}", e))),
+    }
 }
 
 // ============================================================================
@@ -11845,6 +11864,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/apps/{id}/restart", post(restart_app))
         // Connectivity test
         .route("/api/connectivity", post(test_connectivity))
+        // Subscription parser
+        .route("/api/subscription/parse", post(parse_subscription_handler))
         // Upgrade (protected)
         .route("/api/upgrade", post(upgrade))
         .merge(
