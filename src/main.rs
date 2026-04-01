@@ -11095,6 +11095,41 @@ fn parse_subscription_text(
                 node_names.push(name.to_string());
                 outbounds.push(serde_json::to_value(anytls)?);
             }
+            "ss" => {
+                let plugin = node.get("plugin").and_then(|p| p.as_str());
+                if plugin.is_some() {
+                    log_warning!("Skipping Clash SS node '{}': plugin '{}' not supported (requires external binary)", name, plugin.unwrap_or("unknown"));
+                    continue;
+                }
+                let method = node
+                    .get("cipher")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                if method.is_empty() {
+                    log_warning!("Skipping Clash SS node '{}': missing cipher", name);
+                    continue;
+                }
+                let ss = Shadowsocks {
+                    outbound_type: "shadowsocks".to_string(),
+                    tag: name.to_string(),
+                    server: node
+                        .get("server")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
+                    method: method.to_string(),
+                    password: node
+                        .get("password")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    plugin: None,
+                    plugin_opts: None,
+                };
+                node_names.push(name.to_string());
+                outbounds.push(serde_json::to_value(ss)?);
+            }
             _ => {}
         }
     }
@@ -11398,6 +11433,15 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
     } else {
         (None, None)
     };
+
+    // Filter out nodes with unsupported plugins (obfs-local requires external binary)
+    if let Some(ref p) = plugin {
+        if p == "obfs-local" {
+            let node_name = if name.is_empty() { format!("{}:{}", server, port) } else { name.clone() };
+            log_warning!("Skipping SS node '{}': unsupported plugin 'obfs-local' (simple-obfs requires external binary not installed on system)", node_name);
+            return None;
+        }
+    }
 
     // Create shadowsocks outbound
     let ss = Shadowsocks {

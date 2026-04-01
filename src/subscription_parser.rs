@@ -81,6 +81,13 @@ fn parse_ss_url(url_str: &str) -> Result<ShadowsocksOutbound, String> {
         (None, None)
     };
 
+    // Filter out nodes with unsupported plugins (obfs-local requires external binary)
+    if let Some(ref p) = plugin {
+        if p == "obfs-local" {
+            return Err(format!("Unsupported plugin 'obfs-local' (simple-obfs) for node '{}' - requires external binary not installed on system", tag));
+        }
+    }
+
     Ok(ShadowsocksOutbound {
         outbound_type: "shadowsocks".to_string(),
         tag,
