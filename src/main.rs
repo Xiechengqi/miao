@@ -11434,14 +11434,18 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
         (None, None)
     };
 
-    // Filter out nodes with unsupported plugins (obfs-local requires external binary)
-    if let Some(ref p) = plugin {
+    // Strip unsupported plugins (obfs-local requires external binary not available)
+    let (plugin, plugin_opts) = if let Some(ref p) = plugin {
         if p == "obfs-local" {
             let node_name = if name.is_empty() { format!("{}:{}", server, port) } else { name.clone() };
-            log_warning!("Skipping SS node '{}': unsupported plugin 'obfs-local' (simple-obfs requires external binary not installed on system)", node_name);
-            return None;
+            log_warning!("SS node '{}': stripping unsupported plugin 'obfs-local' (simple-obfs requires external binary)", node_name);
+            (None, None)
+        } else {
+            (plugin, plugin_opts)
         }
-    }
+    } else {
+        (plugin, plugin_opts)
+    };
 
     // Create shadowsocks outbound
     let ss = Shadowsocks {
