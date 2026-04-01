@@ -11250,10 +11250,14 @@ fn parse_singbox_json(
             _ => {
                 // For other types, use the outbound as-is
                 // But skip if it's missing required fields
-                if !tag.is_empty() {
-                    node_names.push(tag.to_string());
-                    result_outbounds.push(outbound.clone());
+                if tag.is_empty() {
+                    log_warning!("Skipping {} outbound with empty tag: {:?}", typ, outbound);
+                    continue;
                 }
+
+                log_info!("Parsed {} node: {}", typ, tag);
+                node_names.push(tag.to_string());
+                result_outbounds.push(outbound.clone());
             }
         }
     }
@@ -11293,11 +11297,11 @@ fn try_parse_ss_urls(text: &str) -> Option<Result<(Vec<String>, Vec<serde_json::
 fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     // Remove all whitespace (newlines, spaces, etc.)
     let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    // Handle URL-safe base64 as well
+    // Handle URL-safe base64 as well, use NO_PAD to handle missing padding
     if cleaned.contains('_') || cleaned.contains('-') {
-        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, &cleaned)
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &cleaned)
     } else {
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cleaned)
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &cleaned)
     }
 }
 
@@ -11339,25 +11343,40 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
     // Find the @ sign separating userinfo from server:port
     let (userinfo, server_part) = match url_part.split_once('@') {
         Some((u, s)) => (u, s),
-        None => return None,
+        None => {
+            log_warning!("Failed to parse SS URL (no @ found): {}", url);
+            return None;
+        }
     };
 
     // Split server_part by ? to separate server:port from query params
     let (server_port_part, query_part) = match server_part.split_once('?') {
-        Some((sp, q)) => (sp, Some(q)),
+        Some((sp, q)) => (sp.trim_end_matches('/'), Some(q)),
         None => (server_part, None),
     };
 
     // Parse server:port
     let (server, port) = match server_port_part.rsplit_once(':') {
-        Some((s, p)) => (s, p.parse::<u16>().ok()?),
-        None => return None,
+        Some((s, p)) => match p.parse::<u16>() {
+            Ok(port) => (s, port),
+            Err(_) => {
+                log_warning!("Failed to parse port in SS URL: {}", p);
+                return None;
+            }
+        },
+        None => {
+            log_warning!("Failed to parse server:port in SS URL: {}", server_port_part);
+            return None;
+        }
     };
 
     // Decode userinfo (method:password)
     let decoded_userinfo = match base64_decode(userinfo) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(_) => return None,
+        Err(e) => {
+            log_warning!("Failed to decode userinfo in SS URL: {:?}", e);
+            return None;
+        }
     };
 
     let (method, password) = match decoded_userinfo.split_once(':') {
