@@ -1513,6 +1513,10 @@ struct Shadowsocks {
     server_port: u16,
     method: String,
     password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_opts: Option<String>,
 }
 
 // ============================================================================
@@ -6954,6 +6958,8 @@ async fn add_node(
                     server_port: req.server_port,
                     method: req.cipher.unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string()),
                     password: req.password.unwrap_or_default(),
+                    plugin: None,
+                    plugin_opts: None,
                 };
                 serde_json::to_string(&node)
             }
@@ -7154,6 +7160,8 @@ async fn update_node(
                     server_port,
                     method,
                     password,
+                    plugin: None,
+                    plugin_opts: None,
                 };
                 serde_json::to_string(&node)
             }
@@ -11333,8 +11341,14 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
         None => return None,
     };
 
+    // Split server_part by ? to separate server:port from query params
+    let (server_port_part, query_part) = match server_part.split_once('?') {
+        Some((sp, q)) => (sp, Some(q)),
+        None => (server_part, None),
+    };
+
     // Parse server:port
-    let (server, port) = match server_part.rsplit_once(':') {
+    let (server, port) = match server_port_part.rsplit_once(':') {
         Some((s, p)) => (s, p.parse::<u16>().ok()?),
         None => return None,
     };
@@ -11358,6 +11372,13 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
         }
     };
 
+    // Parse plugin parameters if present
+    let (plugin, plugin_opts) = if let Some(query) = query_part {
+        parse_ss_plugin_params(query)
+    } else {
+        (None, None)
+    };
+
     // Create shadowsocks outbound
     let ss = Shadowsocks {
         outbound_type: "shadowsocks".to_string(),
@@ -11366,6 +11387,8 @@ fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
         server_port: port,
         method,
         password,
+        plugin,
+        plugin_opts,
     };
 
     Some((ss.tag.clone(), serde_json::to_value(ss).ok()?))
@@ -11377,6 +11400,31 @@ fn url_decode(input: &str) -> String {
         .decode_utf8()
         .unwrap_or_else(|_| input.to_string().into())
         .into_owned()
+}
+
+/// Parse SS plugin parameters from query string
+/// Example: plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dexample.com
+fn parse_ss_plugin_params(query: &str) -> (Option<String>, Option<String>) {
+    for param in query.split('&') {
+        if let Some(value) = param.strip_prefix("plugin=") {
+            let decoded = url_decode(value);
+            let parts: Vec<&str> = decoded.split(';').collect();
+            if parts.is_empty() {
+                continue;
+            }
+            let plugin = match parts[0] {
+                "simple-obfs" => "obfs-local",
+                other => other,
+            };
+            let opts = if parts.len() > 1 {
+                Some(parts[1..].join(";"))
+            } else {
+                None
+            };
+            return (Some(plugin.to_string()), opts);
+        }
+    }
+    (None, None)
 }
 
 // ============================================================================
