@@ -11291,12 +11291,13 @@ fn try_parse_ss_urls(text: &str) -> Option<Result<(Vec<String>, Vec<serde_json::
 
 /// Base64 decode helper
 fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    // Remove all whitespace (newlines, spaces, etc.)
+    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
     // Handle URL-safe base64 as well
-    let input = input.trim();
-    if input.contains('_') || input.contains('-') {
-        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, input)
+    if cleaned.contains('_') || cleaned.contains('-') {
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, &cleaned)
     } else {
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input)
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cleaned)
     }
 }
 
