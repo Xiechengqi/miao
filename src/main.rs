@@ -465,6 +465,21 @@ impl Default for AppConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct CliConfig {
+    id: String,
+    name: String,
+    binary_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill_md_url: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+}
+
 // iVnc configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct IVncConfig {
@@ -1021,6 +1036,9 @@ struct Config {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enable_ipv6_tun: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    clis: Vec<CliConfig>,
 }
 
 const DEFAULT_PORT: u16 = 6161;
@@ -1619,6 +1637,52 @@ struct LogEntry {
 
 type TerminalLogEntry = LogEntry;
 
+#[derive(Serialize, Clone)]
+struct CliRuntimeStatus {
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct CliItem {
+    id: String,
+    name: String,
+    binary_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill_md_url: Option<String>,
+    enabled: bool,
+    installed: bool,
+    status: CliRuntimeStatus,
+}
+
+#[derive(Deserialize)]
+struct CliUpsertRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    binary_url: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    web_url: Option<String>,
+    #[serde(default)]
+    skill_md_url: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct CliListResponse {
+    items: Vec<CliItem>,
+}
+
 #[derive(Serialize)]
 struct AppItem {
     id: String,
@@ -1890,6 +1954,11 @@ struct AppProcess {
     started_at: Instant,
 }
 
+struct CliProcess {
+    child: tokio::process::Child,
+    started_at: Instant,
+}
+
 lazy_static! {
     static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
     static ref GOTTY_PROCESSES: Mutex<HashMap<String, GottyProcess>> = Mutex::new(HashMap::new());
@@ -1916,6 +1985,12 @@ lazy_static! {
     };
     static ref SING_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
     static ref MIAO_PORT: StdMutex<u16> = StdMutex::new(6161);
+    static ref CLI_PROCESSES: Mutex<HashMap<String, CliProcess>> = Mutex::new(HashMap::new());
+    static ref CLI_LOG_BROADCAST: broadcast::Sender<String> = {
+        let (tx, _rx) = broadcast::channel(1000);
+        tx
+    };
+    static ref CLI_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
 }
 
 // ============================================================================
@@ -2000,6 +2075,26 @@ fn broadcast_app_log(level: &str, message: &str) {
         }
     }
     let _ = APP_LOG_BROADCAST.send(entry_str);
+}
+
+fn broadcast_cli_log(level: &str, message: &str) {
+    use chrono::FixedOffset;
+    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+    let entry = serde_json::json!({
+        "time": time_str,
+        "level": level,
+        "message": message
+    });
+    let entry_str = entry.to_string();
+    {
+        let mut buffer = CLI_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.push_back(entry_str.clone());
+        if buffer.len() > 1000 {
+            buffer.pop_front();
+        }
+    }
+    let _ = CLI_LOG_BROADCAST.send(entry_str);
 }
 
 macro_rules! log_info {
@@ -2178,6 +2273,45 @@ fn spawn_with_app_log_capture(
                 eprintln!("[{}] {}", name, line);
                 let _ = std::io::stderr().flush();
                 broadcast_app_log("error", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    Ok(child)
+}
+
+fn spawn_with_cli_log_capture(
+    command: &mut tokio::process::Command,
+    process_name: String,
+) -> Result<tokio::process::Child, std::io::Error> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let name = process_name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[{}] {}", name, line);
+                let _ = std::io::stdout().flush();
+                broadcast_cli_log("info", &format!("[{}] {}", name, line));
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let name = process_name;
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[{}] {}", name, line);
+                let _ = std::io::stderr().flush();
+                broadcast_cli_log("error", &format!("[{}] {}", name, line));
             }
         });
     }
@@ -3814,6 +3948,57 @@ fn build_app_item(cfg: AppConfig, status: AppRuntimeStatus) -> AppItem {
     }
 }
 
+fn generate_cli_id() -> String {
+    format!("cli-{}", uuid::Uuid::new_v4())
+}
+
+async fn get_cli_runtime_status(id: &str) -> CliRuntimeStatus {
+    let mut lock = CLI_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                lock.remove(id);
+                CliRuntimeStatus { running: false, pid: None, uptime_secs: None }
+            }
+            Ok(None) => CliRuntimeStatus {
+                running: true,
+                pid: proc.child.id(),
+                uptime_secs: Some(proc.started_at.elapsed().as_secs()),
+            },
+            Err(_) => {
+                lock.remove(id);
+                CliRuntimeStatus { running: false, pid: None, uptime_secs: None }
+            }
+        }
+    } else {
+        CliRuntimeStatus { running: false, pid: None, uptime_secs: None }
+    }
+}
+
+fn get_cli_dir(name: &str) -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_default().join("cli").join(name)
+}
+
+fn is_cli_installed(name: &str) -> bool {
+    let dir = get_cli_dir(name);
+    dir.exists() && std::fs::read_dir(&dir).map(|mut d| d.next().is_some()).unwrap_or(false)
+}
+
+fn build_cli_item(cfg: CliConfig, status: CliRuntimeStatus) -> CliItem {
+    let installed = is_cli_installed(&cfg.name);
+    CliItem {
+        id: cfg.id,
+        name: cfg.name,
+        binary_url: cfg.binary_url,
+        command: cfg.command,
+        web_url: cfg.web_url,
+        skill_md_url: cfg.skill_md_url,
+        enabled: cfg.enabled,
+        installed,
+        status,
+    }
+}
+
 async fn get_terminals(State(state): State<Arc<AppState>>) -> Json<ApiResponse<TerminalListResponse>> {
     let terminals = { state.config.lock().await.terminals.clone() };
     let mut items = Vec::with_capacity(terminals.len());
@@ -4739,6 +4924,279 @@ async fn restart_terminal_by_port(
         ));
     }
     Ok(Json(ApiResponse::success_no_data("terminal restarted")))
+}
+
+// ============================================================================
+// CLI Handlers
+// ============================================================================
+
+async fn get_clis(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<CliListResponse>> {
+    let config_guard = state.config.lock().await;
+    let mut items = Vec::new();
+    for cfg in &config_guard.clis {
+        let status = get_cli_runtime_status(&cfg.id).await;
+        items.push(build_cli_item(cfg.clone(), status));
+    }
+    Json(ApiResponse::success("OK", CliListResponse { items }))
+}
+
+async fn create_cli(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CliUpsertRequest>,
+) -> Result<Json<ApiResponse<CliItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let name = req.name.clone().unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("名称不能为空"))));
+    }
+    let binary_url = req.binary_url.clone().unwrap_or_default().trim().to_string();
+    if binary_url.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("二进制下载链接不能为空"))));
+    }
+
+    let id = generate_cli_id();
+    let cfg = CliConfig {
+        id: id.clone(),
+        name: name.clone(),
+        binary_url,
+        command: req.command.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        web_url: req.web_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        skill_md_url: req.skill_md_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        enabled: req.enabled.unwrap_or(false),
+    };
+
+    {
+        let mut config_guard = state.config.lock().await;
+        if config_guard.clis.iter().any(|c| c.name == name) {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("名称已存在"))));
+        }
+        config_guard.clis.push(cfg.clone());
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+        }
+    }
+
+    let status = get_cli_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success("CLI created", build_cli_item(cfg, status))))
+}
+
+async fn update_cli(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CliUpsertRequest>,
+) -> Result<Json<ApiResponse<CliItem>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut config_guard = state.config.lock().await;
+    let Some(pos) = config_guard.clis.iter().position(|c| c.id == id) else {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+    };
+
+    let existing = config_guard.clis[pos].clone();
+    let new_name = req.name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(existing.name.clone());
+
+    // Check name uniqueness if changed
+    if new_name != existing.name && config_guard.clis.iter().any(|c| c.name == new_name && c.id != id) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("名称已存在"))));
+    }
+
+    let was_running = get_cli_runtime_status(&id).await.running;
+    let old_name = existing.name.clone();
+
+    let cfg = CliConfig {
+        id: id.clone(),
+        name: new_name,
+        binary_url: req.binary_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(existing.binary_url),
+        // If field is provided (even as empty string), use it (allows clearing);
+        // if field is absent (None in JSON), keep existing value.
+        command: match req.command {
+            Some(s) => { let t = s.trim().to_string(); if t.is_empty() { None } else { Some(t) } },
+            None => existing.command,
+        },
+        web_url: match req.web_url {
+            Some(s) => { let t = s.trim().to_string(); if t.is_empty() { None } else { Some(t) } },
+            None => existing.web_url,
+        },
+        skill_md_url: match req.skill_md_url {
+            Some(s) => { let t = s.trim().to_string(); if t.is_empty() { None } else { Some(t) } },
+            None => existing.skill_md_url,
+        },
+        enabled: req.enabled.unwrap_or(existing.enabled),
+    };
+
+    config_guard.clis[pos] = cfg.clone();
+    if let Err(e) = save_config(&config_guard).await {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+    }
+    drop(config_guard);
+
+    // If name changed, rename the cli directory
+    if cfg.name != old_name {
+        let old_dir = get_cli_dir(&old_name);
+        let new_dir = get_cli_dir(&cfg.name);
+        if old_dir.exists() {
+            let _ = std::fs::rename(&old_dir, &new_dir);
+        }
+    }
+
+    // Handle enabled state changes
+    if cfg.enabled && !was_running && cfg.command.is_some() && is_cli_installed(&cfg.name) {
+        let _ = start_cli_internal(&cfg.id, &cfg).await;
+    }
+    if !cfg.enabled && was_running {
+        let _ = stop_cli_internal(&id).await;
+    }
+
+    let status = get_cli_runtime_status(&cfg.id).await;
+    Ok(Json(ApiResponse::success("CLI updated", build_cli_item(cfg, status))))
+}
+
+async fn delete_cli(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let name;
+    {
+        let mut config_guard = state.config.lock().await;
+        let Some(pos) = config_guard.clis.iter().position(|c| c.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        };
+        name = config_guard.clis[pos].name.clone();
+        config_guard.clis.remove(pos);
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+        }
+    }
+    let _ = stop_cli_internal(&id).await;
+    // Remove cli directory
+    let dir = get_cli_dir(&name);
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    Ok(Json(ApiResponse::success_no_data("CLI deleted")))
+}
+
+async fn install_cli(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(c) = config_guard.clis.iter().find(|c| c.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        };
+        c.clone()
+    };
+    download_cli_binary(&cfg).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("下载失败: {}", e))))
+    })?;
+    Ok(Json(ApiResponse::success_no_data("CLI installed")))
+}
+
+async fn update_cli_binary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(c) = config_guard.clis.iter().find(|c| c.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        };
+        c.clone()
+    };
+
+    let was_running = get_cli_runtime_status(&id).await.running;
+    if was_running {
+        let _ = stop_cli_internal(&id).await;
+    }
+
+    download_cli_binary(&cfg).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("更新失败: {}", e))))
+    })?;
+
+    if was_running && cfg.command.is_some() {
+        let _ = start_cli_internal(&cfg.id, &cfg).await;
+    }
+
+    Ok(Json(ApiResponse::success_no_data("CLI binary updated")))
+}
+
+async fn start_cli(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(c) = config_guard.clis.iter().find(|c| c.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        };
+        c.clone()
+    };
+    if cfg.command.is_none() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("未配置启动命令"))));
+    }
+    if !is_cli_installed(&cfg.name) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("二进制未安装，请先安装"))));
+    }
+    if let Err(e) = start_cli_internal(&cfg.id, &cfg).await {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(format!("启动失败: {}", e)))));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(c) = config_guard.clis.iter_mut().find(|c| c.id == id) {
+            c.enabled = true;
+            let _ = save_config(&config_guard).await;
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("CLI started")))
+}
+
+async fn stop_cli(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let mut config_guard = state.config.lock().await;
+        let Some(c) = config_guard.clis.iter_mut().find(|c| c.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        };
+        c.enabled = false;
+        if let Err(e) = save_config(&config_guard).await {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::error(format!("Failed to save config: {}", e)))));
+        }
+    }
+    let _ = stop_cli_internal(&id).await;
+    Ok(Json(ApiResponse::success_no_data("CLI stopped")))
+}
+
+async fn restart_cli(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let cfg = {
+        let config_guard = state.config.lock().await;
+        let Some(c) = config_guard.clis.iter().find(|c| c.id == id) else {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        };
+        c.clone()
+    };
+    if cfg.command.is_none() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("未配置启动命令"))));
+    }
+    if !is_cli_installed(&cfg.name) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error("二进制未安装"))));
+    }
+    let _ = stop_cli_internal(&id).await;
+    if let Err(e) = start_cli_internal(&cfg.id, &cfg).await {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(format!("重启失败: {}", e)))));
+    }
+    {
+        let mut config_guard = state.config.lock().await;
+        if let Some(c) = config_guard.clis.iter_mut().find(|c| c.id == id) {
+            c.enabled = true;
+            let _ = save_config(&config_guard).await;
+        }
+    }
+    Ok(Json(ApiResponse::success_no_data("CLI restarted")))
 }
 
 /// POST /api/connectivity - Test connectivity to a single site
@@ -9136,6 +9594,126 @@ struct AppLogsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct CliLogsQuery {
+    limit: Option<usize>,
+}
+
+async fn get_cli_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<CliLogsQuery>,
+) -> Result<Json<ApiResponse<Vec<TerminalLogEntry>>>, (StatusCode, Json<ApiResponse<()>>)> {
+    {
+        let config = state.config.lock().await;
+        if !config.clis.iter().any(|c| c.id == id) {
+            return Err((StatusCode::NOT_FOUND, Json(ApiResponse::error("CLI not found"))));
+        }
+    }
+
+    let tag = format!("[cli-{}]", id);
+    let mut logs: Vec<TerminalLogEntry> = {
+        let buffer = CLI_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer
+            .iter()
+            .filter_map(|msg| serde_json::from_str::<TerminalLogEntry>(msg).ok())
+            .filter(|entry| entry.message.contains(&tag))
+            .map(|mut entry| {
+                if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                    entry.message = stripped.trim_start().to_string();
+                }
+                entry
+            })
+            .collect()
+    };
+
+    if let Some(limit) = q.limit {
+        if logs.len() > limit {
+            logs = logs.split_off(logs.len() - limit);
+        }
+    }
+
+    Ok(Json(ApiResponse::success("Logs retrieved", logs)))
+}
+
+async fn cli_ws_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    {
+        let config = state.config.lock().await;
+        if !config.clis.iter().any(|c| c.id == id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_cli_logs_websocket(socket, id)))
+}
+
+async fn handle_cli_logs_websocket(mut socket: WebSocket, cli_id: String) {
+    let mut rx = CLI_LOG_BROADCAST.subscribe();
+    let tag = format!("[cli-{}]", cli_id);
+
+    let history: Vec<String> = {
+        let buffer = CLI_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    };
+    for msg in history {
+        let mut entry = match serde_json::from_str::<TerminalLogEntry>(&msg) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.message.contains(&tag) {
+            continue;
+        }
+        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+            entry.message = stripped.trim_start().to_string();
+        }
+        let payload = serde_json::to_string(&entry).unwrap_or_default();
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        let mut entry = match serde_json::from_str::<TerminalLogEntry>(&msg) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                        if !entry.message.contains(&tag) {
+                            continue;
+                        }
+                        if let Some(stripped) = entry.message.strip_prefix(&tag) {
+                            entry.message = stripped.trim_start().to_string();
+                        }
+                        let payload = serde_json::to_string(&entry).unwrap_or_default();
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 // Response for schedule toggle
 #[derive(Serialize)]
 struct SyncScheduleToggleResponse {
@@ -9899,6 +10477,121 @@ async fn stop_terminal_internal(id: &str) -> Result<(), String> {
                 }
             }
             if proc.child.try_wait().ok().flatten().is_none() {
+                proc.child.start_kill().ok();
+            }
+        }
+    }
+    lock.remove(id);
+    Ok(())
+}
+
+// ============================================================================
+// CLI internal process management
+// ============================================================================
+
+async fn download_cli_binary(cfg: &CliConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = get_cli_dir(&cfg.name);
+    std::fs::create_dir_all(&dir)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()?;
+
+    let response = client.get(&cfg.binary_url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!("下载失败, HTTP {}", response.status()).into());
+    }
+
+    // Extract filename from URL or use "binary"
+    let filename = cfg.binary_url
+        .split('/')
+        .last()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("binary");
+    let file_path = dir.join(filename);
+
+    let bytes = response.bytes().await?;
+    std::fs::write(&file_path, &bytes)?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    log_info!("CLI binary downloaded: {:?}", file_path);
+    Ok(())
+}
+
+async fn start_cli_internal(
+    id: &str,
+    config: &CliConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lock = CLI_PROCESSES.lock().await;
+    if let Some(proc) = lock.get_mut(id) {
+        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
+            return Err("CLI already running".into());
+        }
+        lock.remove(id);
+    }
+
+    let command_str = config.command.as_deref().ok_or("未配置启动命令")?;
+    let cli_dir = get_cli_dir(&config.name);
+
+    if !cli_dir.exists() {
+        return Err("二进制未安装".into());
+    }
+
+    // Use shell to execute the command string (supports arguments in the command)
+    // Create a new process group so we can kill the entire tree on stop
+    let mut command = tokio::process::Command::new("sh");
+    command.arg("-c").arg(command_str).current_dir(&cli_dir);
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            Ok(())
+        });
+    }
+
+    let mut child = spawn_with_cli_log_capture(&mut command, format!("cli-{}", id))?;
+    let pid = child.id();
+    log_info!("CLI process spawned with PID: {:?} command: {}", pid, command_str);
+
+    sleep(Duration::from_millis(300)).await;
+    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
+        let code = exit_status.code().unwrap_or(-1);
+        return Err(format!("CLI exited immediately with code {}", code).into());
+    }
+
+    lock.insert(
+        id.to_string(),
+        CliProcess {
+            child,
+            started_at: Instant::now(),
+        },
+    );
+    Ok(())
+}
+
+async fn stop_cli_internal(id: &str) -> Result<(), String> {
+    let mut lock = CLI_PROCESSES.lock().await;
+    let Some(proc) = lock.get_mut(id) else {
+        return Ok(());
+    };
+    if proc.child.try_wait().ok().flatten().is_none() {
+        if let Some(pid) = proc.child.id() {
+            // Kill the entire process group (created by setsid in start_cli_internal)
+            let pgid = Pid::from_raw(pid as i32);
+            let _ = nix::sys::signal::killpg(pgid, Signal::SIGTERM);
+            for _ in 0..30 {
+                sleep(Duration::from_millis(100)).await;
+                if proc.child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+            }
+            if proc.child.try_wait().ok().flatten().is_none() {
+                let _ = nix::sys::signal::killpg(pgid, Signal::SIGKILL);
                 proc.child.start_kill().ok();
             }
         }
@@ -10945,6 +11638,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 host_groups: vec![],
                 metrics: MetricsConfig::default(),
                 enable_ipv6_tun: None,
+                clis: vec![],
             },
             true,
         ),
@@ -11039,6 +11733,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             match start_app_internal(app, &config_snapshot).await {
                 Ok(_) => log_info!("应用启动成功"),
                 Err(e) => log_error!("Failed to start app {}: {}", app.id, e),
+            }
+        }
+
+        for cli in &config.clis {
+            if !cli.enabled {
+                continue;
+            }
+            if cli.command.is_none() || !is_cli_installed(&cli.name) {
+                continue;
+            }
+            match start_cli_internal(&cli.id, cli).await {
+                Ok(_) => log_info!("CLI started successfully: {}", cli.name),
+                Err(e) => log_error!("Failed to start CLI {}: {}", cli.name, e),
             }
         }
 
@@ -11206,6 +11913,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/apps/{id}/ws/logs", get(app_ws_logs))
         .route("/api/terminals/{id}/logs", get(get_terminal_logs))
         .route("/api/terminals/{id}/ws/logs", get(terminal_ws_logs))
+        // CLI management
+        .route("/api/clis", get(get_clis))
+        .route("/api/clis", post(create_cli))
+        .route("/api/clis/{id}", put(update_cli).delete(delete_cli))
+        .route("/api/clis/{id}/install", post(install_cli))
+        .route("/api/clis/{id}/update", post(update_cli_binary))
+        .route("/api/clis/{id}/start", post(start_cli))
+        .route("/api/clis/{id}/stop", post(stop_cli))
+        .route("/api/clis/{id}/restart", post(restart_cli))
+        .route("/api/clis/{id}/logs", get(get_cli_logs))
+        .route("/api/clis/{id}/ws/logs", get(cli_ws_logs))
         // Host management (新 API v1)
         .merge(app::hosts::routes())
         // Host Groups

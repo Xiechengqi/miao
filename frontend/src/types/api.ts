@@ -265,6 +265,23 @@ export interface TerminalLogEntry {
   message: string;
 }
 
+// CLI Types
+export interface Cli {
+  id: string;
+  name: string;
+  binary_url: string;
+  command?: string;
+  web_url?: string;
+  skill_md_url?: string;
+  enabled?: boolean;
+  installed: boolean;
+  status: {
+    running: boolean;
+    pid?: number;
+    uptime_secs?: number;
+  };
+}
+
 // App Types
 export interface App {
   id: string;

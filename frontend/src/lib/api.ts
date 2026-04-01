@@ -13,6 +13,7 @@ import {
   Terminal,
   App,
   AppTemplate,
+  Cli,
   VersionInfo,
   Host,
   SSHTestResult,
@@ -850,6 +851,61 @@ class ApiClient {
     await this.fetch(`/api/terminals/${id}/restart`, {
       method: "POST",
     });
+  }
+
+  // CLI Management
+  async getClis(): Promise<Cli[]> {
+    const res = await this.fetch<{ data: { items: Cli[] } }>("/api/clis");
+    return res.data.items;
+  }
+
+  async createCli(data: { name: string; binary_url: string; command?: string; web_url?: string; skill_md_url?: string }): Promise<Cli> {
+    const res = await this.fetch<{ data: Cli }>("/api/clis", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return res.data;
+  }
+
+  async updateCli(id: string, data: Partial<{ name: string; binary_url: string; command: string; web_url: string; skill_md_url: string; enabled: boolean }>): Promise<Cli> {
+    const res = await this.fetch<{ data: Cli }>(`/api/clis/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+    return res.data;
+  }
+
+  async deleteCli(id: string): Promise<void> {
+    await this.fetch(`/api/clis/${id}`, { method: "DELETE" });
+  }
+
+  async installCli(id: string): Promise<void> {
+    await this.fetch(`/api/clis/${id}/install`, { method: "POST" });
+  }
+
+  async updateCliBinary(id: string): Promise<void> {
+    await this.fetch(`/api/clis/${id}/update`, { method: "POST" });
+  }
+
+  async startCli(id: string): Promise<void> {
+    await this.fetch(`/api/clis/${id}/start`, { method: "POST" });
+  }
+
+  async stopCli(id: string): Promise<void> {
+    await this.fetch(`/api/clis/${id}/stop`, { method: "POST" });
+  }
+
+  async restartCli(id: string): Promise<void> {
+    await this.fetch(`/api/clis/${id}/restart`, { method: "POST" });
+  }
+
+  async getCliLogs(id: string, limit?: number): Promise<TerminalLogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: TerminalLogEntry[] }>(
+      `/api/clis/${id}/logs?${params.toString()}`
+    );
+    return res.data;
   }
 
   async upgradeGotty(): Promise<void> {

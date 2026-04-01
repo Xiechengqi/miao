@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Status, Node, ProxyGroup, SyncConfig, TcpTunnel, TrafficData, LogEntry, ToastMessage, Terminal, DnsStatus } from "@/types/api";
+import { Status, Node, ProxyGroup, SyncConfig, TcpTunnel, TrafficData, LogEntry, ToastMessage, Terminal, DnsStatus, Cli } from "@/types/api";
 
 interface AppState {
   // Auth State
@@ -33,6 +33,10 @@ interface AppState {
   terminals: Terminal[];
   terminalsLoaded: boolean;
 
+  // CLI State
+  clis: Cli[];
+  clisLoaded: boolean;
+
   // Logs State
   logs: LogEntry[];
   logWsConnected: boolean;
@@ -58,6 +62,8 @@ interface AppState {
   setTcpTunnelsSupported: (supported: boolean) => void;
   setTerminals: (terminals: Terminal[]) => void;
   setTerminalsLoaded: (loaded: boolean) => void;
+  setClis: (clis: Cli[]) => void;
+  setClisLoaded: (loaded: boolean) => void;
   setLogs: (logs: LogEntry[]) => void;
   addLog: (log: LogEntry) => void;
   setLogWsConnected: (connected: boolean) => void;
@@ -88,6 +94,8 @@ export const useStore = create<AppState>((set, get) => ({
   tcpTunnelsSupported: true,
   terminals: [],
   terminalsLoaded: false,
+  clis: [],
+  clisLoaded: false,
   logs: [],
   logWsConnected: false,
   logKeys: new Set(),
@@ -110,6 +118,8 @@ export const useStore = create<AppState>((set, get) => ({
   setTcpTunnelsSupported: (supported) => set({ tcpTunnelsSupported: supported }),
   setTerminals: (terminals) => set({ terminals }),
   setTerminalsLoaded: (loaded) => set({ terminalsLoaded: loaded }),
+  setClis: (clis) => set({ clis }),
+  setClisLoaded: (loaded) => set({ clisLoaded: loaded }),
   setLogs: (logs) => {
     const keys = new Set(logs.map((entry) => `${entry.time}|${entry.level}|${entry.message}`));
     set({ logs, logKeys: keys });
