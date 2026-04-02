@@ -162,6 +162,7 @@ export default function ProxiesPage() {
   const [showLogModal, setShowLogModal] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
+  const [v2rayaWebUrl, setV2rayaWebUrl] = useState("");
   const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const checkV2raya = useCallback(async () => {
@@ -196,6 +197,10 @@ export default function ProxiesPage() {
     };
     init();
   }, [checkV2raya, refreshStatus]);
+
+  useEffect(() => {
+    setV2rayaWebUrl(`http://${window.location.hostname}:2017`);
+  }, []);
 
   // Poll status every 3 seconds
   useEffect(() => {
@@ -303,51 +308,17 @@ export default function ProxiesPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Activity className="w-6 h-6 text-indigo-500" />
-          <h1 className="text-2xl font-bold text-slate-800">代理</h1>
-          <Badge variant={isRunning ? "success" : "default"}>
-            {isRunning ? "运行中" : "已停止"}
-          </Badge>
-        </div>
-      </div>
-
-      {/* Control Panel */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between w-full">
-            <h2 className="text-lg font-semibold">V2rayA</h2>
-            <div className="flex items-center gap-3">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowLogModal(true)}
-                title="查看日志"
-              >
-                <FileText className="w-4 h-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowResetConfirm(true)}
-                disabled={resetLoading}
-                title="重置密码"
-              >
-                <KeyRound className="w-4 h-4" />
-                <span className="ml-1">Reset Password</span>
-              </Button>
-              <TogglePower
-                running={isRunning}
-                onToggle={handleToggle}
-                loading={actionLoading}
-              />
-            </div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-3">
+            <Activity className="w-6 h-6 text-indigo-500" />
+            <h1 className="text-2xl font-bold text-slate-800">代理</h1>
+            <Badge variant={isRunning ? "success" : "default"}>
+              {isRunning ? "运行中" : "已停止"}
+            </Badge>
           </div>
-        </CardHeader>
-        <CardContent>
           {isRunning && v2rayaStatus && (
-            <div className="flex items-center gap-6 text-sm text-slate-500 mb-4">
+            <div className="flex flex-wrap items-center gap-6 text-sm text-slate-500">
               {v2rayaStatus.pid && (
                 <span className="flex items-center gap-1">
                   PID: {v2rayaStatus.pid}
@@ -361,12 +332,42 @@ export default function ProxiesPage() {
               )}
             </div>
           )}
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowLogModal(true)}
+            title="查看日志"
+          >
+            <FileText className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowResetConfirm(true)}
+            disabled={resetLoading}
+            title="重置密码"
+          >
+            <KeyRound className="w-4 h-4" />
+            <span className="ml-1">Reset Password</span>
+          </Button>
+          <TogglePower
+            running={isRunning}
+            onToggle={handleToggle}
+            loading={actionLoading}
+          />
+        </div>
+      </div>
 
+      {/* Control Panel */}
+      <Card>
+        <CardContent>
           {/* V2rayA Web UI iframe */}
           {isRunning ? (
             <div className="rounded-lg overflow-hidden border border-slate-200">
               <iframe
-                src="/v2raya/"
+                src={v2rayaWebUrl}
                 className="w-full border-0"
                 style={{ minHeight: "calc(100vh - 300px)" }}
                 title="V2rayA"

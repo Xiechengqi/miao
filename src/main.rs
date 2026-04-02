@@ -1,11 +1,11 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        FromRequest, Path, Query, State, Multipart,
+        Path, Query, State, Multipart,
     },
-    http::{Request, StatusCode, HeaderMap},
+    http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
-    response::{Json, Redirect, Response},
+    response::{Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -10839,161 +10839,6 @@ fn start_v2raya_log_tailer() {
     });
 }
 
-// ============================================================================
-// V2rayA Reverse Proxy
-// ============================================================================
-
-/// Reverse proxy handler for /v2raya/* → http://127.0.0.1:2017/*
-async fn v2raya_proxy(
-    req: Request<axum::body::Body>,
-) -> Result<Response, StatusCode> {
-    if req.uri().path() == "/v2raya" {
-        return Ok(Redirect::permanent("/v2raya/").into_response());
-    }
-
-    let path = req.uri().path();
-    let upstream_path = path.strip_prefix("/v2raya").unwrap_or(path);
-    let upstream_path = if upstream_path.is_empty() { "/" } else { upstream_path };
-    let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
-    let upstream_url = format!("http://127.0.0.1:2017{}{}", upstream_path, query);
-
-    // Check for WebSocket upgrade
-    let is_upgrade = req.headers().get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
-
-    if is_upgrade {
-        let ws_url = upstream_url.replace("http://", "ws://");
-        let ws = WebSocketUpgrade::from_request(req, &())
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        return Ok(ws.on_upgrade(move |socket| proxy_websocket(socket, ws_url)));
-    }
-
-    // Regular HTTP reverse proxy
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let method = req.method().clone();
-    let headers = req.headers().clone();
-
-    // Read the request body
-    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let mut upstream_req = client.request(
-        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
-        &upstream_url,
-    );
-
-    // Forward relevant headers (strip accept-encoding to get uncompressed responses for rewriting)
-    for (name, value) in headers.iter() {
-        if name == "host" || name == "connection" || name == "accept-encoding" {
-            continue;
-        }
-        if let Ok(v) = value.to_str() {
-            upstream_req = upstream_req.header(name.as_str(), v);
-        }
-    }
-    upstream_req = upstream_req
-        .header("host", "127.0.0.1:2017")
-        .header(
-            "x-forwarded-proto",
-            headers
-                .get("x-forwarded-proto")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("http"),
-        )
-        .header("x-forwarded-prefix", "/v2raya");
-    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
-        upstream_req = upstream_req.header("x-forwarded-host", host);
-    }
-
-    if !body_bytes.is_empty() {
-        upstream_req = upstream_req.body(body_bytes);
-    }
-
-    let upstream_resp = upstream_req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-
-    let status = StatusCode::from_u16(upstream_resp.status().as_u16())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
-    let mut response_headers = HeaderMap::new();
-    for (name, value) in upstream_resp.headers().iter() {
-        if name == "transfer-encoding" {
-            continue;
-        }
-        // Rewrite Location header for redirects
-        if name == "location" {
-            if let Ok(v) = value.to_str() {
-                let rewritten = if v.starts_with("http://127.0.0.1:2017/") {
-                    v.replacen("http://127.0.0.1:2017/", "/v2raya/", 1)
-                } else if v == "http://127.0.0.1:2017" || v == "/" {
-                    "/v2raya/".to_string()
-                } else if v.starts_with("http://127.0.0.1:2017") {
-                    v.replacen("http://127.0.0.1:2017", "/v2raya", 1)
-                } else if v.starts_with('/') {
-                    format!("/v2raya{}", v)
-                } else {
-                    v.to_string()
-                };
-                if let Ok(hv) = axum::http::HeaderValue::from_str(&rewritten) {
-                    response_headers.insert(name.clone(), hv);
-                    continue;
-                }
-            }
-        }
-        response_headers.insert(name.clone(), value.clone());
-    }
-
-    let content_type = upstream_resp.headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    let resp_bytes = upstream_resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-
-    // Rewrite response body for HTML/JS/CSS content
-    let is_text = content_type.contains("text/html")
-        || content_type.contains("javascript")
-        || content_type.contains("text/css");
-
-    let final_body = if is_text {
-        let text = String::from_utf8_lossy(&resp_bytes);
-        let rewritten = text
-            // Quoted attributes: href="/  src="/
-            .replace("href=\"/", "href=\"/v2raya/")
-            .replace("src=\"/", "src=\"/v2raya/")
-            // Unquoted attributes (Vue CLI output): href=/  src=/
-            .replace("href=/", "href=/v2raya/")
-            .replace("src=/", "src=/v2raya/")
-            // JS API calls with quoted strings
-            .replace("\"/api/", "\"/v2raya/api/")
-            .replace("'/api/", "'/v2raya/api/")
-            .replace("\"/static/", "\"/v2raya/static/")
-            .replace("'/static/", "'/v2raya/static/")
-            // Unquoted in JS: /api/ and /static/ referenced as string literals
-            .replace("url(/static/", "url(/v2raya/static/");
-        axum::body::Body::from(rewritten.to_string().into_bytes())
-    } else {
-        axum::body::Body::from(resp_bytes)
-    };
-
-    let mut resp = Response::new(final_body);
-    *resp.status_mut() = status;
-    *resp.headers_mut() = response_headers;
-
-    // Remove content-length since body size may have changed after rewriting
-    resp.headers_mut().remove("content-length");
-
-    Ok(resp)
-}
-
 async fn start_terminal_internal(
     id: &str,
     config: &TerminalNodeConfig,
@@ -12667,9 +12512,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/terminals/restart-by-port", post(restart_terminal_by_port))
         .merge(ws_routes)
         .merge(protected_routes)
-        // V2rayA reverse proxy
-        .route("/v2raya", get(v2raya_proxy).post(v2raya_proxy).put(v2raya_proxy).delete(v2raya_proxy).patch(v2raya_proxy))
-        .route("/v2raya/{*path}", get(v2raya_proxy).post(v2raya_proxy).put(v2raya_proxy).delete(v2raya_proxy).patch(v2raya_proxy))
         // Static assets route (matches files in public/)
         .route("/{*path}", get(serve_static))
         .with_state(app_state)
