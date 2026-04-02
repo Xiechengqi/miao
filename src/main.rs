@@ -10909,12 +10909,19 @@ async fn v2raya_proxy(
     let final_body = if is_text {
         let text = String::from_utf8_lossy(&resp_bytes);
         let rewritten = text
+            // Quoted attributes: href="/  src="/
             .replace("href=\"/", "href=\"/v2raya/")
             .replace("src=\"/", "src=\"/v2raya/")
+            // Unquoted attributes (Vue CLI output): href=/  src=/
+            .replace("href=/", "href=/v2raya/")
+            .replace("src=/", "src=/v2raya/")
+            // JS API calls with quoted strings
             .replace("\"/api/", "\"/v2raya/api/")
             .replace("'/api/", "'/v2raya/api/")
             .replace("\"/static/", "\"/v2raya/static/")
-            .replace("'/static/", "'/v2raya/static/");
+            .replace("'/static/", "'/v2raya/static/")
+            // Unquoted in JS: /api/ and /static/ referenced as string literals
+            .replace("url(/static/", "url(/v2raya/static/");
         axum::body::Body::from(rewritten.to_string().into_bytes())
     } else {
         axum::body::Body::from(resp_bytes)
