@@ -31,6 +31,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::connect_async;
+use tokio::signal;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::spawn_blocking;
 use tokio::time::sleep;
@@ -10627,6 +10628,60 @@ async fn stop_v2raya_process() -> bool {
     was_running
 }
 
+async fn stop_ivnc_internal(state: &Arc<AppState>) {
+    let mut process_guard = state.ivnc_process.lock().await;
+
+    if let Some(mut proc) = process_guard.take() {
+        if let Err(e) = proc.child.kill().await {
+            log_error!("Failed to stop iVnc during shutdown: {}", e);
+        }
+        let _ = proc.child.wait().await;
+    }
+}
+
+async fn shutdown_managed_processes(state: Arc<AppState>) {
+    log_info!("Shutdown requested, stopping managed processes...");
+
+    state.sync_manager.apply_config(&[]).await;
+    state.full_tunnel.sync_from_config(state.clone(), vec![]).await;
+    state.tcp_tunnel.apply_config(&[]).await;
+
+    stop_all_terminals_parallel().await;
+    stop_all_apps_parallel().await;
+    stop_all_clis_parallel().await;
+    stop_ivnc_internal(&state).await;
+    stop_v2raya_process().await;
+    stop_sing_internal_and_wait().await;
+
+    log_info!("Managed process shutdown complete");
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm = signal(SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt())
+            .expect("failed to install SIGINT handler");
+        let mut sigquit = signal(SignalKind::quit())
+            .expect("failed to install SIGQUIT handler");
+
+        tokio::select! {
+            _ = signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+            _ = sigint.recv() => {},
+            _ = sigquit.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
+    }
+}
+
 /// POST /api/v2raya/start - Start v2raya process
 async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     start_v2raya_process().await?;
@@ -10929,6 +10984,28 @@ async fn stop_terminal_internal(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn stop_all_terminals_parallel() {
+    let ids: Vec<String> = {
+        let lock = GOTTY_PROCESSES.lock().await;
+        lock.keys().cloned().collect()
+    };
+
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in ids {
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = stop_terminal_internal(&id).await {
+                log_error!("Failed to stop terminal {} during shutdown: {}", id, e);
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            log_error!("Terminal shutdown task join error: {}", e);
+        }
+    }
+}
+
 // ============================================================================
 // CLI internal process management
 // ============================================================================
@@ -11042,6 +11119,28 @@ async fn stop_cli_internal(id: &str) -> Result<(), String> {
     }
     lock.remove(id);
     Ok(())
+}
+
+async fn stop_all_clis_parallel() {
+    let ids: Vec<String> = {
+        let lock = CLI_PROCESSES.lock().await;
+        lock.keys().cloned().collect()
+    };
+
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in ids {
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = stop_cli_internal(&id).await {
+                log_error!("Failed to stop CLI {} during shutdown: {}", id, e);
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            log_error!("CLI shutdown task join error: {}", e);
+        }
+    }
 }
 
 /// POST /api/gotty/upgrade - Download and apply gotty binary upgrade
@@ -11262,6 +11361,28 @@ async fn stop_app_internal(id: &str) -> Result<(), String> {
     }
     lock.remove(id);
     Ok(())
+}
+
+async fn stop_all_apps_parallel() {
+    let ids: Vec<String> = {
+        let lock = APP_PROCESSES.lock().await;
+        lock.keys().cloned().collect()
+    };
+
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in ids {
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = stop_app_internal(&id).await {
+                log_error!("Failed to stop app {} during shutdown: {}", id, e);
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            log_error!("App shutdown task join error: {}", e);
+        }
+    }
 }
 
 async fn gen_config(
@@ -12514,7 +12635,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .merge(protected_routes)
         // Static assets route (matches files in public/)
         .route("/{*path}", get(serve_static))
-        .with_state(app_state)
+        .with_state(app_state.clone())
         // SPA fallback (must be last, catches all unmatched routes)
         .fallback(spa_fallback);
 
@@ -12525,6 +12646,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     log_info!("✅ Miao 控制面板已启动: http://localhost:{}", port);
-    axum::serve(listener, app).await?;
+    let shutdown_state = app_state.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            wait_for_shutdown_signal().await;
+            shutdown_managed_processes(shutdown_state).await;
+        })
+        .await?;
     Ok(())
 }
