@@ -264,9 +264,8 @@ export default function ProxiesPage() {
   // V2rayA not installed
   if (!checkResult?.ready) {
     const missing: string[] = [];
-    if (checkResult && !checkResult.bin_exists) missing.push("/usr/local/bin/v2raya");
-    if (checkResult && !checkResult.config_exists) missing.push("/usr/local/etc/v2raya");
-    if (checkResult && !checkResult.v2ray_exists) missing.push("/usr/local/bin/v2ray");
+    if (checkResult && !checkResult.bin_exists) missing.push("v2raya（miao 根目录下）");
+    if (checkResult && !checkResult.v2ray_exists) missing.push("v2ray（miao 根目录下）");
 
     return (
       <div className="space-y-6">

@@ -10457,22 +10457,20 @@ async fn stop_sing_internal_and_wait() {
 // V2rayA Process Management
 // ============================================================================
 
-const V2RAYA_BIN: &str = "/usr/local/bin/v2raya";
-const V2RAYA_CONFIG: &str = "/usr/local/etc/v2raya";
-const V2RAY_BIN: &str = "/usr/local/bin/v2ray";
-const V2RAYA_LOG_FILE: &str = "/tmp/v2raya.log";
+fn v2raya_bin() -> PathBuf { std::env::current_dir().unwrap_or_default().join("v2raya") }
+fn v2ray_bin() -> PathBuf { std::env::current_dir().unwrap_or_default().join("v2ray") }
+fn v2raya_config_dir() -> PathBuf { std::env::current_dir().unwrap_or_default().join("v2raya-conf") }
+fn v2raya_log_file() -> PathBuf { std::env::current_dir().unwrap_or_default().join("v2raya.log") }
 
 /// GET /api/v2raya/check - Check if v2raya binary and config exist
 async fn v2raya_check() -> Json<ApiResponse<serde_json::Value>> {
-    let bin_exists = StdPath::new(V2RAYA_BIN).exists();
-    let config_exists = StdPath::new(V2RAYA_CONFIG).exists();
-    let v2ray_exists = StdPath::new(V2RAY_BIN).exists();
-    let all_ok = bin_exists && config_exists && v2ray_exists;
+    let bin_exists = v2raya_bin().exists();
+    let v2ray_exists = v2ray_bin().exists();
+    let all_ok = bin_exists && v2ray_exists;
     Json(ApiResponse::success(
         if all_ok { "ok" } else { "missing" },
         json!({
             "bin_exists": bin_exists,
-            "config_exists": config_exists,
             "v2ray_exists": v2ray_exists,
             "ready": all_ok,
         }),
@@ -10519,23 +10517,24 @@ async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiRe
         }
     }
 
-    if !StdPath::new(V2RAYA_BIN).exists() {
+    let bin = v2raya_bin();
+    if !bin.exists() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!("v2raya 二进制文件不存在: {}", V2RAYA_BIN))),
+            Json(ApiResponse::error(format!("v2raya 二进制文件不存在: {:?}", bin))),
         ));
     }
 
     log_info!("Starting v2raya...");
 
-    let mut command = tokio::process::Command::new(V2RAYA_BIN);
+    let mut command = tokio::process::Command::new(&bin);
     command
         .arg("--config")
-        .arg(V2RAYA_CONFIG)
+        .arg(v2raya_config_dir())
         .arg("--v2ray-bin")
-        .arg(V2RAY_BIN)
+        .arg(v2ray_bin())
         .arg("--log-file")
-        .arg(V2RAYA_LOG_FILE);
+        .arg(v2raya_log_file());
 
     // Capture stdout/stderr for log broadcasting
     use std::process::Stdio;
@@ -10630,9 +10629,9 @@ async fn v2raya_stop() -> Json<ApiResponse<()>> {
 
 /// POST /api/v2raya/reset-password - Reset v2raya password
 async fn v2raya_reset_password() -> Result<Json<ApiResponse<String>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let output = tokio::process::Command::new(V2RAYA_BIN)
+    let output = tokio::process::Command::new(v2raya_bin())
         .arg("--config")
-        .arg(V2RAYA_CONFIG)
+        .arg(v2raya_config_dir())
         .arg("--reset-password")
         .output()
         .await
@@ -10746,7 +10745,8 @@ fn start_v2raya_log_tailer() {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     tokio::spawn(async move {
-        let log_path = V2RAYA_LOG_FILE;
+        let log_path_buf = v2raya_log_file();
+        let log_path = log_path_buf.to_str().unwrap_or("/tmp/v2raya.log");
 
         // Wait for log file to appear
         for _ in 0..20 {

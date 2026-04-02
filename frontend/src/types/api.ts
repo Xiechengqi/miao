@@ -421,7 +421,6 @@ export interface IVncConfig {
 // V2rayA Types
 export interface V2rayaCheck {
   bin_exists: boolean;
-  config_exists: boolean;
   v2ray_exists: boolean;
   ready: boolean;
 }
