@@ -28,6 +28,8 @@ const CONNECTIVITY_SITES: ConnectivitySite[] = [
   { name: "Baidu", url: "https://www.baidu.com" },
 ];
 
+const CONNECTIVITY_STORAGE_KEY = "proxy-connectivity-results";
+
 function getConnectivityTone(result?: ConnectivityResult) {
   if (!result) {
     return "border-slate-200 bg-white text-slate-500";
@@ -249,6 +251,29 @@ export default function ProxiesPage() {
     setV2rayaWebUrl(`http://${window.location.hostname}:2017`);
   }, []);
 
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(CONNECTIVITY_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, ConnectivityResult>;
+      if (!parsed || typeof parsed !== "object") return;
+      setConnectivityResults(parsed);
+    } catch (error) {
+      console.warn("Failed to restore connectivity cache:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CONNECTIVITY_STORAGE_KEY,
+        JSON.stringify(connectivityResults)
+      );
+    } catch (error) {
+      console.warn("Failed to persist connectivity cache:", error);
+    }
+  }, [connectivityResults]);
+
   // Poll status every 3 seconds
   useEffect(() => {
     if (checkResult?.ready) {
@@ -462,17 +487,48 @@ export default function ProxiesPage() {
           {isRunning ? (
             <div className="rounded-lg overflow-hidden border border-slate-200 bg-white">
               <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-4 sm:px-5">
-                <div className="flex flex-col gap-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <Globe className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-semibold text-slate-800">连通性测试</div>
-                        <div className="text-xs text-slate-500">测试 Google、GitHub、YouTube、Twitter、Telegram 和 Baidu</div>
-                      </div>
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex min-w-0 items-center gap-3 overflow-x-auto pb-1 xl:pb-0">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                      <Globe className="h-4 w-4" />
                     </div>
+                    {CONNECTIVITY_SITES.map((site) => {
+                      const result = connectivityResults[site.name];
+                      const isTesting = currentTestingSite === site.name;
+                      return (
+                        <button
+                          key={site.name}
+                          type="button"
+                          onClick={() => void handleTestSingleSite(site)}
+                          disabled={connectivityDisabled}
+                          className={cn(
+                            "flex h-11 shrink-0 items-center gap-2 rounded-xl border px-3 text-left transition-all duration-200",
+                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2",
+                            "disabled:cursor-not-allowed disabled:opacity-70",
+                            !connectivityDisabled && "hover:-translate-y-0.5 hover:shadow-sm",
+                            getConnectivityTone(result),
+                            isTesting && "border-indigo-200 bg-indigo-50 text-indigo-700"
+                          )}
+                        >
+                          <span className="text-sm font-semibold">{site.name}</span>
+                          {isTesting && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+                          <Badge
+                            variant={
+                              !result ? "default" :
+                              !result.success ? "error" :
+                              (result.latency_ms ?? 0) < 80 ? "success" :
+                              (result.latency_ms ?? 0) < 180 ? "info" :
+                              "warning"
+                            }
+                            className="min-w-[68px] justify-center"
+                          >
+                            {formatConnectivityResult(result)}
+                          </Badge>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex shrink-0 justify-end">
                     <Button
                       variant={testingConnectivity ? "danger" : "secondary"}
                       size="sm"
@@ -491,51 +547,6 @@ export default function ProxiesPage() {
                         </>
                       )}
                     </Button>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {CONNECTIVITY_SITES.map((site) => {
-                      const result = connectivityResults[site.name];
-                      const isTesting = currentTestingSite === site.name;
-                      return (
-                        <button
-                          key={site.name}
-                          type="button"
-                          onClick={() => void handleTestSingleSite(site)}
-                          disabled={connectivityDisabled}
-                          className={cn(
-                            "flex min-h-[72px] items-center justify-between rounded-xl border px-4 py-3 text-left transition-all duration-200",
-                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2",
-                            "disabled:cursor-not-allowed disabled:opacity-70",
-                            !connectivityDisabled && "hover:-translate-y-0.5 hover:shadow-sm",
-                            getConnectivityTone(result),
-                            isTesting && "border-indigo-200 bg-indigo-50 text-indigo-700"
-                          )}
-                        >
-                          <div className="space-y-1">
-                            <div className="text-sm font-semibold">{site.name}</div>
-                            <div className="text-xs opacity-80">
-                              {isTesting ? "测试中..." : site.url.replace(/^https?:\/\//, "")}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {isTesting && <LoaderCircle className="h-4 w-4 animate-spin" />}
-                            <Badge
-                              variant={
-                                !result ? "default" :
-                                !result.success ? "error" :
-                                (result.latency_ms ?? 0) < 80 ? "success" :
-                                (result.latency_ms ?? 0) < 180 ? "info" :
-                                "warning"
-                              }
-                              className="min-w-[72px] justify-center"
-                            >
-                              {formatConnectivityResult(result)}
-                            </Badge>
-                          </div>
-                        </button>
-                      );
-                    })}
                   </div>
                 </div>
               </div>
@@ -570,38 +581,28 @@ export default function ProxiesPage() {
           ) : (
             <div className="space-y-4">
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4 sm:px-5">
-                <div className="flex flex-col gap-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-200 text-slate-500">
-                        <Globe className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-semibold text-slate-700">连通性测试</div>
-                        <div className="text-xs text-slate-500">启动 V2rayA 后可进行批量测试和单站点复测</div>
-                      </div>
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex min-w-0 items-center gap-3 overflow-x-auto pb-1 xl:pb-0">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-slate-500">
+                      <Globe className="h-4 w-4" />
                     </div>
-                    <Button variant="secondary" size="sm" disabled>
-                      <Play className="mr-2 h-3.5 w-3.5" />
-                      开始测试
-                    </Button>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                     {CONNECTIVITY_SITES.map((site) => (
                       <div
                         key={site.name}
-                        className="flex min-h-[72px] items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-400"
+                        className="flex h-11 shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-slate-400"
                       >
-                        <div className="space-y-1">
-                          <div className="text-sm font-semibold text-slate-600">{site.name}</div>
-                          <div className="text-xs">{site.url.replace(/^https?:\/\//, "")}</div>
-                        </div>
-                        <Badge variant="default" className="min-w-[72px] justify-center">
+                        <span className="text-sm font-semibold text-slate-600">{site.name}</span>
+                        <Badge variant="default" className="min-w-[68px] justify-center">
                           --
                         </Badge>
                       </div>
                     ))}
+                  </div>
+                  <div className="flex shrink-0 justify-end">
+                    <Button variant="secondary" size="sm" disabled>
+                      <Play className="mr-2 h-3.5 w-3.5" />
+                      开始测试
+                    </Button>
                   </div>
                 </div>
               </div>
