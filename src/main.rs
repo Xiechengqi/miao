@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State, Multipart,
+        FromRequest, Path, Query, State, Multipart,
     },
     http::{Request, StatusCode, HeaderMap},
     middleware::{self, Next},
@@ -1949,6 +1949,11 @@ struct SingBoxProcess {
     started_at: Instant,
 }
 
+struct V2rayaProcess {
+    child: tokio::process::Child,
+    started_at: Instant,
+}
+
 struct GottyProcess {
     child: tokio::process::Child,
     started_at: Instant,
@@ -1966,6 +1971,12 @@ struct CliProcess {
 
 lazy_static! {
     static ref SING_PROCESS: Mutex<Option<SingBoxProcess>> = Mutex::new(None);
+    static ref V2RAYA_PROCESS: Mutex<Option<V2rayaProcess>> = Mutex::new(None);
+    static ref V2RAYA_LOG_BROADCAST: broadcast::Sender<String> = {
+        let (tx, _rx) = broadcast::channel(1000);
+        tx
+    };
+    static ref V2RAYA_LOG_BUFFER: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::with_capacity(1000));
     static ref GOTTY_PROCESSES: Mutex<HashMap<String, GottyProcess>> = Mutex::new(HashMap::new());
     static ref APP_PROCESSES: Mutex<HashMap<String, AppProcess>> = Mutex::new(HashMap::new());
     static ref WS_CONNECT_ERROR_LOGS: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
@@ -2040,6 +2051,26 @@ fn broadcast_sing_log(level: &str, message: &str) {
         }
     }
     let _ = SING_LOG_BROADCAST.send(entry_str);
+}
+
+fn broadcast_v2raya_log(level: &str, message: &str) {
+    use chrono::FixedOffset;
+    let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+    let time_str = Utc::now().with_timezone(&utc8).format("%Y-%m-%d %H:%M:%S").to_string();
+    let entry = serde_json::json!({
+        "time": time_str,
+        "level": level,
+        "message": message
+    });
+    let entry_str = entry.to_string();
+    {
+        let mut buffer = V2RAYA_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.push_back(entry_str.clone());
+        if buffer.len() > 1000 {
+            buffer.pop_front();
+        }
+    }
+    let _ = V2RAYA_LOG_BROADCAST.send(entry_str);
 }
 
 fn broadcast_gotty_log(level: &str, message: &str) {
@@ -10422,6 +10453,483 @@ async fn stop_sing_internal_and_wait() {
     *lock = None;
 }
 
+// ============================================================================
+// V2rayA Process Management
+// ============================================================================
+
+const V2RAYA_BIN: &str = "/usr/local/bin/v2raya";
+const V2RAYA_CONFIG: &str = "/usr/local/etc/v2raya";
+const V2RAY_BIN: &str = "/usr/local/bin/v2ray";
+const V2RAYA_LOG_FILE: &str = "/tmp/v2raya.log";
+
+/// GET /api/v2raya/check - Check if v2raya binary and config exist
+async fn v2raya_check() -> Json<ApiResponse<serde_json::Value>> {
+    let bin_exists = StdPath::new(V2RAYA_BIN).exists();
+    let config_exists = StdPath::new(V2RAYA_CONFIG).exists();
+    let v2ray_exists = StdPath::new(V2RAY_BIN).exists();
+    let all_ok = bin_exists && config_exists && v2ray_exists;
+    Json(ApiResponse::success(
+        if all_ok { "ok" } else { "missing" },
+        json!({
+            "bin_exists": bin_exists,
+            "config_exists": config_exists,
+            "v2ray_exists": v2ray_exists,
+            "ready": all_ok,
+        }),
+    ))
+}
+
+/// GET /api/v2raya/status - Get v2raya running status
+async fn v2raya_status() -> Json<ApiResponse<serde_json::Value>> {
+    let mut lock = V2RAYA_PROCESS.lock().await;
+    let (running, pid, uptime_secs) = if let Some(ref mut proc) = *lock {
+        match proc.child.try_wait() {
+            Ok(Some(_)) => {
+                *lock = None;
+                (false, None, None)
+            }
+            Ok(None) => {
+                let uptime = proc.started_at.elapsed().as_secs();
+                (true, proc.child.id(), Some(uptime))
+            }
+            Err(_) => (false, None, None),
+        }
+    } else {
+        (false, None, None)
+    };
+    Json(ApiResponse::success(
+        if running { "running" } else { "stopped" },
+        json!({
+            "running": running,
+            "pid": pid,
+            "uptime_secs": uptime_secs,
+        }),
+    ))
+}
+
+/// POST /api/v2raya/start - Start v2raya process
+async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let mut lock = V2RAYA_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait().ok().flatten().is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("v2raya 正在运行中")),
+            ));
+        }
+    }
+
+    if !StdPath::new(V2RAYA_BIN).exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("v2raya 二进制文件不存在: {}", V2RAYA_BIN))),
+        ));
+    }
+
+    log_info!("Starting v2raya...");
+
+    let mut command = tokio::process::Command::new(V2RAYA_BIN);
+    command
+        .arg("--config")
+        .arg(V2RAYA_CONFIG)
+        .arg("--v2ray-bin")
+        .arg(V2RAY_BIN)
+        .arg("--log-file")
+        .arg(V2RAYA_LOG_FILE);
+
+    // Capture stdout/stderr for log broadcasting
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("启动 v2raya 失败: {}", e))),
+        )
+    })?;
+
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[v2raya] {}", line);
+                let _ = std::io::stdout().flush();
+                broadcast_v2raya_log("info", &line);
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[v2raya] {}", line);
+                let _ = std::io::stderr().flush();
+                broadcast_v2raya_log("error", &line);
+            }
+        });
+    }
+
+    let pid = child.id();
+    log_info!("v2raya process spawned with PID: {:?}", pid);
+
+    // Wait a short moment to check if process exits immediately
+    sleep(Duration::from_millis(500)).await;
+    if let Some(exit_status) = child.try_wait().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("等待进程失败: {}", e))),
+        )
+    })? {
+        let code = exit_status.code().unwrap_or(-1);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!(
+                "v2raya 启动后立即退出 (退出码: {})",
+                code
+            ))),
+        ));
+    }
+
+    *lock = Some(V2rayaProcess {
+        child,
+        started_at: Instant::now(),
+    });
+
+    // Also start tailing the log file for live updates
+    start_v2raya_log_tailer();
+
+    Ok(Json(ApiResponse::success_no_data("v2raya 启动成功")))
+}
+
+/// POST /api/v2raya/stop - Stop v2raya process
+async fn v2raya_stop() -> Json<ApiResponse<()>> {
+    let mut lock = V2RAYA_PROCESS.lock().await;
+    if let Some(ref mut proc) = *lock {
+        if proc.child.try_wait().ok().flatten().is_none() {
+            if let Some(pid) = proc.child.id() {
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                for _ in 0..30 {
+                    sleep(Duration::from_millis(100)).await;
+                    if proc.child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                }
+                if proc.child.try_wait().ok().flatten().is_none() {
+                    proc.child.start_kill().ok();
+                }
+            }
+        }
+    }
+    *lock = None;
+    Json(ApiResponse::success_no_data("v2raya stopped"))
+}
+
+/// POST /api/v2raya/reset-password - Reset v2raya password
+async fn v2raya_reset_password() -> Result<Json<ApiResponse<String>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let output = tokio::process::Command::new(V2RAYA_BIN)
+        .arg("--config")
+        .arg(V2RAYA_CONFIG)
+        .arg("--reset-password")
+        .output()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("执行 reset-password 失败: {}", e))),
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}{}", stdout, stderr);
+
+    if output.status.success() {
+        Ok(Json(ApiResponse::success("密码已重置", combined)))
+    } else {
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!(
+                "reset-password 失败 (退出码: {}): {}",
+                output.status.code().unwrap_or(-1),
+                combined
+            ))),
+        ))
+    }
+}
+
+/// GET /api/v2raya/logs - Get v2raya logs from buffer
+async fn v2raya_get_logs(
+    Query(q): Query<SingBoxLogsQuery>,
+) -> Json<ApiResponse<Vec<LogEntry>>> {
+    let mut logs: Vec<LogEntry> = {
+        let buffer = V2RAYA_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer
+            .iter()
+            .filter_map(|msg| serde_json::from_str::<LogEntry>(msg).ok())
+            .collect()
+    };
+
+    if let Some(limit) = q.limit {
+        if logs.len() > limit {
+            logs = logs.split_off(logs.len() - limit);
+        }
+    }
+
+    Json(ApiResponse::success("Logs retrieved", logs))
+}
+
+/// GET /api/v2raya/ws/logs - WebSocket endpoint for v2raya live logs
+async fn v2raya_ws_logs(
+    Query(q): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    if verify_token(&q.token).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(handle_v2raya_logs_websocket))
+}
+
+async fn handle_v2raya_logs_websocket(mut socket: WebSocket) {
+    let mut rx = V2RAYA_LOG_BROADCAST.subscribe();
+
+    let history: Vec<String> = {
+        let buffer = V2RAYA_LOG_BUFFER.lock().expect("log buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    };
+    for msg in history {
+        if socket.send(Message::Text(msg.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warning = serde_json::json!({
+                            "time": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            "level": "warning",
+                            "message": format!("Dropped {} log messages", n)
+                        });
+                        let _ = socket.send(Message::Text(warning.to_string().into())).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Start a background task that tails /tmp/v2raya.log and broadcasts lines
+fn start_v2raya_log_tailer() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    tokio::spawn(async move {
+        let log_path = V2RAYA_LOG_FILE;
+
+        // Wait for log file to appear
+        for _ in 0..20 {
+            if StdPath::new(log_path).exists() {
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        // Seek to end of file to only tail new content
+        let metadata = match tokio::fs::metadata(log_path).await {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let file_len = metadata.len();
+
+        let file = match tokio::fs::File::open(log_path).await {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        use tokio::io::AsyncSeekExt;
+        let mut file = file;
+        let _ = file.seek(std::io::SeekFrom::Start(file_len)).await;
+
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+
+        loop {
+            // Check if v2raya is still running
+            {
+                let mut lock = V2RAYA_PROCESS.lock().await;
+                if let Some(ref mut proc) = *lock {
+                    if proc.child.try_wait().ok().flatten().is_some() {
+                        *lock = None;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            match tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    broadcast_v2raya_log("info", &line);
+                }
+                Ok(Ok(None)) => {
+                    // EOF - file may have been rotated, wait and retry
+                    sleep(Duration::from_millis(500)).await;
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    // Timeout - just continue loop to check if process is still running
+                    continue;
+                }
+            }
+        }
+    });
+}
+
+// ============================================================================
+// V2rayA Reverse Proxy
+// ============================================================================
+
+/// Reverse proxy handler for /v2raya/* → http://127.0.0.1:2017/*
+async fn v2raya_proxy(
+    req: Request<axum::body::Body>,
+) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+    let upstream_path = path.strip_prefix("/v2raya").unwrap_or(path);
+    let upstream_path = if upstream_path.is_empty() { "/" } else { upstream_path };
+    let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let upstream_url = format!("http://127.0.0.1:2017{}{}", upstream_path, query);
+
+    // Check for WebSocket upgrade
+    let is_upgrade = req.headers().get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+
+    if is_upgrade {
+        let ws_url = upstream_url.replace("http://", "ws://");
+        let ws = WebSocketUpgrade::from_request(req, &())
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        return Ok(ws.on_upgrade(move |socket| proxy_websocket(socket, ws_url)));
+    }
+
+    // Regular HTTP reverse proxy
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+
+    // Read the request body
+    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let mut upstream_req = client.request(
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
+        &upstream_url,
+    );
+
+    // Forward relevant headers (strip accept-encoding to get uncompressed responses for rewriting)
+    for (name, value) in headers.iter() {
+        if name == "host" || name == "connection" || name == "accept-encoding" {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            upstream_req = upstream_req.header(name.as_str(), v);
+        }
+    }
+
+    if !body_bytes.is_empty() {
+        upstream_req = upstream_req.body(body_bytes);
+    }
+
+    let upstream_resp = upstream_req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let status = StatusCode::from_u16(upstream_resp.status().as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+    let mut response_headers = HeaderMap::new();
+    for (name, value) in upstream_resp.headers().iter() {
+        if name == "transfer-encoding" {
+            continue;
+        }
+        // Rewrite Location header for redirects
+        if name == "location" {
+            if let Ok(v) = value.to_str() {
+                let rewritten = v
+                    .replace("http://127.0.0.1:2017/", "/v2raya/")
+                    .replace("http://127.0.0.1:2017", "/v2raya");
+                if let Ok(hv) = axum::http::HeaderValue::from_str(&rewritten) {
+                    response_headers.insert(name.clone(), hv);
+                    continue;
+                }
+            }
+        }
+        response_headers.insert(name.clone(), value.clone());
+    }
+
+    let content_type = upstream_resp.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let resp_bytes = upstream_resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    // Rewrite response body for HTML/JS/CSS content
+    let is_text = content_type.contains("text/html")
+        || content_type.contains("javascript")
+        || content_type.contains("text/css");
+
+    let final_body = if is_text {
+        let text = String::from_utf8_lossy(&resp_bytes);
+        let rewritten = text
+            .replace("href=\"/", "href=\"/v2raya/")
+            .replace("src=\"/", "src=\"/v2raya/")
+            .replace("\"/api/", "\"/v2raya/api/")
+            .replace("'/api/", "'/v2raya/api/")
+            .replace("\"/static/", "\"/v2raya/static/")
+            .replace("'/static/", "'/v2raya/static/");
+        axum::body::Body::from(rewritten.to_string().into_bytes())
+    } else {
+        axum::body::Body::from(resp_bytes)
+    };
+
+    let mut resp = Response::new(final_body);
+    *resp.status_mut() = status;
+    *resp.headers_mut() = response_headers;
+
+    // Remove content-length since body size may have changed after rewriting
+    resp.headers_mut().remove("content-length");
+
+    Ok(resp)
+}
+
 async fn start_terminal_internal(
     id: &str,
     config: &TerminalNodeConfig,
@@ -12046,6 +12554,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/syncs/{id}/ws/logs", get(sync_ws_logs))
         .route("/api/sing-box/logs", get(get_sing_box_logs))
         .route("/api/sing-box/ws/logs", get(sing_box_ws_logs))
+        // V2rayA management
+        .route("/api/v2raya/check", get(v2raya_check))
+        .route("/api/v2raya/status", get(v2raya_status))
+        .route("/api/v2raya/start", post(v2raya_start))
+        .route("/api/v2raya/stop", post(v2raya_stop))
+        .route("/api/v2raya/reset-password", post(v2raya_reset_password))
+        .route("/api/v2raya/logs", get(v2raya_get_logs))
+        .route("/api/v2raya/ws/logs", get(v2raya_ws_logs))
         .route("/api/apps/{id}/logs", get(get_app_logs))
         .route("/api/apps/{id}/ws/logs", get(app_ws_logs))
         .route("/api/terminals/{id}/logs", get(get_terminal_logs))
@@ -12087,6 +12603,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/api/terminals/restart-by-port", post(restart_terminal_by_port))
         .merge(ws_routes)
         .merge(protected_routes)
+        // V2rayA reverse proxy
+        .route("/v2raya", get(v2raya_proxy).post(v2raya_proxy).put(v2raya_proxy).delete(v2raya_proxy).patch(v2raya_proxy))
+        .route("/v2raya/{*path}", get(v2raya_proxy).post(v2raya_proxy).put(v2raya_proxy).delete(v2raya_proxy).patch(v2raya_proxy))
         // Static assets route (matches files in public/)
         .route("/{*path}", get(serve_static))
         .with_state(app_state)

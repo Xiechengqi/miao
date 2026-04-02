@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, Button, Badge, Modal, Input, ConfirmModal } from "@/components/ui";
 import { useStore } from "@/stores/useStore";
-import { useProxies } from "@/hooks";
 import { api } from "@/lib/api";
 import { Host, HostAuthType } from "@/types/api";
 import { Plus, Trash2, Pencil, Zap, Server } from "lucide-react";
@@ -53,7 +52,6 @@ interface HostTestResults {
 
 export default function HostsPage() {
   const { setLoading, loading, addToast } = useStore();
-  const { fetchProxies } = useProxies();
 
   const [hosts, setHosts] = useState<Host[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
@@ -257,9 +255,6 @@ export default function HostsPage() {
       }
       closeModal();
       loadHosts();
-      // 刷新代理节点列表，使新主机作为 SSH 节点可用
-      // silent 模式：sing-box 未运行时静默失败，避免用户困惑
-      fetchProxies(true);
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "保存失败" });
     } finally {
@@ -390,9 +385,6 @@ export default function HostsPage() {
         delete next[host.id];
         return next;
       });
-      // 刷新代理节点列表，同步删除 SSH 节点
-      // silent 模式：sing-box 未运行时静默失败，避免用户困惑
-      fetchProxies(true);
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "删除失败" });
     } finally {

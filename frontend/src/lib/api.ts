@@ -462,6 +462,39 @@ class ApiClient {
     return res.data;
   }
 
+  // V2rayA APIs
+  async checkV2raya(): Promise<import("@/types/api").V2rayaCheck> {
+    const res = await this.fetch<{ data: import("@/types/api").V2rayaCheck }>("/api/v2raya/check");
+    return res.data;
+  }
+
+  async getV2rayaStatus(): Promise<import("@/types/api").V2rayaStatus> {
+    const res = await this.fetch<{ data: import("@/types/api").V2rayaStatus }>("/api/v2raya/status");
+    return res.data;
+  }
+
+  async startV2raya(): Promise<void> {
+    await this.fetch("/api/v2raya/start", { method: "POST" });
+  }
+
+  async stopV2raya(): Promise<void> {
+    await this.fetch("/api/v2raya/stop", { method: "POST" });
+  }
+
+  async resetV2rayaPassword(): Promise<string> {
+    const res = await this.fetch<{ data: string }>("/api/v2raya/reset-password", { method: "POST" });
+    return res.data;
+  }
+
+  async getV2rayaLogs(limit?: number): Promise<LogEntry[]> {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit.toString());
+    const res = await this.fetch<{ data: LogEntry[] }>(
+      `/api/v2raya/logs?${params.toString()}`
+    );
+    return res.data;
+  }
+
   async getAppLogs(id: string, limit?: number): Promise<LogEntry[]> {
     const params = new URLSearchParams();
     if (limit) params.set("limit", limit.toString());
@@ -1158,6 +1191,15 @@ export function getSingBoxLogsWsUrl(): string {
   }
   const wsBase = getWsBase();
   return `${wsBase}/api/sing-box/ws/logs?token=${token}`;
+}
+
+export function getV2rayaLogsWsUrl(): string {
+  const token = localStorage.getItem("miao_token");
+  if (!token) {
+    throw new Error("No authentication token found. Please login first.");
+  }
+  const wsBase = getWsBase();
+  return `${wsBase}/api/v2raya/ws/logs?token=${token}`;
 }
 
 export function getAppLogsWsUrl(id: string): string {

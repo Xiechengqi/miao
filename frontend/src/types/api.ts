@@ -418,6 +418,20 @@ export interface IVncConfig {
   video_bitrate: number;
 }
 
+// V2rayA Types
+export interface V2rayaCheck {
+  bin_exists: boolean;
+  config_exists: boolean;
+  v2ray_exists: boolean;
+  ready: boolean;
+}
+
+export interface V2rayaStatus {
+  running: boolean;
+  pid?: number;
+  uptime_secs?: number;
+}
+
 // Subscription Types
 export interface Subscription {
   id: string;

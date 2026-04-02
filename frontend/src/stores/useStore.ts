@@ -12,7 +12,7 @@ interface AppState {
   loading: boolean;
   loadingAction: string | null;
 
-  // Proxy State
+  // Proxy State (kept for backward compatibility with useProxies/useStatus hooks)
   proxyGroups: Record<string, ProxyGroup>;
   nodes: Node[];
   delays: Record<string, number>;
