@@ -1,13 +1,55 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { Card, CardHeader, CardContent, Button, Badge, TogglePower, Modal, ConfirmModal } from "@/components/ui";
+import { Card, CardContent, Button, Badge, TogglePower, Modal, ConfirmModal } from "@/components/ui";
 import { api, getV2rayaLogsWsUrl } from "@/lib/api";
 import { formatUptime, cn } from "@/lib/utils";
-import { Activity, Clock, RefreshCw, FileText, KeyRound, AlertTriangle } from "lucide-react";
+import { Activity, Clock, RefreshCw, FileText, KeyRound, AlertTriangle, Globe, Play, Square, LoaderCircle } from "lucide-react";
 import { V2rayaCheck, V2rayaStatus, LogEntry } from "@/types/api";
 import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
 import { useStore } from "@/stores/useStore";
+
+type ConnectivitySite = {
+  name: string;
+  url: string;
+};
+
+type ConnectivityResult = {
+  success: boolean;
+  latency_ms?: number;
+};
+
+const CONNECTIVITY_SITES: ConnectivitySite[] = [
+  { name: "Google", url: "https://www.google.com" },
+  { name: "GitHub", url: "https://github.com" },
+  { name: "YouTube", url: "https://www.youtube.com" },
+  { name: "Twitter", url: "https://twitter.com" },
+  { name: "Telegram", url: "https://telegram.org" },
+  { name: "Baidu", url: "https://www.baidu.com" },
+];
+
+function getConnectivityTone(result?: ConnectivityResult) {
+  if (!result) {
+    return "border-slate-200 bg-white text-slate-500";
+  }
+  if (!result.success) {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+  const latency = result.latency_ms ?? 0;
+  if (latency < 80) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+  if (latency < 180) {
+    return "border-sky-200 bg-sky-50 text-sky-700";
+  }
+  return "border-amber-200 bg-amber-50 text-amber-700";
+}
+
+function formatConnectivityResult(result?: ConnectivityResult) {
+  if (!result) return "--";
+  if (!result.success) return "超时";
+  return `${result.latency_ms ?? 0} ms`;
+}
 
 function V2rayaLogModal({
   isOpen,
@@ -163,7 +205,12 @@ export default function ProxiesPage() {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [v2rayaWebUrl, setV2rayaWebUrl] = useState("");
+  const [iframeKey, setIframeKey] = useState(0);
+  const [connectivityResults, setConnectivityResults] = useState<Record<string, ConnectivityResult>>({});
+  const [testingConnectivity, setTestingConnectivity] = useState(false);
+  const [currentTestingSite, setCurrentTestingSite] = useState<string | null>(null);
   const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopConnectivityRef = useRef(false);
 
   const checkV2raya = useCallback(async () => {
     try {
@@ -251,6 +298,53 @@ export default function ProxiesPage() {
     }
   }, [addToast]);
 
+  const testSingleSite = useCallback(async (site: ConnectivitySite) => {
+    setCurrentTestingSite(site.name);
+    try {
+      const result = await api.testConnectivity(site.url);
+      setConnectivityResults((prev) => ({
+        ...prev,
+        [site.name]: {
+          success: result.success,
+          latency_ms: result.latency_ms,
+        },
+      }));
+    } catch {
+      setConnectivityResults((prev) => ({
+        ...prev,
+        [site.name]: { success: false },
+      }));
+    } finally {
+      setCurrentTestingSite((prev) => (prev === site.name ? null : prev));
+    }
+  }, []);
+
+  const handleTestAllConnectivity = useCallback(async () => {
+    setTestingConnectivity(true);
+    stopConnectivityRef.current = false;
+    setConnectivityResults({});
+
+    for (const site of CONNECTIVITY_SITES) {
+      await testSingleSite(site);
+      if (stopConnectivityRef.current) {
+        break;
+      }
+    }
+
+    stopConnectivityRef.current = false;
+    setTestingConnectivity(false);
+  }, [testSingleSite]);
+
+  const handleStopConnectivity = useCallback(() => {
+    stopConnectivityRef.current = true;
+    setTestingConnectivity(false);
+  }, []);
+
+  const handleTestSingleSite = useCallback(async (site: ConnectivitySite) => {
+    if (testingConnectivity || currentTestingSite) return;
+    await testSingleSite(site);
+  }, [currentTestingSite, testSingleSite, testingConnectivity]);
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -304,6 +398,7 @@ export default function ProxiesPage() {
   }
 
   const isRunning = v2rayaStatus?.running ?? false;
+  const connectivityDisabled = !isRunning || testingConnectivity || Boolean(currentTestingSite);
 
   return (
     <div className="space-y-6">
@@ -365,18 +460,156 @@ export default function ProxiesPage() {
         <CardContent>
           {/* V2rayA Web UI iframe */}
           {isRunning ? (
-            <div className="rounded-lg overflow-hidden border border-slate-200">
+            <div className="rounded-lg overflow-hidden border border-slate-200 bg-white">
+              <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-4 sm:px-5">
+                <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <Globe className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-slate-800">连通性测试</div>
+                        <div className="text-xs text-slate-500">测试 Google、GitHub、YouTube、Twitter、Telegram 和 Baidu</div>
+                      </div>
+                    </div>
+                    <Button
+                      variant={testingConnectivity ? "danger" : "secondary"}
+                      size="sm"
+                      onClick={testingConnectivity ? handleStopConnectivity : handleTestAllConnectivity}
+                      disabled={!isRunning}
+                    >
+                      {testingConnectivity ? (
+                        <>
+                          <Square className="mr-2 h-3.5 w-3.5" />
+                          停止测试
+                        </>
+                      ) : (
+                        <>
+                          <Play className="mr-2 h-3.5 w-3.5" />
+                          开始测试
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {CONNECTIVITY_SITES.map((site) => {
+                      const result = connectivityResults[site.name];
+                      const isTesting = currentTestingSite === site.name;
+                      return (
+                        <button
+                          key={site.name}
+                          type="button"
+                          onClick={() => void handleTestSingleSite(site)}
+                          disabled={connectivityDisabled}
+                          className={cn(
+                            "flex min-h-[72px] items-center justify-between rounded-xl border px-4 py-3 text-left transition-all duration-200",
+                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2",
+                            "disabled:cursor-not-allowed disabled:opacity-70",
+                            !connectivityDisabled && "hover:-translate-y-0.5 hover:shadow-sm",
+                            getConnectivityTone(result),
+                            isTesting && "border-indigo-200 bg-indigo-50 text-indigo-700"
+                          )}
+                        >
+                          <div className="space-y-1">
+                            <div className="text-sm font-semibold">{site.name}</div>
+                            <div className="text-xs opacity-80">
+                              {isTesting ? "测试中..." : site.url.replace(/^https?:\/\//, "")}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {isTesting && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                            <Badge
+                              variant={
+                                !result ? "default" :
+                                !result.success ? "error" :
+                                (result.latency_ms ?? 0) < 80 ? "success" :
+                                (result.latency_ms ?? 0) < 180 ? "info" :
+                                "warning"
+                              }
+                              className="min-w-[72px] justify-center"
+                            >
+                              {formatConnectivityResult(result)}
+                            </Badge>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 border-b border-slate-100 px-4 py-3 sm:px-5">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setIframeKey((prev) => prev + 1)}
+                  title="重新加载 V2rayA"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </Button>
+                <a
+                  href={v2rayaWebUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-w-0 truncate text-sm font-mono text-slate-600 hover:text-violet-600"
+                >
+                  {v2rayaWebUrl}
+                </a>
+              </div>
+
               <iframe
+                key={iframeKey}
                 src={v2rayaWebUrl}
                 className="w-full border-0"
-                style={{ minHeight: "calc(100vh - 300px)" }}
+                style={{ minHeight: "calc(100vh - 420px)" }}
                 title="V2rayA"
               />
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-              <Activity className="w-10 h-10 mb-3 opacity-30" />
-              <p>V2rayA 未运行，点击启动按钮开始</p>
+            <div className="space-y-4">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4 sm:px-5">
+                <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-200 text-slate-500">
+                        <Globe className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-slate-700">连通性测试</div>
+                        <div className="text-xs text-slate-500">启动 V2rayA 后可进行批量测试和单站点复测</div>
+                      </div>
+                    </div>
+                    <Button variant="secondary" size="sm" disabled>
+                      <Play className="mr-2 h-3.5 w-3.5" />
+                      开始测试
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {CONNECTIVITY_SITES.map((site) => (
+                      <div
+                        key={site.name}
+                        className="flex min-h-[72px] items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-400"
+                      >
+                        <div className="space-y-1">
+                          <div className="text-sm font-semibold text-slate-600">{site.name}</div>
+                          <div className="text-xs">{site.url.replace(/^https?:\/\//, "")}</div>
+                        </div>
+                        <Badge variant="default" className="min-w-[72px] justify-center">
+                          --
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                <Activity className="w-10 h-10 mb-3 opacity-30" />
+                <p>V2rayA 未运行，点击启动按钮开始</p>
+              </div>
             </div>
           )}
         </CardContent>
