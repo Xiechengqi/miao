@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { Card, CardContent, Button, Badge, TogglePower, Modal, ConfirmModal } from "@/components/ui";
 import { api, getV2rayaLogsWsUrl } from "@/lib/api";
 import { formatUptime, cn } from "@/lib/utils";
-import { Activity, Clock, RefreshCw, FileText, KeyRound, AlertTriangle, Globe, Play, Square, LoaderCircle } from "lucide-react";
+import { Activity, Clock, RefreshCw, FileText, KeyRound, AlertTriangle, Play, Square, LoaderCircle } from "lucide-react";
 import { V2rayaCheck, V2rayaStatus, LogEntry } from "@/types/api";
 import { ansiToHtml, stripLogPrefix } from "@/lib/ansi";
 import { useStore } from "@/stores/useStore";
@@ -489,9 +489,6 @@ export default function ProxiesPage() {
               <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-4 sm:px-5">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="flex min-w-0 items-center gap-3 overflow-x-auto pb-1 xl:pb-0">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
-                      <Globe className="h-4 w-4" />
-                    </div>
                     {CONNECTIVITY_SITES.map((site) => {
                       const result = connectivityResults[site.name];
                       const isTesting = currentTestingSite === site.name;
@@ -574,7 +571,7 @@ export default function ProxiesPage() {
                 key={iframeKey}
                 src={v2rayaWebUrl}
                 className="w-full border-0"
-                style={{ minHeight: "calc(100vh - 420px)" }}
+                style={{ minHeight: "calc(100vh - 240px)" }}
                 title="V2rayA"
               />
             </div>
@@ -583,9 +580,6 @@ export default function ProxiesPage() {
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4 sm:px-5">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="flex min-w-0 items-center gap-3 overflow-x-auto pb-1 xl:pb-0">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-slate-500">
-                      <Globe className="h-4 w-4" />
-                    </div>
                     {CONNECTIVITY_SITES.map((site) => (
                       <div
                         key={site.name}
