@@ -5,7 +5,7 @@ use axum::{
     },
     http::{Request, StatusCode, HeaderMap},
     middleware::{self, Next},
-    response::{Json, Response},
+    response::{Json, Redirect, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -10505,8 +10505,7 @@ async fn v2raya_status() -> Json<ApiResponse<serde_json::Value>> {
     ))
 }
 
-/// POST /api/v2raya/start - Start v2raya process
-async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+async fn start_v2raya_process() -> Result<(), (StatusCode, Json<ApiResponse<()>>)> {
     let mut lock = V2RAYA_PROCESS.lock().await;
     if let Some(ref mut proc) = *lock {
         if proc.child.try_wait().ok().flatten().is_none() {
@@ -10575,7 +10574,6 @@ async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiRe
     let pid = child.id();
     log_info!("v2raya process spawned with PID: {:?}", pid);
 
-    // Wait a short moment to check if process exits immediately
     sleep(Duration::from_millis(500)).await;
     if let Some(exit_status) = child.try_wait().map_err(|e| {
         (
@@ -10598,17 +10596,18 @@ async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiRe
         started_at: Instant::now(),
     });
 
-    // Also start tailing the log file for live updates
     start_v2raya_log_tailer();
 
-    Ok(Json(ApiResponse::success_no_data("v2raya 启动成功")))
+    Ok(())
 }
 
-/// POST /api/v2raya/stop - Stop v2raya process
-async fn v2raya_stop() -> Json<ApiResponse<()>> {
+async fn stop_v2raya_process() -> bool {
     let mut lock = V2RAYA_PROCESS.lock().await;
+    let mut was_running = false;
+
     if let Some(ref mut proc) = *lock {
         if proc.child.try_wait().ok().flatten().is_none() {
+            was_running = true;
             if let Some(pid) = proc.child.id() {
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
                 for _ in 0..30 {
@@ -10623,18 +10622,51 @@ async fn v2raya_stop() -> Json<ApiResponse<()>> {
             }
         }
     }
+
     *lock = None;
+    was_running
+}
+
+/// POST /api/v2raya/start - Start v2raya process
+async fn v2raya_start() -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    start_v2raya_process().await?;
+    Ok(Json(ApiResponse::success_no_data("v2raya 启动成功")))
+}
+
+/// POST /api/v2raya/stop - Stop v2raya process
+async fn v2raya_stop() -> Json<ApiResponse<()>> {
+    stop_v2raya_process().await;
     Json(ApiResponse::success_no_data("v2raya stopped"))
 }
 
 /// POST /api/v2raya/reset-password - Reset v2raya password
 async fn v2raya_reset_password() -> Result<Json<ApiResponse<String>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let output = tokio::process::Command::new(v2raya_bin())
+    use std::process::Stdio;
+    let mut command = tokio::process::Command::new(v2raya_bin());
+    command.kill_on_drop(true);
+    let child = command
         .arg("--config")
         .arg(v2raya_config_dir())
         .arg("--reset-password")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("执行 reset-password 失败: {}", e))),
+            )
+        })?;
+
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("reset-password 超时（10秒）")),
+            )
+        })?
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10815,6 +10847,10 @@ fn start_v2raya_log_tailer() {
 async fn v2raya_proxy(
     req: Request<axum::body::Body>,
 ) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/v2raya" {
+        return Ok(Redirect::permanent("/v2raya/").into_response());
+    }
+
     let path = req.uri().path();
     let upstream_path = path.strip_prefix("/v2raya").unwrap_or(path);
     let upstream_path = if upstream_path.is_empty() { "/" } else { upstream_path };
@@ -10863,6 +10899,19 @@ async fn v2raya_proxy(
             upstream_req = upstream_req.header(name.as_str(), v);
         }
     }
+    upstream_req = upstream_req
+        .header("host", "127.0.0.1:2017")
+        .header(
+            "x-forwarded-proto",
+            headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("http"),
+        )
+        .header("x-forwarded-prefix", "/v2raya");
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        upstream_req = upstream_req.header("x-forwarded-host", host);
+    }
 
     if !body_bytes.is_empty() {
         upstream_req = upstream_req.body(body_bytes);
@@ -10881,9 +10930,17 @@ async fn v2raya_proxy(
         // Rewrite Location header for redirects
         if name == "location" {
             if let Ok(v) = value.to_str() {
-                let rewritten = v
-                    .replace("http://127.0.0.1:2017/", "/v2raya/")
-                    .replace("http://127.0.0.1:2017", "/v2raya");
+                let rewritten = if v.starts_with("http://127.0.0.1:2017/") {
+                    v.replacen("http://127.0.0.1:2017/", "/v2raya/", 1)
+                } else if v == "http://127.0.0.1:2017" || v == "/" {
+                    "/v2raya/".to_string()
+                } else if v.starts_with("http://127.0.0.1:2017") {
+                    v.replacen("http://127.0.0.1:2017", "/v2raya", 1)
+                } else if v.starts_with('/') {
+                    format!("/v2raya{}", v)
+                } else {
+                    v.to_string()
+                };
                 if let Ok(hv) = axum::http::HeaderValue::from_str(&rewritten) {
                     response_headers.insert(name.clone(), hv);
                     continue;
