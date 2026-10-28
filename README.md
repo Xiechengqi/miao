@@ -21,7 +21,7 @@
 | 前端 | Next.js 16 + React 19 + TypeScript 5 + Tailwind CSS 4 |
 | 状态管理 | Zustand |
 | 动画 | Framer Motion |
-| 流量转发 | sing-box（内嵌） |
+| 流量转发 | sing-box（独立二进制，固定验证版本） |
 
 ## 目录结构
 
@@ -42,10 +42,12 @@ miao/
 │       ├── stores/         # Zustand 状态管理
 │       ├── hooks/          # 自定义 Hooks
 │       └── types/          # TypeScript 类型定义
-├── embedded/               # 内嵌二进制文件
+├── embedded/               # 构建脚本下载的辅助二进制缓存
 │   ├── sing-box-amd64/arm64
 │   └── gotty-amd64/arm64
 ├── public/                 # 静态资源（Next.js 构建产物）
+├── sing-box-release.json   # sing-box 固定版本与归档 SHA-256
+├── scripts/                # 下载验证脚本
 ├── config.yaml             # 运行时配置
 ├── build.sh                # 本地构建脚本
 ├── build-ci.sh             # CI 交叉编译脚本
@@ -82,6 +84,8 @@ miao/
 ### 流量转发 (sing-box)
 
 集成 sing-box 提供流量转发功能，可配合 SSH 隧道使用：
+
+当前验证版本为 **1.14.4**，版本与 SHA-256 由 `sing-box-release.json` 管理。支持 SS、SOCKS5、HTTPS、TUIC、Hysteria2、VLESS 分享链接订阅；格式、参数和升级验证流程见 [订阅解析说明](SUBSCRIPTION_PARSER.md)。
 
 | 功能 | 说明 |
 |------|------|

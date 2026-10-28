@@ -26,6 +26,7 @@ import {
   IVncConfig,
   Subscription,
   SubscriptionRequest,
+  BinariesStatus,
 } from "@/types/api";
 
 // 重试配置
@@ -150,18 +151,8 @@ class ApiClient {
   }
 
   // Binaries
-  async getBinariesStatus(): Promise<{
-    sing_box: { installed: boolean; path: string };
-    gotty: { installed: boolean; path: string };
-    arch: string;
-  }> {
-    const res = await this.fetch<{
-      data: {
-        sing_box: { installed: boolean; path: string };
-        gotty: { installed: boolean; path: string };
-        arch: string;
-      };
-    }>("/api/binaries/status");
+  async getBinariesStatus(): Promise<BinariesStatus> {
+    const res = await this.fetch<{ data: BinariesStatus }>("/api/binaries/status");
     return res.data;
   }
 

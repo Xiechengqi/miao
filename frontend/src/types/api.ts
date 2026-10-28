@@ -114,7 +114,7 @@ export interface DnsStatus {
 }
 
 // Node Types
-export type NodeType = "ssh" | "ss" | "anytls" | "hysteria2" | "tuic" | "vmess";
+export type NodeType = "ssh" | "ss" | "shadowsocks" | "socks" | "http" | "anytls" | "hysteria2" | "tuic" | "vmess" | "vless" | "trojan";
 
 export interface Node {
   id: string;
@@ -432,18 +432,45 @@ export interface V2rayaStatus {
 }
 
 // Subscription Types
+export interface SubscriptionDiagnostic {
+  line: number;
+  protocol: string;
+  message: string;
+}
+
+export interface SubscriptionFileStatus {
+  file_name: string;
+  file_path: string;
+  loaded: boolean;
+  node_count: number;
+  subscription_id?: string;
+  error?: string;
+  diagnostics?: SubscriptionDiagnostic[];
+}
+
 export interface Subscription {
   id: string;
   name?: string;
   enabled: boolean;
-  source: {
-    url: string;
-  };
+  source: { type: "url"; url: string } | { type: "content"; content: string };
+  files: SubscriptionFileStatus[];
+  updated_at?: number;
+  last_error?: string;
 }
 
-export interface SubscriptionRequest {
+export type SubscriptionRequest = {
   name?: string;
   enabled?: boolean;
-  url: string;
-}
+} & ({ url: string; content?: never } | { content: string; url?: never });
 
+export interface BinariesStatus {
+  sing_box: {
+    installed: boolean;
+    path: string;
+    pinned_version: string;
+    version_info: { version: string; tags: string[] } | null;
+  };
+  gotty: { installed: boolean; path: string };
+  ivnc: { installed: boolean; path: string };
+  arch: string;
+}

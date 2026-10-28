@@ -56,17 +56,8 @@ if [ ! -f "embedded/gotty-${TARGET}" ] || [ ! -s "embedded/gotty-${TARGET}" ]; t
     chmod +x "embedded/gotty-${TARGET}"
 fi
 
-# Download sing-box
-if [ ! -f "embedded/sing-box-${TARGET}" ] || [ ! -s "embedded/sing-box-${TARGET}" ]; then
-    echo "Downloading sing-box-${TARGET}..."
-    SINGBOX_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-    curl -L -o "embedded/sing-box-${TARGET}.tar.gz" \
-        "https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION#v}-linux-${TARGET}.tar.gz"
-    tar -xzf "embedded/sing-box-${TARGET}.tar.gz" -C embedded --strip-components=1 "sing-box-${SINGBOX_VERSION#v}-linux-${TARGET}/sing-box"
-    mv "embedded/sing-box" "embedded/sing-box-${TARGET}"
-    rm -f "embedded/sing-box-${TARGET}.tar.gz"
-    chmod +x "embedded/sing-box-${TARGET}"
-fi
+# sing-box runs as a separate binary. Use the same pinned manifest as the runtime installer.
+bash scripts/download-sing-box.sh "$TARGET" "embedded/sing-box-${TARGET}"
 
 ls -lh embedded/
 

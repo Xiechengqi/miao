@@ -9,7 +9,22 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Test backend and subscription conversion
+        run: |
+          mkdir -p public
+          cargo test --locked --all-targets --features tcp_tunnel
+      - name: Verify pinned sing-box and generated configuration
+        run: |
+          bash scripts/download-sing-box.sh amd64 "$RUNNER_TEMP/sing-box"
+          MIAO_TEST_SING_BOX="$RUNNER_TEMP/sing-box" cargo test --locked --features tcp_tunnel --bin miao-rust native_core_validates_generated_config -- --ignored
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       matrix:

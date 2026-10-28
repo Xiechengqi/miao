@@ -9,7 +9,6 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
@@ -44,7 +43,7 @@ mod tcp_tunnel;
 mod full_tunnel;
 mod sync;
 mod app;
-mod subscription_parser;
+use miao_rust::{singbox, subscription_parser};
 
 // Version embedded at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -564,6 +563,7 @@ impl Default for MetricsConfig {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum SubscriptionSource {
     Url { url: String },
+    Content { content: String },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1787,6 +1787,8 @@ struct SubFileStatus {
     file_path: String,
     loaded: bool,
     node_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<subscription_parser::Diagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     subscription_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1807,6 +1809,7 @@ struct SubFilesResponse {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum SubscriptionSourceResponse {
     Url { url: String },
+    Content { content: String },
     Git { repo: String, workdir: String },
     Path { path: String },
 }
@@ -1838,6 +1841,7 @@ struct SubscriptionSaveResponse {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SubscriptionSourceInput {
+    Content { content: String },
     Url { url: String },
 }
 
@@ -2525,130 +2529,129 @@ async fn get_status(
 }
 
 /// GET /api/binaries/status - Check if sing-box, gotty and ivnc binaries exist
-async fn get_binaries_status() -> Json<ApiResponse<serde_json::Value>> {
+async fn get_binaries_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
     let current_dir = std::env::current_dir().unwrap_or_default();
-    let sing_box_exists = current_dir.join("sing-box").exists();
+    let sing_box_path = PathBuf::from(&state.sing_box_home).join("sing-box");
+    let sing_box_exists = sing_box_path.exists();
+    let sing_box_version = if sing_box_exists {
+        singbox::version_info(&sing_box_path).await
+    } else {
+        None
+    };
     let gotty_exists = current_dir.join("gotty").exists();
     let ivnc_exists = current_dir.join("ivnc").exists();
 
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
 
-    Json(ApiResponse::success("ok", json!({
-        "sing_box": {
-            "installed": sing_box_exists,
-            "path": current_dir.join("sing-box").to_string_lossy()
-        },
-        "gotty": {
-            "installed": gotty_exists,
-            "path": current_dir.join("gotty").to_string_lossy()
-        },
-        "ivnc": {
-            "installed": ivnc_exists,
-            "path": current_dir.join("ivnc").to_string_lossy()
-        },
-        "arch": arch
-    })))
+    Json(ApiResponse::success(
+        "ok",
+        json!({
+            "sing_box": {
+                "installed": sing_box_exists,
+                "path": sing_box_path.to_string_lossy(),
+                "version_info": sing_box_version,
+                "pinned_version": singbox::release().version
+            },
+            "gotty": {
+                "installed": gotty_exists,
+                "path": current_dir.join("gotty").to_string_lossy()
+            },
+            "ivnc": {
+                "installed": ivnc_exists,
+                "path": current_dir.join("ivnc").to_string_lossy()
+            },
+            "arch": arch
+        }),
+    ))
 }
 
 /// POST /api/binaries/install/sing-box - Download and install sing-box
-async fn install_sing_box() -> Json<ApiResponse<serde_json::Value>> {
-    let current_dir = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(e) => return Json(ApiResponse::error(format!("获取当前目录失败: {}", e))),
-    };
+async fn install_sing_box(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    match update_sing_box(&state).await {
+        Ok(version) => Json(ApiResponse::success(
+            "sing-box 安装成功",
+            json!({
+                "path": PathBuf::from(&state.sing_box_home).join("sing-box"), "version": version
+            }),
+        )),
+        Err(error) => Json(ApiResponse::error(error)),
+    }
+}
 
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
-    let client = reqwest::Client::new();
-    let release_url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+// Serialize installs and upgrades; both use the same checked, rollback-capable transaction.
+static SING_OPERATION_LOCK: Mutex<()> = Mutex::const_new(());
 
-    // Get latest release info
-    let download_url = match client
-        .get(release_url)
-        .header("User-Agent", "miao-rust")
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if let Ok(release) = resp.json::<serde_json::Value>().await {
-                let tag = release["tag_name"].as_str().unwrap_or("latest");
-                let version = tag.trim_start_matches('v');
-                format!(
-                    "https://github.com/SagerNet/sing-box/releases/download/{}/sing-box-{}-linux-{}.tar.gz",
-                    tag, version, arch
-                )
-            } else {
-                return Json(ApiResponse::error("获取版本信息失败".to_string()));
-            }
+async fn update_sing_box(state: &Arc<AppState>) -> Result<String, String> {
+    let _update = SING_OPERATION_LOCK.lock().await;
+    let home = PathBuf::from(&state.sing_box_home);
+    let staged = singbox::stage_download(&home).await?;
+    let config = state.config.lock().await.clone();
+    let loaded = load_subscriptions_and_update_state(state, &config).await;
+    if loaded.dir_error.is_some() || loaded.files.iter().any(|f| !f.loaded) {
+        return Err("订阅加载失败，保留当前 sing-box 和配置".into());
+    }
+    gen_config_with_base(
+        &config,
+        staged.dir.to_str().ok_or("Invalid staging path")?,
+        &loaded,
+        &home,
+    )
+    .await
+    .map_err(|_| "生成升级配置失败")?;
+    let replacement = singbox::Replacement::prepare(&home)?;
+    let was_running = {
+        let mut lock = SING_PROCESS.lock().await;
+        match lock.as_mut() {
+            Some(process) => process
+                .child
+                .try_wait()
+                .map_err(|e| e.to_string())?
+                .is_none(),
+            None => false,
         }
-        Err(e) => return Json(ApiResponse::error(format!("请求失败: {}", e))),
     };
-
-    log_info!("Downloading sing-box from: {}", download_url);
-
-    let response = match client.get(&download_url).send().await {
-        Ok(r) => r,
-        Err(e) => return Json(ApiResponse::error(format!("下载失败: {}", e))),
-    };
-
-    if !response.status().is_success() {
-        return Json(ApiResponse::error(format!("下载失败: HTTP {}", response.status())));
+    if was_running {
+        stop_sing_internal_and_wait().await;
     }
-
-    let bytes = match response.bytes().await {
-        Ok(b) => b,
-        Err(e) => return Json(ApiResponse::error(format!("读取响应失败: {}", e))),
-    };
-
-    let sing_box_path = current_dir.join("sing-box");
-
-    // Extract from tar.gz
-    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut archive = tar::Archive::new(decoder);
-
-    let temp_dir = current_dir.join(".sing-box-temp");
-    let _ = fs::remove_dir_all(&temp_dir);
-    if let Err(e) = fs::create_dir_all(&temp_dir) {
-        return Json(ApiResponse::error(format!("创建临时目录失败: {}", e)));
-    }
-
-    if let Err(e) = archive.unpack(&temp_dir) {
-        let _ = fs::remove_dir_all(&temp_dir);
-        return Json(ApiResponse::error(format!("解压失败: {}", e)));
-    }
-
-    // Find sing-box binary
-    let mut found = false;
-    if let Ok(entries) = fs::read_dir(&temp_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let binary_path = path.join("sing-box");
-                if binary_path.exists() {
-                    if let Err(e) = fs::copy(&binary_path, &sing_box_path) {
-                        let _ = fs::remove_dir_all(&temp_dir);
-                        return Json(ApiResponse::error(format!("复制文件失败: {}", e)));
-                    }
-                    found = true;
-                    break;
-                }
-            }
+    let result = async {
+        replacement.activate(&staged)?;
+        if was_running {
+            start_sing_internal(&state.sing_box_home).await?;
         }
+        Ok::<(), String>(())
     }
-
-    let _ = fs::remove_dir_all(&temp_dir);
-
-    if !found {
-        return Json(ApiResponse::error("解压后未找到 sing-box 文件".to_string()));
+    .await;
+    if let Err(error) = result {
+        stop_sing_internal_and_wait().await;
+        if let Err(restore_error) = replacement.rollback() {
+            return Err(format!(
+                "{}; 回滚失败: {}。请使用 sing-box.previous 和 config.json.previous 恢复",
+                error, restore_error
+            ));
+        }
+        if was_running {
+            start_sing_internal(&state.sing_box_home)
+                .await
+                .map_err(|e| format!("{}; 已恢复旧文件，但旧服务启动失败: {}", error, e))?;
+        }
+        return Err(format!("{}; 已回滚", error));
     }
-
-    if let Err(e) = fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755)) {
-        return Json(ApiResponse::error(format!("设置权限失败: {}", e)));
+    *state.node_type_by_tag.lock().await = build_node_type_map(&config, &loaded);
+    state
+        .sing_box_pending_restart
+        .store(false, Ordering::Relaxed);
+    if was_running {
+        let _ = apply_saved_selections(&config).await;
     }
-
-    log_info!("sing-box installed successfully to {:?}", sing_box_path);
-    Json(ApiResponse::success("sing-box 安装成功", json!({
-        "path": sing_box_path.to_string_lossy()
-    })))
+    Ok(singbox::release().version)
 }
 
 /// POST /api/binaries/install/gotty - Download and install gotty
@@ -2787,206 +2790,35 @@ async fn handle_sing_box_upgrade_websocket(mut socket: WebSocket, state: Arc<App
     let _ = socket.close().await;
 }
 
-async fn perform_sing_box_upgrade(log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>, state: Arc<AppState>) {
-    use futures_util::StreamExt;
-
-    let send_log = |step: u8, message: &str, level: &str, progress: Option<u8>| {
-        let entry = UpgradeLogEntry {
-            step,
+async fn perform_sing_box_upgrade(
+    log_tx: tokio::sync::mpsc::Sender<UpgradeLogEntry>,
+    state: Arc<AppState>,
+) {
+    let _ = log_tx
+        .send(UpgradeLogEntry {
+            step: 1,
             total_steps: 6,
-            message: message.to_string(),
-            level: level.to_string(),
-            progress,
-        };
-        let tx = log_tx.clone();
-        async move { let _ = tx.send(entry).await; }
+            message: format!(
+                "安装已验证版本 {}：校验 SHA-256、构建能力及配置后替换，失败自动回滚",
+                singbox::release().version
+            ),
+            level: "info".into(),
+            progress: None,
+        })
+        .await;
+    let (message, level) = match update_sing_box(&state).await {
+        Ok(version) => (format!("sing-box 已更新到 v{}", version), "success"),
+        Err(error) => (error, "error"),
     };
-
-    // Step 1: Get latest release info
-    send_log(1, "获取最新版本信息...", "info", None).await;
-
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
-    let client = reqwest::Client::new();
-    let release_url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
-
-    let (download_url, version) = match client
-        .get(release_url)
-        .header("User-Agent", "miao-rust")
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if let Ok(release) = resp.json::<serde_json::Value>().await {
-                let tag = release["tag_name"].as_str().unwrap_or("latest");
-                let ver = tag.trim_start_matches('v').to_string();
-                let url = format!(
-                    "https://github.com/SagerNet/sing-box/releases/download/{}/sing-box-{}-linux-{}.tar.gz",
-                    tag, ver, arch
-                );
-                (url, ver)
-            } else {
-                send_log(1, "解析版本信息失败", "error", None).await;
-                return;
-            }
-        }
-        Err(e) => {
-            send_log(1, &format!("获取版本信息失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    send_log(1, &format!("最新版本: {}", version), "success", None).await;
-
-    // Step 2: Download
-    send_log(2, "下载 sing-box...", "info", None).await;
-
-    let response = match client.get(&download_url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            send_log(2, &format!("下载失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    if !response.status().is_success() {
-        send_log(2, &format!("下载失败: HTTP {}", response.status()), "error", None).await;
-        return;
-    }
-
-    let total_size = response.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(data) => {
-                downloaded += data.len() as u64;
-                bytes.extend_from_slice(&data);
-                if total_size > 0 {
-                    let progress = ((downloaded * 100) / total_size) as u8;
-                    send_log(2, "下载中...", "progress", Some(progress)).await;
-                }
-            }
-            Err(e) => {
-                send_log(2, &format!("下载失败: {}", e), "error", None).await;
-                return;
-            }
-        }
-    }
-
-    send_log(2, "下载完成", "success", None).await;
-
-    // Step 3: Extract
-    send_log(3, "解压文件...", "info", None).await;
-
-    let current_dir = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            send_log(3, &format!("获取目录失败: {}", e), "error", None).await;
-            return;
-        }
-    };
-
-    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut archive = tar::Archive::new(decoder);
-
-    let temp_dir = current_dir.join(".sing-box-upgrade-temp");
-    let _ = fs::remove_dir_all(&temp_dir);
-    if let Err(e) = fs::create_dir_all(&temp_dir) {
-        send_log(3, &format!("创建临时目录失败: {}", e), "error", None).await;
-        return;
-    }
-
-    if let Err(e) = archive.unpack(&temp_dir) {
-        let _ = fs::remove_dir_all(&temp_dir);
-        send_log(3, &format!("解压失败: {}", e), "error", None).await;
-        return;
-    }
-
-    send_log(3, "解压完成", "success", None).await;
-
-    // Step 4: Stop sing-box and replace binary
-    send_log(4, "停止 sing-box...", "info", None).await;
-
-    // Check if sing-box is running and stop it
-    let was_running = {
-        let mut lock = SING_PROCESS.lock().await;
-        if let Some(ref mut proc) = *lock {
-            if proc.child.try_wait().ok().flatten().is_none() {
-                // Process is running, kill it
-                let _ = proc.child.kill().await;
-                let _ = proc.child.wait().await;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    };
-    // Clear the process handle
-    if was_running {
-        let mut lock = SING_PROCESS.lock().await;
-        *lock = None;
-        send_log(4, "sing-box 已停止", "success", None).await;
-    }
-
-    send_log(4, "替换 sing-box...", "info", None).await;
-
-    let sing_box_path = current_dir.join("sing-box");
-    let mut found = false;
-
-    if let Ok(entries) = fs::read_dir(&temp_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let binary_path = path.join("sing-box");
-                if binary_path.exists() {
-                    if let Err(e) = fs::copy(&binary_path, &sing_box_path) {
-                        let _ = fs::remove_dir_all(&temp_dir);
-                        send_log(4, &format!("替换失败: {}", e), "error", None).await;
-                        return;
-                    }
-                    found = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    let _ = fs::remove_dir_all(&temp_dir);
-
-    if !found {
-        send_log(4, "未找到 sing-box 文件", "error", None).await;
-        return;
-    }
-
-    if let Err(e) = fs::set_permissions(&sing_box_path, fs::Permissions::from_mode(0o755)) {
-        send_log(4, &format!("设置权限失败: {}", e), "error", None).await;
-        return;
-    }
-
-    send_log(4, "替换完成", "success", None).await;
-
-    // Step 5: Restart sing-box if it was running
-    if was_running {
-        send_log(5, "重启 sing-box...", "info", None).await;
-        match start_sing_internal(&state.sing_box_home).await {
-            Ok(_) => {
-                send_log(5, "sing-box 已重启", "success", None).await;
-            }
-            Err(e) => {
-                send_log(5, &format!("重启失败: {}", e), "error", None).await;
-                return;
-            }
-        }
-    } else {
-        send_log(5, "sing-box 未运行，跳过重启", "info", None).await;
-    }
-
-    // Step 6: Done
-    send_log(6, &format!("sing-box 已更新到 v{}", version), "success", None).await;
+    let _ = log_tx
+        .send(UpgradeLogEntry {
+            step: 6,
+            total_steps: 6,
+            message,
+            level: level.into(),
+            progress: None,
+        })
+        .await;
 }
 
 /// WebSocket endpoint for gotty upgrade with progress
@@ -4444,6 +4276,7 @@ async fn restart_app(
 async fn start_service(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let _operation = SING_OPERATION_LOCK.lock().await;
     let mut lock = SING_PROCESS.lock().await;
 
     if let Some(ref mut proc) = *lock {
@@ -4477,6 +4310,7 @@ async fn start_service(
 async fn stop_service(
     State(state): State<Arc<AppState>>,
 ) -> Json<ApiResponse<()>> {
+    let _operation = SING_OPERATION_LOCK.lock().await;
     stop_sing_internal().await;
     state.sing_box_pending_restart.store(false, Ordering::Relaxed);
     Json(ApiResponse::success_no_data("sing-box stopped"))
@@ -5295,9 +5129,18 @@ struct ParseSubscriptionRequest {
 
 async fn parse_subscription_handler(
     Json(req): Json<ParseSubscriptionRequest>,
-) -> Json<ApiResponse<Vec<subscription_parser::ShadowsocksOutbound>>> {
+) -> Json<ApiResponse<Vec<serde_json::Value>>> {
     match subscription_parser::parse_subscription(&req.content) {
-        Ok(outbounds) => Json(ApiResponse::success("Parsed successfully", outbounds)),
+        Ok(report) => {
+            let mut message = format!("Parsed {} nodes", report.outbounds.len());
+            for diagnostic in report.diagnostics.iter().take(20) {
+                message.push_str(&format!(
+                    "; line {} [{}]: {}",
+                    diagnostic.line, diagnostic.protocol, diagnostic.message
+                ));
+            }
+            Json(ApiResponse::success(message, report.outbounds))
+        }
         Err(e) => Json(ApiResponse::error(format!("Parse failed: {}", e))),
     }
 }
@@ -6544,6 +6387,7 @@ fn build_subscription_source_response(
 ) -> SubscriptionSourceResponse {
     match &sub.source {
         SubscriptionSource::Url { url } => SubscriptionSourceResponse::Url { url: url.clone() },
+        SubscriptionSource::Content { content } => SubscriptionSourceResponse::Content { content: content.clone() },
     }
 }
 
@@ -6574,14 +6418,28 @@ fn normalize_subscription_name(name: Option<String>) -> Option<String> {
     })
 }
 
-fn validate_subscription_source(input: &SubscriptionSourceInput) -> Result<SubscriptionSource, String> {
+fn validate_subscription_source(
+    input: &SubscriptionSourceInput,
+) -> Result<SubscriptionSource, String> {
     match input {
+        SubscriptionSourceInput::Content { content } => {
+            let content = content.trim();
+            subscription_parser::parse_subscription(content)?;
+            Ok(SubscriptionSource::Content {
+                content: content.to_owned(),
+            })
+        }
         SubscriptionSourceInput::Url { url } => {
             let trimmed = url.trim();
             if trimmed.is_empty() {
                 Err("订阅内容不能为空".to_string())
             } else {
-                Ok(SubscriptionSource::Url { url: trimmed.to_string() })
+                if !is_subscription_download_url(trimmed) {
+                    subscription_parser::parse_subscription(trimmed)?;
+                }
+                Ok(SubscriptionSource::Url {
+                    url: trimmed.to_string(),
+                })
             }
         }
     }
@@ -6735,9 +6593,7 @@ async fn delete_subscription(
         removed
     };
 
-    if let SubscriptionSource::Url { .. } = removed.source {
-        let _ = remove_path_if_exists(&state.subscriptions_root.join(&removed.id)).await;
-    }
+    let _ = remove_path_if_exists(&state.subscriptions_root.join(&removed.id)).await;
 
     if let Err(e) = regenerate_and_restart(state.clone()).await {
         eprintln!("❌ Failed to regenerate and restart: {}", e);
@@ -10093,26 +9949,32 @@ async fn apply_saved_selections(config: &Config) -> Result<(), String> {
 
 /// Regenerate sing-box config without restarting the service.
 async fn regenerate_config(state: Arc<AppState>) -> Result<Config, String> {
+    let _operation = SING_OPERATION_LOCK.lock().await;
+    regenerate_config_locked(state).await
+}
+
+// Caller holds SING_OPERATION_LOCK, shared with installation and service controls.
+async fn regenerate_config_locked(state: Arc<AppState>) -> Result<Config, String> {
     let config_clone = { state.config.lock().await.clone() };
     let loaded = load_subscriptions_and_update_state(&state, &config_clone).await;
-    {
-        let mut node_type_by_tag = state.node_type_by_tag.lock().await;
-        *node_type_by_tag = build_node_type_map(&config_clone, &loaded);
+    if loaded.dir_error.is_some() || loaded.files.iter().any(|file| !file.loaded) {
+        return Err("Subscription loading failed; keeping the previous configuration".into());
     }
-
     gen_config(&config_clone, &state.sing_box_home, &loaded)
         .await
         .map_err(|e| format!("Failed to regenerate config: {}", e))?;
+    *state.node_type_by_tag.lock().await = build_node_type_map(&config_clone, &loaded);
     log_info!("Config regenerated successfully");
     Ok(config_clone)
 }
 
 /// Regenerate sing-box config and restart the service
 async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
-    let config_clone = regenerate_config(state.clone()).await?;
+    let _operation = SING_OPERATION_LOCK.lock().await;
+    let config_clone = regenerate_config_locked(state.clone()).await?;
 
     // Stop and restart sing-box
-    stop_sing_internal().await;
+    stop_sing_internal_and_wait().await;
     sleep(Duration::from_millis(500)).await;
 
     start_sing_internal(&state.sing_box_home)
@@ -10121,6 +9983,29 @@ async fn regenerate_and_restart(state: Arc<AppState>) -> Result<(), String> {
     let _ = apply_saved_selections(&config_clone).await;
     log_info!("sing-box restarted successfully");
     Ok(())
+}
+
+fn merge_subscription_outbound(
+    mut outbound: serde_json::Value,
+    merged: &mut HashMap<String, serde_json::Value>,
+    order: &mut Vec<String>,
+) {
+    let Some(name) = outbound
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
+        return;
+    };
+    let mut tag = name.clone();
+    let mut suffix = 2;
+    while merged.contains_key(&tag) {
+        tag = format!("{} ({})", name, suffix);
+        suffix += 1;
+    }
+    outbound["tag"] = json!(tag);
+    order.push(tag.clone());
+    merged.insert(tag, outbound);
 }
 
 async fn load_subscriptions(
@@ -10143,17 +10028,7 @@ async fn load_subscriptions(
                 }
                 files.extend(loaded.files.clone());
                 for outbound in loaded.outbounds {
-                    let tag = outbound
-                        .get("tag")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let Some(tag) = tag else {
-                        continue;
-                    };
-                    if !merged_by_tag.contains_key(&tag) {
-                        tag_order.push(tag.clone());
-                    }
-                    merged_by_tag.insert(tag, outbound);
+                    merge_subscription_outbound(outbound, &mut merged_by_tag, &mut tag_order);
                 }
                 status_map.insert(
                     sub.id.clone(),
@@ -10309,12 +10184,15 @@ async fn check_and_install_openwrt_dependencies(
     Ok(())
 }
 
-async fn start_sing_internal(
-    sing_box_home: &str,
-) -> Result<(), String> {
+async fn start_sing_internal(sing_box_home: &str) -> Result<(), String> {
     let mut lock = SING_PROCESS.lock().await;
     if let Some(ref mut proc) = *lock {
-        if proc.child.try_wait().map_err(|e| format!("等待进程失败: {}", e))?.is_none() {
+        if proc
+            .child
+            .try_wait()
+            .map_err(|e| format!("等待进程失败: {}", e))?
+            .is_none()
+        {
             return Err("sing-box 正在运行中".to_string());
         }
     }
@@ -10325,7 +10203,7 @@ async fn start_sing_internal(
     // Check if sing-box binary exists
     if !sing_box_path.exists() {
         return Err(format!(
-            "sing-box 二进制文件不存在: {:?}。请重新编译项目: bash ./build.sh",
+            "sing-box 二进制文件不存在: {:?}。请在二进制管理中安装 sing-box",
             sing_box_path
         ));
     }
@@ -10338,6 +10216,8 @@ async fn start_sing_internal(
         ));
     }
 
+    let sing_box_path = fs::canonicalize(&sing_box_path).map_err(|e| e.to_string())?;
+    let config_path = fs::canonicalize(&config_path).map_err(|e| e.to_string())?;
     log_info!("Starting sing-box from: {:?}", sing_box_path);
     log_info!("Using config: {:?}", config_path);
 
@@ -10355,7 +10235,10 @@ async fn start_sing_internal(
 
     // Wait a short moment to check if process exits immediately
     sleep(Duration::from_millis(500)).await;
-    if let Some(exit_status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
+    if let Some(exit_status) = child
+        .try_wait()
+        .map_err(|e| format!("等待进程失败: {}", e))?
+    {
         let code = exit_status.code().unwrap_or(-1);
         // Try to read config for more details
         let config_content = tokio::fs::read_to_string(&config_path).await.ok();
@@ -10385,21 +10268,25 @@ async fn start_sing_internal(
     // Wait for sing-box to fully initialize
     sleep(Duration::from_secs(5)).await;
 
-    // Check if sing-box is actually running by testing the API
+    if !sing_box_running().await {
+        stop_sing_internal_and_wait().await;
+        return Err("sing-box 在初始化期间退出".into());
+    }
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-
-    match client.get("http://127.0.0.1:6262/proxies").send().await {
-        Ok(_) => {
-            log_info!("sing-box started successfully with Clash API available");
-        }
-        Err(e) => {
-            log_warning!("sing-box started but Clash API not responding: {}", e);
-            // Still consider it started, just log the warning
-        }
+    let api_ready = client
+        .get("http://127.0.0.1:6262/proxies")
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success());
+    if !api_ready || !sing_box_running().await {
+        stop_sing_internal_and_wait().await;
+        return Err("sing-box 启动未通过进程和 Clash API 就绪检查".into());
     }
+    log_info!("sing-box started successfully with Clash API available");
 
     Ok(())
 }
@@ -11390,6 +11277,15 @@ async fn gen_config(
     sing_box_home: &str,
     subs: &LoadedSubscriptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    gen_config_with_base(config, sing_box_home, subs, StdPath::new(sing_box_home)).await
+}
+
+async fn gen_config_with_base(
+    config: &Config,
+    sing_box_home: &str,
+    subs: &LoadedSubscriptions,
+    working_dir: &StdPath,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let my_outbounds: Vec<serde_json::Value> = subs.outbounds.clone();
     let my_names: Vec<String> = my_outbounds
         .iter()
@@ -11410,11 +11306,7 @@ async fn gen_config(
     }
     if let Some(outbounds) = sing_box_config["outbounds"][0].get_mut("outbounds") {
         if let Some(arr) = outbounds.as_array_mut() {
-            arr.extend(
-                my_names
-                    .into_iter()
-                    .map(serde_json::Value::String),
-            );
+            arr.extend(my_names.into_iter().map(serde_json::Value::String));
             // Ensure selector has at least one outbound
             if arr.is_empty() {
                 arr.push(serde_json::Value::String("direct".to_string()));
@@ -11451,17 +11343,40 @@ async fn gen_config(
             }
         }
     }
-    let config_output_loc = format!("{}/config.json", sing_box_home);
-    tokio::fs::write(
-        &config_output_loc,
-        serde_json::to_string(&sing_box_config)?,
-    )
-    .await?;
+    let config_dir = PathBuf::from(sing_box_home);
+    let config_output_loc = config_dir.join("config.json");
+    let pending = config_dir.join(format!(".config-{}.json", uuid::Uuid::new_v4()));
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&pending)
+        .await?;
+    if let Err(error) = file.write_all(&serde_json::to_vec(&sing_box_config)?).await {
+        let _ = fs::remove_file(&pending);
+        return Err(error.into());
+    }
+    drop(file);
+    let binary = config_dir.join("sing-box");
+    if binary.exists() {
+        if let Err(error) = singbox::check_config_in(&binary, &pending, working_dir).await {
+            let _ = fs::remove_file(&pending);
+            return Err(error.into());
+        }
+    }
+    if let Err(error) = tokio::fs::rename(&pending, &config_output_loc).await {
+        let _ = fs::remove_file(&pending);
+        return Err(error.into());
+    }
 
     println!(
         "Generated sing-box config with {} outbounds at {}",
-        sing_box_config["outbounds"].as_array().map(|a| a.len()).unwrap_or(0),
-        config_output_loc
+        sing_box_config["outbounds"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        config_output_loc.display()
     );
     Ok(())
 }
@@ -11487,7 +11402,6 @@ fn get_config_template(enable_ipv6: bool) -> serde_json::Value {
         "dns": {
             "final": DEFAULT_DNS_ACTIVE,
             "strategy": "prefer_ipv4",
-            "independent_cache": true,
             "servers": [
                 {"type": "udp", "tag": "dns-direct", "server": "223.5.5.5", "server_port": 53},
                 {
@@ -11515,7 +11429,7 @@ fn get_config_template(enable_ipv6: bool) -> serde_json::Value {
             ]
         },
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": tun_addresses, "mtu": 1400, "auto_route": true, "strict_route": true, "stack": "system", "sniff": true, "sniff_override_destination": false },
+            {"type": "tun", "tag": "tun-in", "interface_name": "sing-tun", "address": tun_addresses, "mtu": 1400, "auto_route": true, "strict_route": true, "stack": "system" },
             {"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080}
         ],
         "outbounds": [
@@ -11540,145 +11454,11 @@ fn get_config_template(enable_ipv6: bool) -> serde_json::Value {
     })
 }
 
-fn parse_subscription_text(
-    text: &str,
-) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
-    // Try parsing as JSON first (sing-box format)
-    if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(text) {
-        if let Some(outbounds_arr) = json_obj.get("outbounds").and_then(|o| o.as_array()) {
-            log_info!("Detected sing-box JSON format subscription");
-            return parse_singbox_json(outbounds_arr);
-        }
-    }
-
-    // Try parsing as Shadowsocks URL list (base64 encoded)
-    if let Some(ss_result) = try_parse_ss_urls(text) {
-        log_info!("Detected Shadowsocks URL format subscription");
-        return ss_result;
-    }
-
-    // Fall back to YAML parsing (Clash format)
-    log_info!("Parsing as Clash YAML format");
-    let clash_obj: serde_yaml::Value = serde_yaml::from_str(text)?;
-    let proxies = clash_obj
-        .get("proxies")
-        .and_then(|p| p.as_sequence())
-        .unwrap_or(&vec![])
-        .clone();
-
-    let nodes: Vec<serde_yaml::Value> = proxies.into_iter().collect();
-    let mut node_names = vec![];
-    let mut outbounds = vec![];
-
-    for node in nodes {
-        let typ = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let name = node.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        match typ {
-            "hysteria2" => {
-                let hysteria2 = Hysteria2 {
-                    outbound_type: "hysteria2".to_string(),
-                    tag: name.to_string(),
-                    server: node
-                        .get("server")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
-                    password: node
-                        .get("password")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    up_mbps: 40,
-                    down_mbps: 350,
-                    tls: Tls {
-                        enabled: true,
-                        server_name: node
-                            .get("sni")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.to_string()),
-                        insecure: true,
-                    },
-                };
-                node_names.push(name.to_string());
-                outbounds.push(serde_json::to_value(hysteria2)?);
-            }
-            "anytls" => {
-                let anytls = AnyTls {
-                    outbound_type: "anytls".to_string(),
-                    tag: name.to_string(),
-                    server: node
-                        .get("server")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
-                    password: node
-                        .get("password")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    tls: Tls {
-                        enabled: true,
-                        server_name: node
-                            .get("sni")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.to_string()),
-                        insecure: node
-                            .get("skip-cert-verify")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                    },
-                };
-                node_names.push(name.to_string());
-                outbounds.push(serde_json::to_value(anytls)?);
-            }
-            "ss" => {
-                let plugin = node.get("plugin").and_then(|p| p.as_str());
-                if plugin.is_some() {
-                    log_warning!("Skipping Clash SS node '{}': plugin '{}' not supported (requires external binary)", name, plugin.unwrap_or("unknown"));
-                    continue;
-                }
-                let method = node
-                    .get("cipher")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
-                if method.is_empty() {
-                    log_warning!("Skipping Clash SS node '{}': missing cipher", name);
-                    continue;
-                }
-                let ss = Shadowsocks {
-                    outbound_type: "shadowsocks".to_string(),
-                    tag: name.to_string(),
-                    server: node
-                        .get("server")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    server_port: node.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16,
-                    method: method.to_string(),
-                    password: node
-                        .get("password")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    plugin: None,
-                    plugin_opts: None,
-                };
-                node_names.push(name.to_string());
-                outbounds.push(serde_json::to_value(ss)?);
-            }
-            _ => {}
-        }
-    }
-    Ok((node_names, outbounds))
-}
-
 async fn load_subscription_file(
     path: &StdPath,
-) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
-    let text = tokio::fs::read_to_string(path).await?;
-    parse_subscription_text(&text)
+) -> Result<subscription_parser::ParseReport, String> {
+    let text = tokio::fs::read_to_string(path).await.map_err(|e| e.to_string())?;
+    subscription_parser::parse_subscription(&text)
 }
 
 async fn load_subscription_dir(sub_dir: &StdPath, subscription_id: Option<&str>) -> LoadedSubscriptions {
@@ -11721,26 +11501,17 @@ async fn load_subscription_dir(sub_dir: &StdPath, subscription_id: Option<&str>)
 
     for (file_name, path) in file_paths {
         match load_subscription_file(&path).await {
-            Ok((_node_names, outbounds)) => {
-                let node_count = outbounds.len();
-                for outbound in outbounds {
-                    let tag = outbound
-                        .get("tag")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let Some(tag) = tag else {
-                        continue;
-                    };
-                    if !merged_by_tag.contains_key(&tag) {
-                        tag_order.push(tag.clone());
-                    }
-                    merged_by_tag.insert(tag, outbound);
+            Ok(report) => {
+                let node_count = report.outbounds.len();
+                for outbound in report.outbounds {
+                    merge_subscription_outbound(outbound, &mut merged_by_tag, &mut tag_order);
                 }
                 file_statuses.push(SubFileStatus {
                     file_name,
                     file_path: path.display().to_string(),
                     loaded: true,
                     node_count,
+                    diagnostics: report.diagnostics,
                     subscription_id: subscription_id.map(|value| value.to_string()),
                     error: None,
                 });
@@ -11751,6 +11522,7 @@ async fn load_subscription_dir(sub_dir: &StdPath, subscription_id: Option<&str>)
                     file_path: path.display().to_string(),
                     loaded: false,
                     node_count: 0,
+                    diagnostics: vec![],
                     subscription_id: subscription_id.map(|value| value.to_string()),
                     error: Some(e.to_string()),
                 });
@@ -11769,268 +11541,6 @@ async fn load_subscription_dir(sub_dir: &StdPath, subscription_id: Option<&str>)
         outbounds,
         dir_error,
     }
-}
-
-/// Parse sing-box JSON format subscription
-fn parse_singbox_json(
-    outbounds: &Vec<serde_json::Value>,
-) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
-    let mut node_names = vec![];
-    let mut result_outbounds = vec![];
-
-    // Filter out non-proxy outbounds (selector, urltest, direct, etc.)
-    let proxy_types = ["hysteria2", "vmess", "vless", "trojan", "shadowsocks", "ss"];
-
-    for outbound in outbounds {
-        let typ = outbound.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let tag = outbound.get("tag").and_then(|t| t.as_str()).unwrap_or("");
-
-        if !proxy_types.contains(&typ) {
-            continue;
-        }
-
-        match typ {
-            "hysteria2" => {
-                // Extract hysteria2 node and convert to our format
-                let server = outbound.get("server").and_then(|s| s.as_str()).unwrap_or("");
-                let password = outbound.get("password").and_then(|p| p.as_str()).unwrap_or("");
-                let server_port = outbound.get("server_port").and_then(|p| p.as_u64()).unwrap_or(443) as u16;
-
-                let tls = outbound.get("tls");
-                let server_name = tls
-                    .and_then(|t| t.get("server_name"))
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-
-                let hysteria2 = Hysteria2 {
-                    outbound_type: "hysteria2".to_string(),
-                    tag: tag.to_string(),
-                    server: server.to_string(),
-                    server_port,
-                    password: password.to_string(),
-                    up_mbps: 40,
-                    down_mbps: 350,
-                    tls: Tls {
-                        enabled: true,
-                        server_name,
-                        insecure: true,
-                    },
-                };
-
-                node_names.push(tag.to_string());
-                result_outbounds.push(serde_json::to_value(hysteria2)?);
-            }
-            _ => {
-                // For other types, use the outbound as-is
-                // But skip if it's missing required fields
-                if tag.is_empty() {
-                    log_warning!("Skipping {} outbound with empty tag: {:?}", typ, outbound);
-                    continue;
-                }
-
-                log_info!("Parsed {} node: {}", typ, tag);
-                node_names.push(tag.to_string());
-                result_outbounds.push(outbound.clone());
-            }
-        }
-    }
-
-    log_info!("Parsed {} nodes from sing-box JSON", node_names.len());
-    Ok((node_names, result_outbounds))
-}
-
-/// Try to detect if the text is base64 encoded SS URLs
-fn try_parse_ss_urls(text: &str) -> Option<Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>>> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // First check if it's already decoded SS URLs
-    if trimmed.contains("ss://") {
-        return Some(parse_ss_url_list(trimmed));
-    }
-
-    // Try to decode as base64
-    match base64_decode(trimmed) {
-        Ok(decoded) => {
-            let decoded_str = String::from_utf8_lossy(&decoded);
-            // Check if decoded content contains ss:// URLs
-            if decoded_str.contains("ss://") {
-                Some(parse_ss_url_list(&decoded_str))
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    }
-}
-
-/// Base64 decode helper
-fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    // Remove all whitespace (newlines, spaces, etc.)
-    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    // Handle URL-safe base64 as well, use NO_PAD to handle missing padding
-    if cleaned.contains('_') || cleaned.contains('-') {
-        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &cleaned)
-    } else {
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &cleaned)
-    }
-}
-
-/// Parse a list of SS URLs (base64 decoded content)
-fn parse_ss_url_list(content: &str) -> Result<(Vec<String>, Vec<serde_json::Value>), Box<dyn std::error::Error + Send + Sync>> {
-    let mut node_names = vec![];
-    let mut outbounds = vec![];
-
-    // Split by newlines and parse each SS URL
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || !line.starts_with("ss://") {
-            continue;
-        }
-
-        if let Some((name, ss)) = parse_single_ss_url(line) {
-            node_names.push(name.clone());
-            outbounds.push(ss);
-        }
-    }
-
-    log_info!("Parsed {} nodes from Shadowsocks URLs", node_names.len());
-    Ok((node_names, outbounds))
-}
-
-/// Parse a single SS URL
-/// Format: ss://BASE64(method:password)@server:port#name
-/// Or with plugin: ss://BASE64(method:password)@server:port?plugin=xxx#name
-fn parse_single_ss_url(url: &str) -> Option<(String, serde_json::Value)> {
-    // Remove the ss:// prefix
-    let url = url.strip_prefix("ss://")?;
-
-    // Find the fragment (#) for the name
-    let (url_part, name) = match url.rsplit_once('#') {
-        Some((u, n)) => (u, url_decode(n)),
-        None => (url, String::new()),
-    };
-
-    // Find the @ sign separating userinfo from server:port
-    let (userinfo, server_part) = match url_part.split_once('@') {
-        Some((u, s)) => (u, s),
-        None => {
-            log_warning!("Failed to parse SS URL (no @ found): {}", url);
-            return None;
-        }
-    };
-
-    // Split server_part by ? to separate server:port from query params
-    let (server_port_part, query_part) = match server_part.split_once('?') {
-        Some((sp, q)) => (sp.trim_end_matches('/'), Some(q)),
-        None => (server_part, None),
-    };
-
-    // Parse server:port
-    let (server, port) = match server_port_part.rsplit_once(':') {
-        Some((s, p)) => match p.parse::<u16>() {
-            Ok(port) => (s, port),
-            Err(_) => {
-                log_warning!("Failed to parse port in SS URL: {}", p);
-                return None;
-            }
-        },
-        None => {
-            log_warning!("Failed to parse server:port in SS URL: {}", server_port_part);
-            return None;
-        }
-    };
-
-    // Decode userinfo (method:password)
-    let decoded_userinfo = match base64_decode(userinfo) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(e) => {
-            log_warning!("Failed to decode userinfo in SS URL: {:?}", e);
-            return None;
-        }
-    };
-
-    let (method, password) = match decoded_userinfo.split_once(':') {
-        Some((m, p)) => (m.to_string(), p.to_string()),
-        None => {
-            // Handle case where password contains ':'
-            let parts: Vec<&str> = decoded_userinfo.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                (parts[0].to_string(), parts[1].to_string())
-            } else {
-                return None;
-            }
-        }
-    };
-
-    // Parse plugin parameters if present
-    let (plugin, plugin_opts) = if let Some(query) = query_part {
-        parse_ss_plugin_params(query)
-    } else {
-        (None, None)
-    };
-
-    // Strip unsupported plugins (obfs-local requires external binary not available)
-    let (plugin, plugin_opts) = if let Some(ref p) = plugin {
-        if p == "obfs-local" {
-            let node_name = if name.is_empty() { format!("{}:{}", server, port) } else { name.clone() };
-            log_warning!("SS node '{}': stripping unsupported plugin 'obfs-local' (simple-obfs requires external binary)", node_name);
-            (None, None)
-        } else {
-            (plugin, plugin_opts)
-        }
-    } else {
-        (plugin, plugin_opts)
-    };
-
-    // Create shadowsocks outbound
-    let ss = Shadowsocks {
-        outbound_type: "shadowsocks".to_string(),
-        tag: if name.is_empty() { format!("{}:{}", server, port) } else { name },
-        server: server.to_string(),
-        server_port: port,
-        method,
-        password,
-        plugin,
-        plugin_opts,
-    };
-
-    Some((ss.tag.clone(), serde_json::to_value(ss).ok()?))
-}
-
-/// URL decode helper - handles UTF-8 multi-byte sequences (including emoji)
-fn url_decode(input: &str) -> String {
-    percent_encoding::percent_decode_str(input)
-        .decode_utf8()
-        .unwrap_or_else(|_| input.to_string().into())
-        .into_owned()
-}
-
-/// Parse SS plugin parameters from query string
-/// Example: plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dexample.com
-fn parse_ss_plugin_params(query: &str) -> (Option<String>, Option<String>) {
-    for param in query.split('&') {
-        if let Some(value) = param.strip_prefix("plugin=") {
-            let decoded = url_decode(value);
-            let parts: Vec<&str> = decoded.split(';').collect();
-            if parts.is_empty() {
-                continue;
-            }
-            let plugin = match parts[0] {
-                "simple-obfs" => "obfs-local",
-                other => other,
-            };
-            let opts = if parts.len() > 1 {
-                Some(parts[1..].join(";"))
-            } else {
-                None
-            };
-            return (Some(plugin.to_string()), opts);
-        }
-    }
-    (None, None)
 }
 
 // ============================================================================
@@ -12154,36 +11664,66 @@ async fn sync_git_repo(repo: &str, target: &StdPath) -> Result<(), String> {
     ))
 }
 
+fn is_subscription_download_url(text: &str) -> bool {
+    !text.contains('\n')
+        && !subscription_parser::is_encoded_http_proxy_uri(text)
+        && (text.starts_with("http://") || text.starts_with("https://"))
+}
+
 async fn fetch_subscription_url(url: &str, dest_dir: &StdPath) -> Result<PathBuf, String> {
     tokio::fs::create_dir_all(dest_dir)
         .await
         .map_err(|e| format!("Failed to create dir {}: {}", dest_dir.display(), e))?;
 
-    let target = dest_dir.join("subscription.yaml");
-
-    // Check if it's a URL or direct content
-    if url.starts_with("http://") || url.starts_with("https://") {
+    // Distinguish download URLs from proxy links before performing any network request.
+    let content = if is_subscription_download_url(url) {
         // Download from URL
         let resp = reqwest::get(url)
             .await
-            .map_err(|e| format!("Failed to fetch {}: {}", url, e))?;
+            .map_err(|_| "Failed to fetch subscription URL".to_string())?;
         if !resp.status().is_success() {
-            return Err(format!("Failed to fetch {}: {}", url, resp.status()));
+            return Err(format!(
+                "Failed to fetch subscription: HTTP {}",
+                resp.status()
+            ));
         }
         let bytes = resp
             .bytes()
             .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
-        tokio::fs::write(&target, bytes)
-            .await
-            .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
+        bytes.to_vec()
     } else {
-        // Direct content (will be decoded by try_parse_ss_urls if needed)
-        tokio::fs::write(&target, url.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
-    }
+        url.as_bytes().to_vec()
+    };
+    save_subscription_content(&content, dest_dir).await
+}
 
+async fn save_subscription_content(content: &[u8], dest_dir: &StdPath) -> Result<PathBuf, String> {
+    let text = std::str::from_utf8(content).map_err(|_| "Subscription is not UTF-8".to_string())?;
+    subscription_parser::parse_subscription(text)?;
+    tokio::fs::create_dir_all(dest_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let target = dest_dir.join("subscription.yaml");
+    let pending = dest_dir.join(format!(".subscription-{}", uuid::Uuid::new_v4()));
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&pending)
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = async {
+        file.write_all(content).await?;
+        drop(file);
+        tokio::fs::rename(&pending, &target).await
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = fs::remove_file(&pending);
+        return Err(format!("Failed to save subscription: {}", error));
+    }
     Ok(target)
 }
 
@@ -12192,6 +11732,11 @@ async fn prepare_subscription_dir(
     root: &StdPath,
 ) -> Result<PathBuf, String> {
     match &sub.source {
+        SubscriptionSource::Content { content } => {
+            let dir = root.join(&sub.id);
+            save_subscription_content(content.as_bytes(), &dir).await?;
+            Ok(dir)
+        }
         SubscriptionSource::Url { url } => {
             let dir = root.join(&sub.id);
             let _ = fetch_subscription_url(url, &dir).await?;
@@ -12654,4 +12199,201 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod subscription_integration_tests {
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("miao-subscription-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn api_keeps_array_shape_and_reports_partial_failures() {
+        let response = parse_subscription_handler(Json(ParseSubscriptionRequest {
+            content: "socks5://p.example:443#ok\nunsupported://secret@p.example:443".into(),
+        }))
+        .await
+        .0;
+        assert!(response.success);
+        assert_eq!(response.data.unwrap().len(), 1);
+        assert!(response.message.contains("line 2"));
+        assert!(!response.message.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn direct_https_proxy_is_saved_without_fetch_and_invalid_input_preserves_file() {
+        let dir = temp_dir();
+        let content = "https://dXNlcjpwYXNzQHAuZXhhbXBsZTo0NDMvI3Byb3h5";
+        let path = fetch_subscription_url(content, &dir).await.unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        assert!(fetch_subscription_url("not-a-subscription", &dir)
+            .await
+            .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        assert!(is_subscription_download_url(
+            "https://provider.example/subscription?token=secret"
+        ));
+        assert!(validate_subscription_source(&SubscriptionSourceInput::Url {
+            url: "invalid".into()
+        })
+        .is_err());
+        assert!(is_subscription_download_url(
+            "https://user:pass@provider.example/subscription"
+        ));
+        let request: SubscriptionUpsertRequest =
+            serde_json::from_str(r#"{"name":"manual","content":"https://p.example:443/#node"}"#)
+                .unwrap();
+        let source = validate_subscription_source(&request.source).unwrap();
+        let sub = SubscriptionConfig {
+            id: "manual".into(),
+            name: None,
+            enabled: true,
+            source,
+        };
+        let saved_dir = prepare_subscription_dir(&sub, &dir).await.unwrap();
+        let report = load_subscription_file(&saved_dir.join("subscription.yaml"))
+            .await
+            .unwrap();
+        assert_eq!(report.outbounds[0]["type"], "http");
+        assert_eq!(
+            fs::metadata(saved_dir.join("subscription.yaml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn multiple_sources_preserve_nodes_with_duplicate_names() {
+        let mut merged = HashMap::new();
+        let mut order = vec![];
+        for name in ["A", "A", "A (2)"] {
+            merge_subscription_outbound(
+                json!({"tag": name, "type": "socks"}),
+                &mut merged,
+                &mut order,
+            );
+        }
+        assert_eq!(order, ["A", "A (2)", "A (2) (2)"]);
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn template_uses_supported_sniff_action_and_dns_fields() {
+        for ipv6 in [false, true] {
+            let config = get_config_template(ipv6);
+            assert!(config["dns"].get("independent_cache").is_none());
+            assert!(config["inbounds"][0].get("sniff").is_none());
+            assert!(config["inbounds"][0]
+                .get("sniff_override_destination")
+                .is_none());
+            assert_eq!(config["route"]["rules"][0]["action"], "sniff");
+        }
+    }
+
+    // Explicit opt-in: native check only; never starts TUN, opens proxy connections or alters a service.
+    #[tokio::test]
+    #[ignore = "requires MIAO_TEST_SING_BOX and optionally MIAO_TEST_SUBSCRIPTION"]
+    async fn native_core_validates_generated_config() {
+        let core =
+            fs::canonicalize(std::env::var("MIAO_TEST_SING_BOX").expect("MIAO_TEST_SING_BOX"))
+                .unwrap();
+        let version = singbox::version_info(&core).await.unwrap();
+        assert_eq!(version.version, singbox::release().version);
+        assert!(version.tags.iter().any(|tag| tag == "with_quic"));
+        let input = std::env::var("MIAO_TEST_SUBSCRIPTION")
+            .map(|p| fs::read_to_string(p).unwrap())
+            .unwrap_or_else(|_| include_str!("../tests/fixtures/mixed-subscription.txt").into());
+        let mut report = subscription_parser::parse_subscription(&input).unwrap();
+        let optional_parameters = concat!(
+            "ss://YWVzLTEyOC1nY206cGFzcw==@p.example:443?plugin=simple-obfs%3Bobfs%3Dhttp#test-ss-obfs\n",
+            "ss://YWVzLTEyOC1nY206cGFzcw==@p.example:443?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Bhost%3Dp.example#test-ss-v2ray\n",
+            "https://user:pass@p.example:443?sni=p.example&alpn=h2,http/1.1#test-https\n",
+            "tuic://00000000-0000-4000-8000-000000000001:pass@p.example:443?udp_relay_mode=quic&zero_rtt_handshake=true&heartbeat=10s#test-tuic\n",
+            "hy2://user:pass@p.example:443?obfs=salamander&obfs-password=pass&upmbps=100&downmbps=200#test-hy2\n",
+            "vless://00000000-0000-4000-8000-000000000001@p.example:443?security=tls&type=ws&host=cdn.example&path=%2Fws&fp=chrome#test-ws\n",
+            "vless://00000000-0000-4000-8000-000000000001@p.example:443?security=tls&type=grpc&serviceName=tunnel#test-grpc"
+        );
+        report.outbounds.extend(
+            subscription_parser::parse_subscription(optional_parameters)
+                .unwrap()
+                .outbounds,
+        );
+
+        for ipv6 in [false, true] {
+            let dir = temp_dir();
+            std::os::unix::fs::symlink(&core, dir.join("sing-box")).unwrap();
+            let mut config: Config = serde_json::from_str("{}").unwrap();
+            config.enable_ipv6_tun = Some(ipv6);
+            let loaded = LoadedSubscriptions {
+                files: vec![],
+                node_names: vec![],
+                outbounds: report.outbounds.clone(),
+                dir_error: None,
+            };
+            gen_config(&config, dir.to_str().unwrap(), &loaded)
+                .await
+                .unwrap();
+            let generated: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("config.json")).unwrap()).unwrap();
+            assert_eq!(
+                generated["outbounds"].as_array().unwrap().len(),
+                report.outbounds.len() + 3
+            );
+            assert_eq!(
+                fs::metadata(dir.join("config.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn core_exit_during_initialization_is_a_start_failure() {
+        let _operation = SING_OPERATION_LOCK.lock().await;
+        let dir = temp_dir();
+        fs::write(dir.join("sing-box"), "#!/bin/sh\nsleep 1\nexit 1\n").unwrap();
+        fs::set_permissions(dir.join("sing-box"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("config.json"), "{}").unwrap();
+        assert!(start_sing_internal(dir.to_str().unwrap()).await.is_err());
+        assert!(!sing_box_running().await);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_generated_config_keeps_previous_config() {
+        let dir = temp_dir();
+        let binary = dir.join("sing-box");
+        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("config.json"), "previous-config").unwrap();
+        let config: Config = serde_json::from_str("{}").unwrap();
+        let loaded = LoadedSubscriptions {
+            files: vec![],
+            node_names: vec![],
+            outbounds: vec![],
+            dir_error: None,
+        };
+        assert!(gen_config(&config, dir.to_str().unwrap(), &loaded)
+            .await
+            .is_err());
+        assert_eq!(
+            fs::read_to_string(dir.join("config.json")).unwrap(),
+            "previous-config"
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
